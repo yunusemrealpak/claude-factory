@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# The harness version this install ships. A project records it in
+# .factory/config.json as factory_version, which is how factory-upgrade knows
+# a project was set up by an older factory.
+exec cat "$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" && pwd)/factory-version.txt"

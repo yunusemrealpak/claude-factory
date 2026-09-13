@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# The factory's own test suite. Sandboxes only; touches no project.
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/../tests" && pwd)/run-all.sh" "$@"

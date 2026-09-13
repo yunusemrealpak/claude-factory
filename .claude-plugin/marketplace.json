@@ -1,0 +1,15 @@
+{
+  "name": "claude-factory",
+  "description": "An agentic production line for Claude Code: a task board, a gate nothing reaches done without, one local commit per task, and a live dashboard of what the team is doing.",
+  "owner": {
+    "name": "yunusemrealpak",
+    "url": "https://github.com/yunusemrealpak"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": "./plugins/factory",
+      "description": "An agentic production line for Claude Code: a task board, a verify gate nothing reaches done without, one local commit per task, and a live dashboard of what the team is doing."
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "factory",
+  "displayName": "Factory",
+  "version": "2.2.0",
+  "description": "An agentic production line for Claude Code: a task board, a verify gate nothing reaches done without, one local commit per task, and a live dashboard of what the team is doing.",
+  "author": { "name": "yunusemrealpak", "url": "https://github.com/yunusemrealpak" },
+  "homepage": "https://github.com/yunusemrealpak/claude-factory",
+  "repository": "https://github.com/yunusemrealpak/claude-factory",
+  "license": "MIT",
+  "keywords": ["workflow", "agents", "tasks", "quality-gate", "tdd", "automation"]
+}

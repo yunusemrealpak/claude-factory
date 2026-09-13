@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Thin wrapper so the toolkit is callable by name from any directory: the
+# plugin's bin/ is on the Bash tool's PATH while the plugin is enabled.
+exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/../hooks" && pwd)/factory-claim.sh" "$@"

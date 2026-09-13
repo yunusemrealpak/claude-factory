@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  selftest:
+    # The suites build throwaway git repositories, boards and gates, and run the
+    # real hooks against them. macOS is the reference platform: the scripts are
+    # written for bash 3.2 and BSD userland, which is the strictest case.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version stamp matches the manifest
+        run: |
+          manifest="$(jq -r .version plugins/factory/.claude-plugin/plugin.json)"
+          stamp="$(awk '{print $1}' plugins/factory/hooks/factory-version.txt)"
+          echo "manifest=$manifest stamp=$stamp"
+          [ "$manifest" = "${stamp}.0" ] || { echo "plugin.json version and factory-version.txt disagree"; exit 1; }
+      - name: Shell syntax
+        run: |
+          for f in plugins/factory/hooks/*.sh plugins/factory/bin/* plugins/factory/tests/*.sh plugins/factory/statusline/*.sh; do
+            bash -n "$f" || exit 1
+          done
+          python3 -c "import ast,sys; ast.parse(open('plugins/factory/hooks/factory-compact.py').read())"
+      - name: JSON is valid
+        run: |
+          jq -e . .claude-plugin/marketplace.json > /dev/null
+          jq -e . plugins/factory/.claude-plugin/plugin.json > /dev/null
+          jq -e . plugins/factory/hooks/hooks.json > /dev/null
+      - name: Factory self-test
+        run: bash plugins/factory/tests/run-all.sh
