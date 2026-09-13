@@ -85,11 +85,19 @@ scripts, not model reasoning.
 A plugin cannot install a status line for you, so this one is a file you point your
 settings at. In `~/.claude/settings.json`:
 
+Copy the script somewhere stable and point at that — a plugin's install directory
+is versioned and moves on every update:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yunusemrealpak/claude-factory/main/plugins/factory/statusline/factory-statusline.sh \
+  -o ~/.claude/factory-statusline.sh
+```
+
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "bash ~/.claude/plugins/cache/claude-factory/factory/*/statusline/factory-statusline.sh",
+    "command": "bash ~/.claude/factory-statusline.sh",
     "refreshInterval": 30
   }
 }
