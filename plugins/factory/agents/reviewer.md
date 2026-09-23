@@ -53,8 +53,13 @@ ran build, tests, architecture rules and lint.
    - Tests: do they exist, do they actually assert the behaviour, do they pass?
    - Obvious correctness risks: error paths, null/empty cases, concurrency,
      resource leaks.
-4. Run the acceptance command and `bash gates/verify.sh <task-id>` yourself. Quote
-   the output.
+4. Do not run `gates/verify.sh` or `factory-check` again. On a red gate the
+   failing output is already in the task file, and a second run on the same tree
+   records the same failure signature again - the gate then reads it as a task
+   that made no progress and blocks it before anyone has acted on your findings.
+   On a green gate there is nothing a rerun would add. If you need to see
+   behaviour, run the task's acceptance command or the one failing test, and
+   quote the output.
 5. Append to the task file:
 
    ```

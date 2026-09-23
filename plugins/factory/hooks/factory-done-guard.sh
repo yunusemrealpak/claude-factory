@@ -61,11 +61,12 @@ case "$tool_name" in
     # Join backslash continuations first, so a move written across two lines is
     # still one line by the time it is examined.
     payload="$(printf '%s\n' "$payload" | sed -e :a -e '/\\$/N; s/\\\n//; ta')"
-    # Only an invocation counts as a claim - "bash <path>/factory-claim.sh" at
-    # the start of a command - so reading, grepping or editing the script from a
-    # factory project does not quietly make that session the run owner.
+    # Only an invocation counts as a claim - "factory-claim" (the plugin's bin
+    # wrapper, the way /factory:run spells it) or "bash <path>/factory-claim.sh"
+    # at the start of a command - so reading, grepping or editing the script from
+    # a factory project does not quietly make that session the run owner.
     claim="$(printf '%s\n' "$payload" \
-      | grep -E '(^|[;&|(])[[:space:]]*(bash|sh)[[:space:]]+[^[:space:];&|]*factory-claim\.sh([[:space:];&|)]|$)' \
+      | grep -E '(^|[;&|(])[[:space:]]*((bash|sh)[[:space:]]+[^[:space:];&|]*factory-claim\.sh|factory-claim)([[:space:];&|)]|$)' \
       | head -1)"
     [ -n "$claim" ] && stage_claim "$claim"
     # A move is a single command. Only a line where a moving verb and the done

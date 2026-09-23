@@ -12,6 +12,7 @@
 #   3  event log, dashboard, question inbox, status line, end-of-run message
 #   4  duplicate-gate skip, task lint, ready set
 #   5  change-level acceptance, commit bisect, the version/upgrade check
+#   6  the fast lane: factory-check, plan, start/land/block, /factory:fast scheduling
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
@@ -29,7 +30,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5; do
+for n in 1 2 3 4 5 6; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"

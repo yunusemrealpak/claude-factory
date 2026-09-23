@@ -6,7 +6,7 @@
 # Contract (verified against https://code.claude.com/docs/en/hooks):
 #   - common input : .session_id, .cwd, .transcript_path, .hook_event_name
 #   - SubagentStart/SubagentStop add .agent_type and .agent_id
-#   - PostToolUse adds .tool_name, .tool_input, .tool_use_id, .tool_output
+#   - PostToolUse adds .tool_name, .tool_input, .tool_use_id, .tool_response
 #   - nothing is returned: this hook observes, it never decides.
 #
 # It appends one JSON line per event to .factory/events.jsonl and then rebuilds
@@ -70,16 +70,24 @@ case "$event" in
     [ "$tool" = "Bash" ] || exit 0
     cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
     [ -n "$cmd" ] || exit 0
-    out="$(printf '%s' "$input" | jq -r '.tool_output // empty | if type=="string" then . else tojson end' 2>/dev/null)"
+    # The result is .tool_response - for Bash an object carrying stdout and
+    # stderr (the gate prints its verdict on stderr). .tool_output is what older
+    # payloads were assumed to carry; it is read only as a fallback.
+    out="$(printf '%s' "$input" | jq -r '(.tool_response // .tool_output // empty)
+      | if type=="string" then .
+        elif type=="object" and (has("stdout") or has("stderr")) then ((.stdout // "") + "\n" + (.stderr // ""))
+        else tojson end' 2>/dev/null)"
 
     # The gate. Its task id is in the command and its verdict in the output.
-    id="$(printf '%s' "$cmd" | sed -n -E 's#.*verify\.sh[[:space:]]+([A-Za-z0-9._-]+).*#\1#p' | head -1)"
+    # factory-check is the fast lane's gate and says CHECK RESULT instead.
+    id="$(printf '%s' "$cmd" | sed -n -E 's#.*(verify\.sh|factory-check(\.py)?)[[:space:]]+([A-Za-z0-9._][A-Za-z0-9._-]*).*#\3#p' | head -1)"
+    [ "$id" = "affected" ] && id=""   # an inspection, not a check
     if [ -n "$id" ]; then
       verdict=unknown
       case "$out" in
-        *"NO PROGRESS"*)            verdict=no-progress ;;
-        *"GATE RESULT: GREEN"*)     verdict=green ;;
-        *"GATE RESULT: RED"*)       verdict=red ;;
+        *"NO PROGRESS"*)                                   verdict=no-progress ;;
+        *"GATE RESULT: GREEN"*|*"CHECK RESULT: GREEN"*)    verdict=green ;;
+        *"GATE RESULT: RED"*|*"CHECK RESULT: RED"*)        verdict=red ;;
       esac
       emit gate --argjson extra "$(jq -cn --arg id "$id" --arg v "$verdict" '{task: $id, verdict: $v}')"
     fi
@@ -94,25 +102,25 @@ case "$event" in
     }
 
     case "$cmd" in
-      *factory-commit.sh*)
-        id="$(printf '%s' "$cmd" | sed -n -E 's#.*factory-commit\.sh[[:space:]]+([A-Za-z0-9._-]+).*#\1#p' | head -1)"
+      *factory-commit*)
+        id="$(printf '%s' "$cmd" | sed -n -E 's#.*factory-commit(\.sh)?[[:space:]]+([A-Za-z0-9._-]+).*#\2#p' | head -1)"
         sha="$(printf '%s' "$out" | sed -n -E 's#^COMMIT ([0-9a-f]+) .*#\1#p' | head -1)"
         [ -n "$id" ] && emit commit --argjson extra "$(jq -cn --arg id "$id" --arg s "${sha:-none}" '{task: $id, sha: $s}')"
         ;;
-      *factory-risk.sh*)
-        id="$(printf '%s' "$cmd" | sed -n -E 's#.*factory-risk\.sh[[:space:]]+([A-Za-z0-9._-]+).*#\1#p' | head -1)"
+      *factory-risk*)
+        id="$(printf '%s' "$cmd" | sed -n -E 's#.*factory-risk(\.sh)?[[:space:]]+([A-Za-z0-9._-]+).*#\2#p' | head -1)"
         hit=no
         case "$out" in *"review before commit"*) hit=yes ;; esac
         [ -n "$id" ] && emit risk --argjson extra "$(jq -cn --arg id "$id" --arg h "$hit" '{task: $id, review_needed: $h}')"
         ;;
-      *factory-change.sh*open*)
+      *factory-change*open*)
         ch="$(printf '%s' "$out" | sed -n -E 's#^OPENED ([^:]+):.*#\1#p' | head -1)"
         [ -n "$ch" ] && emit change_open --argjson extra "$(jq -cn --arg c "$ch" '{change: $c}')"
         ;;
-      *factory-claim.sh*)
+      *factory-claim*)
         case "$out" in *CLAIMED*) emit claim --argjson extra '{}' ;; esac
         ;;
-      *factory-ask.sh*)
+      *factory-ask*)
         q="$(printf '%s' "$out" | sed -n -E 's#^ASKED ([A-Za-z0-9-]+).*#\1#p' | head -1)"
         [ -n "$q" ] && emit question --argjson extra "$(jq -cn --arg q "$q" '{question: $q}')"
         ;;

@@ -85,7 +85,7 @@ sets (adapt to what the repo actually uses, do not assume):
 | Stack | build | test | lint |
 | --- | --- | --- | --- |
 | .NET | `dotnet build -warnaserror` | `dotnet test` | `dotnet format --verify-no-changes` |
-| Flutter | `flutter build apk --debug` or `flutter analyze` | `flutter test` | `dart format --set-exit-if-changed .` |
+| Flutter | `flutter analyze` (an APK build belongs in CI, not in every gate run) | `flutter test` | `dart format --set-exit-if-changed .` |
 | Node/TS | `npm run build` | `npm test` | `npm run lint` |
 | Go | `go build ./...` | `go test ./...` | `golangci-lint run` |
 | Python | `python -m compileall -q .` | `pytest` | `ruff check .` |
@@ -191,6 +191,14 @@ guards security, tenancy, money and data (`*/Policies/*`, `*Guard*`,
 `*/Tenancy/*`), and drop what would match half the repo, because every false
 match costs a review dispatch. The final list is part of what I approve in
 Step 5.
+
+`fast` is optional and configures `/factory:fast`: `workers` (how many builders at
+once, default 4), `effort_build` (default `medium`), `effort_escalate` (the one
+retry of a red task, default `xhigh`) and `effort_review` (default `high`). A
+project with a `pubspec.yaml` needs nothing else: `factory-check` knows the Dart
+and Flutter commands. Any other stack either gets a `check` block
+(`format`, `analyze`, `test`, `full_analyze`, `full_format`, `full_test`, with
+`{files}` and `{tests}` placeholders) or is checked by `gates/verify.sh` as before.
 
 `gate_isolation` stays `false` unless I ask for it. When it is on, the gate
 checks each task in a clean worktree holding HEAD plus the task's own files -
@@ -801,6 +809,9 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/questions/
 .factory/.dash-stamp
 .factory/.cost-sample
+.factory/logs/
+.factory/locks/
+.factory/full-check
 ```
 
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,
@@ -981,6 +992,10 @@ Rules:
   split it. The working granularity is one pull request: substantial enough to
   be worth a dispatch, small enough that a red gate does not throw away an hour
   of work.
+- `untested_ok: true` only on a task whose Dart change no test can reach -
+  scaffolding, a `main.dart` that only wires things together. `factory-check`
+  turns a change no test imports red, because a change nothing exercises proves
+  nothing; the flag is how the exception is written down, like the next one.
 - `allow_test_removal: true` only on a task whose actual job is removing or
   skipping tests - retiring a feature, deleting a dead suite. The gate counts
   test files and suppression markers on every run and turns red when a run has

@@ -58,7 +58,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner"; do
+  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi

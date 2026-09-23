@@ -23,6 +23,7 @@ What it covers:
 | 3 | the event log, the dashboard, the question inbox, the status line segment, the end-of-run message |
 | 4 | skipping the integrator's duplicate gate run, the task lint, the ready set |
 | 5 | change-level acceptance, the commit bisect, the version check that spots a project running an older factory |
+| 6 | the fast lane: the import-graph test selection and bundling of `factory-check`, its guards and no-progress rule, the plan, start/land/block, the `/factory:fast` scheduling, and the claim and telemetry fixes |
 
 Report:
 

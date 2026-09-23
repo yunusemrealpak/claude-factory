@@ -24,7 +24,7 @@ jobs:
           for f in plugins/factory/hooks/*.sh plugins/factory/bin/* plugins/factory/tests/*.sh plugins/factory/statusline/*.sh; do
             bash -n "$f" || exit 1
           done
-          python3 -c "import ast,sys; ast.parse(open('plugins/factory/hooks/factory-compact.py').read())"
+          for f in plugins/factory/hooks/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f" || exit 1; done
       - name: JSON is valid
         run: |
           jq -e . .claude-plugin/marketplace.json > /dev/null

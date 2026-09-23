@@ -66,12 +66,49 @@ a gate that is already green. The integrator skips its second gate run when the
 tree is byte-identical to the one that passed. The ready set and the task lint are
 scripts, not model reasoning.
 
+## The fast lane
+
+`/factory:fast` builds the same approved board without a model in the loop
+between tasks. It is a Claude Code workflow: the dependency graph, the
+scheduling, the retry and the review routing are plain JavaScript, so the only
+model work left is writing each task's code.
+
+- **One builder per task.** It starts the task (`factory-start` prints the task
+  and its lessons in one go), writes the code and the tests the task asks for,
+  and does not run tests while it works.
+- **One deterministic check.** `factory-check` formats the touched files in place,
+  analyzes them and everything that imports them, runs only the tests that reach
+  the change through the import graph - bundled into one entrypoint - and runs
+  the task's own acceptance command. Seconds, not minutes, and it keeps every
+  guard of the gate: marker, census, zero tests, self-certifying acceptance,
+  NO PROGRESS.
+- **Land, then judge the whole once.** `factory-land` moves the task to done and
+  commits it. When the board is built, `factory-finish` runs the full check and
+  the change's acceptance command once.
+- **Escalate, don't loop.** A red task gets one fresh builder at higher effort;
+  red again, it is blocked with the reason, and what depends on it is skipped.
+- **Measured, not guessed.** `factory-cost` reads the session's transcripts and
+  shows requests, output and thinking tokens and an estimated cost per role.
+
+Measured on the same six-task Flutter feature, same board, same session model and
+effort, both runs finishing 6/6 with a green full check:
+
+| | `/factory:run` | `/factory:fast` |
+| --- | --- | --- |
+| wall-clock | 14m13s | 5m03s |
+| cost | $3.43 | $1.05 |
+| model requests | 216 | 86 |
+| output tokens (thinking included) | 77,460 | 30,290 |
+
+`/factory:run` is still there and still works the way it did.
+
 ## Commands
 
 | command | what it is for |
 | --- | --- |
 | `/factory:init` | set the factory up in a project: gate, board, task list, change |
 | `/factory:run` | run the loop until only blocked work remains |
+| `/factory:fast` | build the board as a workflow: one builder and one check per task, one full check at the end |
 | `/factory:status` | the board, in detail, read-only |
 | `/factory:dash` | open the live dashboard |
 | `/factory:accept` | run a change's own acceptance command |
@@ -134,7 +171,7 @@ rewritten without you watching.
 
 ```bash
 claude --plugin-dir ./plugins/factory     # load it without installing
-bash plugins/factory/tests/run-all.sh     # 316 tests, sandboxes only
+bash plugins/factory/tests/run-all.sh     # 369 tests, sandboxes only
 claude plugin validate ./plugins/factory
 ```
 
