@@ -199,6 +199,16 @@ out_a="$(factory-check T-07)"; rc_a=$?
 out_b="$(factory-check T-08)"; rc_b=$?
 check "tasks in flight together cannot trip each other's census" '[ $rc_a -eq 0 ] && [ $rc_b -eq 0 ]' "$out_a / $out_b"
 rm -f api/tests/extra.t; git checkout -q api/src/main.src ui/src/main.src
+# The same, when the other task edits a test file that HEAD already has and
+# waits for its review: a check that left "foreign" files out of a count taken
+# with them in went red here, on a real board, with signature 1586d8da18d0.
+printf 'exit 0 # reviewed soon\n' > api/tests/main.t; printf 'value a2\n' > api/src/main.src
+mktask in-progress T-07b "" "bash runner.sh api" api/src/main.src api/tests/main.t
+out_a="$(factory-check T-07b)"; rc_a=$?
+printf 'value b2\n' > ui/src/main.src
+out_b="$(factory-check T-08)"; rc_b=$?
+check "a task editing a test file HEAD already has cannot trip another task's census" '[ $rc_a -eq 0 ] && [ $rc_b -eq 0 ] && ! printf "%s" "$out_b" | grep -q census' "$out_a / $out_b"
+git checkout -q api/tests/main.t api/src/main.src ui/src/main.src
 
 echo "=== another task's half-written work is waited for, not blamed"
 jq '.check.foreign_wait = 4' .factory/config.json > c && mv c .factory/config.json
