@@ -5,6 +5,8 @@ reads it before it starts anything.
 Usage (from the project root):
   factory-plan            human-readable
   factory-plan --json     one JSON object, what the workflow consumes
+  add --start to record the run's starting point in .factory/run-start.json:
+  HEAD and its test census, which the full check at the end compares against
 
 Every task in tasks/backlog or tasks/in-progress that an agent may work on,
 with the dependencies it still has to wait for - only ones that are themselves
@@ -136,7 +138,8 @@ def build():
     for t in sorted(active):
         fm = active[t]["fm"]
         out["tasks"].append({"id": t, "title": (fm.get("title") or t)[:60], "deps": active[t]["deps"],
-                             "review": fm.get("review", "").lower() == "always"})
+                             "review": fm.get("review", "").lower() == "always",
+                             "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true"})
     out["held"] = [{"id": t, "reason": r} for t, r in sorted(held.items())]
 
     try:
@@ -156,9 +159,29 @@ def build():
     return out
 
 
+def record_start(plan):
+    """The test census of HEAD before anything lands. Each task's check can only
+    see its own files; this is what lets the end of the run see all of them."""
+    r = subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
+                       capture_output=True, text=True, cwd=ROOT)
+    try:
+        census = json.loads(r.stdout)
+    except ValueError:
+        return
+    census["tasks"] = [t["id"] for t in plan["tasks"]]
+    with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
+        json.dump(census, fh)
+
+
 def main(argv):
     plan = build()
+    if "--start" in argv and plan["ok"]:
+        record_start(plan)
+        for t in plan["tasks"]:
+            t.pop("allow_test_removal", None)
     if "--json" in argv:
+        for t in plan["tasks"]:
+            t.pop("allow_test_removal", None)
         print(json.dumps(plan, separators=(",", ":")))
     else:
         for p in plan["problems"]:

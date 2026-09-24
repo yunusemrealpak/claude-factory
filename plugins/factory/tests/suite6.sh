@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Sandbox tests: the fast lane - factory-check (import graph, bundling, guards,
-# no-progress), factory-plan, factory-start, factory-land, factory-block, the
-# /factory:fast workflow's scheduling, and the claim/telemetry fixes it relies
-# on. Never touches a real project, and needs no Dart or Flutter SDK: the
-# toolchain is stubbed through the "check" block of the config.
+# Sandbox tests: the fast lane - factory-check (units, reach, guards, the
+# per-task census, no-progress, the full check), factory-plan, factory-start,
+# factory-land, factory-block, factory-finish, the /factory:fast workflow's
+# scheduling, and the claim/telemetry fixes it relies on.
+#
+# The project in the sandbox is written in no language at all: its "toolchain"
+# is a handful of shell scripts, its tests are *.t files, and everything the
+# check knows about it comes from .factory/config.json. That is the point - the
+# check must work for any project whose config says how to build and test it.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
 PLUGIN="$(cd "$(dirname "$0")/.." && pwd)"
@@ -30,151 +34,197 @@ mktask() {  # <column> <id> <depends> <acceptance> [files-touched...]
     echo; echo "## Attempts"
   } > "$P/tasks/$col/$id.md"
 }
+setfm() {  # <file> <key> <value>
+  sed -i.bak "s/^needs_human: false/needs_human: false\\
+$2: $3/" "$1" && rm -f "$1.bak"
+}
 
-# --- a Dart package whose toolchain is three stub scripts --------------------
-P="$WORK/fast"; rm -rf "$P"; mkdir -p "$P"; cd "$P" || exit 1
+# --- a project in no language: core <- api <- ui, and tools with no tests ----
+P="$WORK/poly"; rm -rf "$P"; mkdir -p "$P"; cd "$P" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
-mkdir -p .factory/verified lib/src test/helpers android stub tasks/backlog tasks/in-progress tasks/done tasks/blocked
+mkdir -p .factory/verified core/src core/tests api/src api/tests ui/src ui/tests tools tasks/backlog tasks/in-progress tasks/done tasks/blocked
 : > .factory/active
-printf 'name: app\nenvironment:\n  sdk: ^3.0.0\n' > pubspec.yaml
-printf "int a() => 1;\n" > lib/a.dart
-printf "import 'package:app/a.dart';\nint b() => a() + 1;\n" > lib/b.dart
-printf "int c() => 3;\n" > lib/c.dart
-printf "int lonely() => 4;\n" > lib/lonely.dart
-printf "part 'p.g.dart';\nint p() => pg();\n" > lib/p.dart
-printf "part of 'p.dart';\nint pg() => 5;\n" > lib/p.g.dart
-printf "import 'package:app/b.dart';\nvoid main() {}\n" > test/a_test.dart
-printf "import '../lib/c.dart';\nvoid main() {}\n" > test/c_test.dart
-printf "import 'package:app/a.dart';\nint h() => 0;\n" > test/helpers/h.dart
-printf "import 'helpers/h.dart';\nvoid main() {}\n" > test/h_test.dart
-printf "import 'package:app/p.dart';\nvoid main() {}\n" > test/p_test.dart
-# Stubs: record their arguments; the test stub fails when a test file says FAILME
-# and prints the reporter's last line the way dart/flutter test does.
-cat > stub/format.sh <<'SH'
-echo "$@" > .factory/stub-format.args
-SH
-cat > stub/analyze.sh <<'SH'
-echo "$@" > .factory/stub-analyze.args
-grep -l ANALYZE_ERROR "$@" 2>/dev/null | sed 's/^/error - /' | grep . && exit 3
-echo "No issues found!"
-SH
-cat > stub/test.sh <<'SH'
-echo "$@" > .factory/stub-test.args
-files=""
-for a in "$@"; do
-  case "$a" in
-    *bundle_*.dart) cp "$a" .factory/stub-bundle.dart; files="$files $(sed -n "s/^import '\(.*\)' as t[0-9]*;$/\1/p" "$a" | sed 's#^\.\./\.\./##')" ;;
-    *.dart) files="$files $a" ;;
-  esac
+for u in core api ui; do printf 'value\n' > $u/src/main.src; printf 'exit 0\n' > $u/tests/main.t; done
+printf 'helper\n' > tools/gen.src
+# The toolchain. Each script leaves a trace of how it was called.
+cat > runner.sh <<'SH'
+echo "runner $1" >> .factory/tool.log
+n=0; bad=0
+for t in $(find "$1" -name '*.t' -not -path './.factory/*' | sort); do
+  n=$((n + 2)); bash "$t" || { bad=$((bad + 1)); echo "FAILED $t: expected <1>, actual <2>"; }
 done
-n=0; failed=0
-for f in $files; do n=$((n + 2)); grep -q FAILME "$f" 2>/dev/null && failed=$((failed + 1)); done
-if [ "$failed" -gt 0 ]; then
-  echo "00:01 +$n -$failed: widget renders [E]"
-  echo "  Expected: <1>"
-  echo "    Actual: <2>"
-  echo "00:01 +$n -$failed: Some tests failed."
-  exit 1
-fi
-echo "00:01 +$n: All tests passed!"
+[ "$n" -eq 0 ] && { echo "no tests found"; exit 0; }
+[ "$bad" -gt 0 ] && { echo "$((n - 2 * bad)) passed, $bad failed"; exit 1; }
+echo "$n passed"
+SH
+cat > build.sh <<'SH'
+echo "build" >> .factory/tool.log
+grep -rn BUILD_ERROR core api ui tools && { echo "error: build broke"; exit 1; }; exit 0
+SH
+cat > lint.sh <<'SH'
+echo "lint" >> .factory/tool.log
+grep -rn LINT_ERROR core api ui tools && exit 1; exit 0
+SH
+cat > fmt.sh <<'SH'
+echo "$@" > .factory/fmt.args
+for f in "$@"; do sed -i.bak 's/messy/tidy/' "$f" && rm -f "$f.bak"; done
 SH
 cat > .factory/config.json <<'JSON'
-{ "min_tests": 1,
-  "check": { "format": "bash stub/format.sh {files}", "analyze": "bash stub/analyze.sh {files}",
-             "test": "bash stub/test.sh {tests}", "full_test": "bash stub/test.sh {tests}",
-             "full_analyze": "bash stub/analyze.sh lib", "full_format": "true", "bundle": true },
+{ "gate_mode": "full", "min_tests": 1,
+  "commands": { "build": "bash build.sh", "test": "bash runner.sh .", "arch": "", "lint": "bash lint.sh" },
+  "check": {
+    "format": "bash fmt.sh {files}",
+    "unit_test": "bash runner.sh {path}",
+    "test_files": "\\.t$", "skip": "SKIP",
+    "units": [ {"name": "core", "path": "core", "deps": []},
+               {"name": "api", "path": "api", "deps": ["core"]},
+               {"name": "ui", "path": "ui", "deps": ["api"]},
+               {"name": "tools", "path": "tools", "deps": [], "test": null} ] },
   "fast": { "workers": 3 } }
 JSON
-printf '.factory/\n.dart_tool/\n' > .gitignore
+printf '.factory/\n' > .gitignore
 git add -A; git commit -qm base
+tools_log() { cat .factory/tool.log 2>/dev/null | tr '\n' ',' ; }
 
-echo "=== import graph"
-out="$(factory-check affected lib/a.dart)"
-check "a change reaches tests through imports and through test helpers" '[ "$(printf "%s" "$out" | tr "\n" " ")" = "test/a_test.dart test/h_test.dart" ]' "$out"
-out="$(factory-check affected lib/c.dart)"
-check "a relative import is resolved" '[ "$out" = "test/c_test.dart" ]' "$out"
-out="$(factory-check affected lib/p.g.dart)"
-check "a part file reaches the tests of its library" '[ "$out" = "test/p_test.dart" ]' "$out"
-out="$(factory-check affected pubspec.yaml)"
-check "pubspec reaches every test" 'printf "%s" "$out" | grep -q "^ALL pubspec.yaml"' "$out"
-out="$(factory-check affected assets/data.json)"
-check "an asset reaches every test" 'printf "%s" "$out" | grep -q "^ALL "' "$out"
-out="$(factory-check affected android/app/Main.kt)"
-check "platform code reaches no Dart test" '[ -z "$out" ]' "$out"
-out="$(factory-check affected lib/lonely.dart)"
-check "a file nothing imports reaches no test" '[ -z "$out" ]' "$out"
+echo "=== units: what a change reaches"
+out="$(factory-check units core/src/main.src)"
+check "a change reaches its unit and everything that depends on it" '[ "$(printf "%s" "$out" | cut -d" " -f1 | tr "\n" " ")" = "core api ui " ]' "$out"
+out="$(factory-check units ui/src/main.src)"
+check "a leaf change reaches only its own unit" '[ "$out" = "ui ui" ]' "$out"
+out="$(factory-check units README.md docs/guide.md)"
+check "prose reaches nothing" '[ -z "$out" ]' "$out"
+out="$(factory-check units settings.cfg)"
+check "a file outside every unit reaches anything" 'printf "%s" "$out" | grep -q "^ALL settings.cfg belongs to no unit"' "$out"
+jq '.check.units += [{"name":"split","paths":["lib/split","test/split"],"deps":["ui"],"test":"true"}]' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check units test/split/x.t)"
+check "a unit can own code and tests in separate trees" '[ "$out" = "split lib/split" ]' "$out"
+out="$(factory-check units ui/src/main.src)"
+check "and it is reached through its dependencies like any other" '[ "$(printf "%s" "$out" | cut -d" " -f1 | tr "\n" " ")" = "ui split " ]' "$out"
+jq '.check.units |= map(select(.name != "split"))' .factory/config.json > c && mv c .factory/config.json
 
 echo "=== the task check"
-mktask in-progress T-01 "" "dart test test/a_test.dart" lib/a.dart test/a_test.dart
-printf "int a() => 2;\n" > lib/a.dart
+mktask in-progress T-01 "" "bash runner.sh core" core/src/main.src core/tests/main.t
+printf 'value messy\n' > core/src/main.src; : > .factory/tool.log
 out="$(factory-check T-01)"; rc=$?
 check "green on a clean change" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "CHECK RESULT: GREEN for T-01"' "$out"
-check "the marker says it came from the fast check" 'grep -q "^check=fast" .factory/verified/T-01 && grep -q "^tree=" .factory/verified/T-01'
-check "only the touched Dart files are formatted" '[ "$(cat .factory/stub-format.args)" = "lib/a.dart test/a_test.dart" ]' "$(cat .factory/stub-format.args)"
-check "analysis covers the touched files and what imports them" 'for f in lib/a.dart lib/b.dart test/helpers/h.dart test/a_test.dart test/h_test.dart; do grep -q "$f" .factory/stub-analyze.args || exit 1; done' "$(cat .factory/stub-analyze.args)"
-check "the selected tests run bundled into one entrypoint" 'grep -q "bundle_T-01\|bundle_T_01" .factory/stub-test.args && grep -q "a_test.dart" .factory/stub-bundle.dart && grep -q "h_test.dart" .factory/stub-bundle.dart && ! grep -q "c_test.dart" .factory/stub-bundle.dart' "$(cat .factory/stub-test.args)"
-check "the bundle is removed after the run" '[ -z "$(ls .dart_tool/factory/ 2>/dev/null)" ]'
-check "an acceptance that only reruns selected tests is not run twice" 'printf "%s" "$out" | grep -q "accept   PASS (covered by the selected tests)"' "$out"
+check "the marker says it came from the fast check" 'grep -q "^check=fast" .factory/verified/T-01 && grep -q "^tree=" .factory/verified/T-01 && grep -q "^tests=6" .factory/verified/T-01' "$(cat .factory/verified/T-01 2>/dev/null)"
+check "only the touched files are handed to the formatter, and fixed" '[ "$(cat .factory/fmt.args)" = "core/src/main.src core/tests/main.t" ] && grep -q tidy core/src/main.src' "$(cat .factory/fmt.args)"
+check "build and lint come from the project commands" 'tools_log | grep -q "^build,lint,"' "$(tools_log)"
+check "the tests of the touched unit and its dependents run, nothing else" 'tools_log | grep -q "runner core,runner api,runner ui,$"' "$(tools_log)"
+check "an acceptance identical to a command already run is not run twice" 'printf "%s" "$out" | grep -q "accept   PASS (already ran above)"' "$out"
 check "the summary stays short" '[ "$(printf "%s\n" "$out" | wc -l | tr -d " ")" -le 10 ]' "$out"
 check "stage is stamped verifying" 'grep -q "^stage: verifying" tasks/in-progress/T-01.md'
-check "the census baseline is written on green" 'jq -e ".test_files == 4" .factory/baseline.json >/dev/null' "$(cat .factory/baseline.json)"
+
+echo "=== without units, or past max_units, the whole suite runs once"
+jq '.check.max_units = 2' .factory/config.json > c && mv c .factory/config.json; : > .factory/tool.log
+out="$(factory-check T-01)"
+check "three units with tests over a limit of two run the suite once" '[ "$(tools_log)" = "build,lint,runner .,runner core," ]' "$(tools_log) / $out"
+jq 'del(.check.max_units) | del(.check.units)' .factory/config.json > c && mv c .factory/config.json; : > .factory/tool.log
+out="$(factory-check T-01)"; rc=$?
+check "no units declared: commands.test runs, as the gate would" '[ $rc -eq 0 ] && tools_log | grep -q "runner \.,"' "$(tools_log) / $out"
+git checkout -q .factory/config.json 2>/dev/null || true
+jq '.check.units = "printf %s \"[{\\\"name\\\":\\\"all\\\",\\\"path\\\":\\\".\\\",\\\"deps\\\":[]}]\""' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check units core/src/main.src)"
+check "units can be printed by a command instead of listed" '[ "$out" = "all ." ]' "$out"
+cat > .factory/config.json <<'JSON'
+{ "gate_mode": "full", "min_tests": 1,
+  "commands": { "build": "bash build.sh", "test": "bash runner.sh .", "arch": "", "lint": "bash lint.sh" },
+  "check": {
+    "format": "bash fmt.sh {files}", "unit_test": "bash runner.sh {path}", "test_files": "\\.t$", "skip": "SKIP",
+    "units": [ {"name": "core", "path": "core", "deps": []}, {"name": "api", "path": "api", "deps": ["core"]},
+               {"name": "ui", "path": "ui", "deps": ["api"]}, {"name": "tools", "path": "tools", "deps": [], "test": null} ] },
+  "fast": { "workers": 3 } }
+JSON
 
 echo "=== red, then the same red again"
-printf "import 'package:app/b.dart';\nvoid main() {} // FAILME\n" > test/a_test.dart
+printf 'exit 1\n' > core/tests/main.t
 out="$(factory-check T-01)"; rc=$?
-check "a failing test is red with an excerpt" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "Expected: <1>" && printf "%s" "$out" | grep -q "CHECK RESULT: RED for T-01 (signature"' "$out"
+check "a failing test is red with an excerpt" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "expected <1>, actual <2>" && printf "%s" "$out" | grep -q "CHECK RESULT: RED for T-01 (signature"' "$out"
 check "a red check leaves no marker" '[ ! -f .factory/verified/T-01 ]'
-check "the full output goes to a log, not the agent" 'printf "%s" "$out" | grep -q "full log: .factory/logs/T-01."' "$out"
+check "the full output goes to a log, not the caller" 'printf "%s" "$out" | grep -q "full log: .factory/logs/T-01."' "$out"
 out="$(factory-check T-01)"; rc=$?
 check "the identical failure twice is NO PROGRESS" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "NO PROGRESS" && [ -f .factory/no-progress/T-01 ]' "$out"
-printf "import 'package:app/b.dart';\nvoid main() {}\n" > test/a_test.dart
+printf 'exit 0\n' > core/tests/main.t
 out="$(factory-check T-01)"; rc=$?
 check "green again clears the no-progress flag" '[ $rc -eq 0 ] && [ ! -f .factory/no-progress/T-01 ] && [ -f .factory/failures/resolved/T-01.log ]' "$out"
+printf 'value BUILD_ERROR\n' > core/src/main.src
+out="$(factory-check T-01)"; rc=$?
+check "a build failure is red and quoted" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "build    FAIL" && printf "%s" "$out" | grep -q "error: build broke"' "$out"
+printf 'value\n' > core/src/main.src
 
 echo "=== guards"
-printf "int lonely() => 44;\n" > lib/lonely.dart
-mktask in-progress T-02 "" "bash stub/noop.sh" lib/lonely.dart
-printf 'echo ok\n' > stub/noop.sh
+printf 'helper v2\n' > tools/gen.src
+mktask in-progress T-02 "" "bash tools-note.sh" tools/gen.src
+printf 'echo ok\n' > tools-note.sh
 out="$(factory-check T-02)"; rc=$?
-check "a Dart change no test reaches is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "no test exercised this change"' "$out"
-sed -i.bak 's/^needs_human: false/needs_human: false\nuntested_ok: true/' tasks/in-progress/T-02.md && rm -f tasks/in-progress/T-02.md.bak
+check "a change no test exercises is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "no test exercised this change"' "$out"
+setfm tasks/in-progress/T-02.md untested_ok true
 out="$(factory-check T-02)"; rc=$?
 check "untested_ok written in the task waives it" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "waived by untested_ok"' "$out"
-git checkout -q lib/lonely.dart
-mktask in-progress T-03 "" "grep -q done decisions.md" lib/c.dart
+git checkout -q tools/gen.src
+mktask in-progress T-03 "" "grep -q done decisions.md && test -f tasks/done/T-03.md" ui/src/main.src
 out="$(factory-check T-03)"; rc=$?
-check "a self-certifying acceptance is red before anything runs" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "self-certifying"' "$out"
-mktask in-progress T-04 "" "bash stub/noop.sh"
+check "an acceptance that only reads files the agent writes is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "self-certifying"' "$out"
+mktask in-progress T-03b "" "bash runner.sh ui && grep -q T-03b decisions.md" ui/src/main.src
+out="$(factory-check T-03b)"; rc=$?
+check "an acceptance that also runs something is not self-certifying" '! printf "%s" "$out" | grep -q "self-certifying"' "$out"
+mktask in-progress T-04 "" "bash runner.sh ui"
 out="$(factory-check T-04)"; rc=$?
 check "an empty Files touched list is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "lists nothing under"' "$out"
-jq -n '{test_files: 9, skipped: 0}' > .factory/baseline.json
-mktask in-progress T-05 "" "bash stub/noop.sh" lib/c.dart
-out="$(factory-check T-05)"; rc=$?
-check "a shrunken test census is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "test files went from 9 to 4"' "$out"
-jq -n '{test_files: 4, skipped: 0}' > .factory/baseline.json
-printf "int c() => 33; // ANALYZE_ERROR\n" > lib/c.dart
-out="$(factory-check T-05)"; rc=$?
-check "an analyzer finding is red and quoted" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "analyze  FAIL" && printf "%s" "$out" | grep -q "error - lib/c.dart"' "$out"
-git checkout -q lib/c.dart
 
-echo "=== work in flight belongs to its own task"
-printf "import 'package:app/a.dart';\nvoid main() {} // FAILME half-written by another builder\n" > test/other_test.dart
-printf "int a() => 3;\n" > lib/a.dart
-mktask in-progress T-06 "" "bash stub/noop.sh" lib/a.dart
+echo "=== the census is judged per task, against HEAD"
+rm -f api/tests/main.t
+mktask in-progress T-05 "" "bash runner.sh api" api/src/main.src api/tests/main.t
+out="$(factory-check T-05)"; rc=$?
+check "a task that deletes a tracked test file is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "this task deletes test file(s): api/tests/main.t"' "$out"
+setfm tasks/in-progress/T-05.md allow_test_removal true
+out="$(factory-check T-05)"; rc=$?
+check "allow_test_removal written in the task waives it" '! printf "%s" "$out" | grep -q "census"' "$out"
+git checkout -q api/tests/main.t
+printf 'exit 0 # SKIP flaky\n' > ui/tests/main.t
+mktask in-progress T-06 "" "bash runner.sh ui" ui/tests/main.t
 out="$(factory-check T-06)"; rc=$?
-check "another task's half-written test is not this task's red" '[ $rc -eq 0 ] && ! grep -q other_test .factory/stub-bundle.dart' "$out"
-rm -f test/other_test.dart; git checkout -q lib/a.dart
+check "a task that adds a skip marker is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "adds 1 skip marker"' "$out"
+git checkout -q ui/tests/main.t
+# Two tasks in flight in one tree. A adds a test file and goes green first; B
+# must not read A's unlanded file as a test that went missing - the exact false
+# red that blocked four tasks on a real board.
+printf 'exit 0\n' > api/tests/extra.t
+mktask in-progress T-07 "" "bash runner.sh api" api/src/main.src api/tests/extra.t
+mktask in-progress T-08 "" "bash runner.sh ui" ui/src/main.src
+printf 'value a\n' > api/src/main.src; printf 'value b\n' > ui/src/main.src
+out_a="$(factory-check T-07)"; rc_a=$?
+out_b="$(factory-check T-08)"; rc_b=$?
+check "tasks in flight together cannot trip each other's census" '[ $rc_a -eq 0 ] && [ $rc_b -eq 0 ]' "$out_a / $out_b"
+rm -f api/tests/extra.t; git checkout -q api/src/main.src ui/src/main.src
 
 echo "=== acceptance is executed, not reported"
-printf 'echo "acceptance ran"; exit 1\n' > stub/accept-red.sh
-mktask in-progress T-07 "" "bash stub/accept-red.sh" lib/c.dart
-out="$(factory-check T-07)"; rc=$?
+printf 'echo "acceptance ran"; exit 1\n' > accept-red.sh
+mktask in-progress T-09 "" "bash accept-red.sh" ui/src/main.src
+out="$(factory-check T-09)"; rc=$?
 check "a failing acceptance command is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "accept   FAIL (exit 1)"' "$out"
 
-echo "=== full check"
+echo "=== the full check runs the project's own gate commands"
+out="$(factory-plan --json --start)"
+check "a planned run records where it started" 'jq -e ".test_files == 3 and (.files | length) == 3 and (.tasks | length) > 0" .factory/run-start.json >/dev/null' "$(cat .factory/run-start.json 2>/dev/null)"
+: > .factory/tool.log
 out="$(factory-check --full)"; rc=$?
-check "the full check runs every test" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "FULL CHECK: GREEN" && for f in a_test c_test h_test p_test; do grep -q "$f" .factory/stub-bundle.dart || exit 1; done' "$out"
-check "its verdict is recorded" 'grep -q "^verdict=green" .factory/full-check'
+check "the full check runs build, test and lint" '[ $rc -eq 0 ] && [ "$(tools_log)" = "build,runner .,lint," ] && printf "%s" "$out" | grep -q "test     PASS (6 test(s))"' "$(tools_log) / $out"
+check "its verdict is recorded" 'grep -q "^verdict=green" .factory/full-check && grep -q "^tests=6" .factory/full-check'
+jq '.commands.test = "echo no tests found"' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check --full)"; rc=$?
+check "a suite that ran zero tests is never a green full check" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "reported 0 test(s)"' "$out"
+jq '.commands.test = "echo done"' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check --full)"; rc=$?
+check "an unrecognised count passes but says so" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "count not recognised - set check.count"' "$out"
+jq '.commands.test = "echo done; echo \"ran=7\"" | .check.count = "ran=(\\d+)"' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check --full)"
+check "check.count teaches it any runner's summary" 'printf "%s" "$out" | grep -q "test     PASS (7 test(s))"' "$out"
+jq '.commands.test = "bash runner.sh ." | del(.check.count)' .factory/config.json > c && mv c .factory/config.json
+git rm -q ui/tests/main.t; git commit -qm "lose a test"
+out="$(factory-check --full)"; rc=$?
+check "a run that lost a test file in HEAD is red, whoever lost it" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "test files in HEAD went from 3 to 2"' "$out"
+git revert --no-edit HEAD >/dev/null
 
 echo "=== plan"
 B="$WORK/plan"; rm -rf "$B"; mkdir -p "$B/.factory/no-progress"; cd "$B" || exit 1
@@ -224,41 +274,63 @@ mktask backlog C2-03 "" "bash run.sh" src/x.txt; touch .factory/verified/C2-03
 out="$(factory-block C2-03 "needs the payment provider decided")"
 check "block moves the task with its reason and drops its marker" '[ -f tasks/blocked/C2-03.md ] && grep -q "needs the payment provider decided" tasks/blocked/C2-03.md && [ ! -f .factory/verified/C2-03 ]' "$out"
 
+
+echo "=== finish reports from disk"
+Z="$WORK/finish"; rm -rf "$Z"; mkdir -p "$Z/.factory" "$Z/src"; cd "$Z" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '{"commands":{}}\n' > .factory/config.json; printf 'a\n' > src/a.txt
+git add -A; git commit -qm base
+P="$Z"
+mktask done F-01 "" "x" src/a.txt
+printf '\n## Open concerns\n- the id /start returns is never accepted by /next\n' >> tasks/done/F-01.md
+printf 'b\n' > src/a.txt; git add -A; git commit -qm "F-01: thing" -m "Factory-Task: F-01"
+mktask blocked F-02 "" "x" src/a.txt
+printf '\n## Blocked reason\n- 2026-01-01T00:00:00Z: needs the provider decided\n' >> tasks/blocked/F-02.md
+mktask backlog F-03 "F-02" "x" src/a.txt
+out="$(factory-finish --tasks F-01,F-02,F-03 --no-full)"
+check "finish puts what a builder left open first" 'jq -e ".attention == [{\"id\":\"F-01\",\"concern\":\"the id /start returns is never accepted by /next\"}]" <<< "$out" >/dev/null' "$out"
+check "finish reads where each task is and which commit carries it" 'jq -e "[.board[] | .lane] == [\"done\",\"blocked\",\"backlog\"] and .board[0].commit != null and .board[1].reason == \"2026-01-01T00:00:00Z: needs the provider decided\"" <<< "$out" >/dev/null' "$out"
+check "with nothing new to judge the full check is skipped, and says so" 'jq -e ".full_check == \"skipped\"" <<< "$out" >/dev/null' "$out"
+check "the report is written for the developer too" 'grep -q "## Needs your attention" .factory/last-run.md && grep -q "| F-02 | blocked |" .factory/last-run.md'
+
 echo "=== the workflow's scheduling (JavaScriptCore)"
 JSC=/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
 if [ -x "$JSC" ]; then
   harness() {  # <scenario js defining agent()> -> prints result JSON and call order
     { cat <<'JS'
 var logs=[]; function log(m){logs.push(m)} function phase(p){}
-var args={workers:2}; var calls=[];
+var args={workers:2}; var calls=[]; var prompts={};
 JS
       printf '%s\n' "$1"
       echo "async function __main(){"
       sed '1,/^}$/d' "${PLUGIN}/workflows/fast.js"
       echo "}"
-      echo "__main().then(function(r){ print(JSON.stringify(r)); print('CALLS '+calls.join(',')) }, function(e){ print('ERROR '+e) });"
+      echo "__main().then(function(r){ print(JSON.stringify(r)); print('CALLS '+calls.join(',')); print('FINISH '+prompts.finish) }, function(e){ print('ERROR '+e) });"
     } > "$WORK/wf.js"
     "$JSC" "$WORK/wf.js"
   }
   base='function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l);
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
  if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]},{id:"C",deps:["A"]},{id:"D",deps:["B","C"],review:true}]});
- if(l==="finish") return reply({full_check:"green"});
+ if(l==="finish") return reply({attention:[{id:"B",concern:"gap"}],board:[{id:"A",lane:"done",commit:"abc"}],full_check:"green"});
  if(/ land$/.test(l)||/ block$/.test(l)) return reply({ok:true,line:"LANDED"});
  if(/ review$/.test(l)) return reply({verdict:"pass",findings:[]});
- if(l==="D") return reply({id:"D",status:"review",summary:"s"});'
+ if(l==="D") return reply({id:"D",status:"review",summary:"returning review, not landed",concerns:[]});'
   out="$(harness "$base
- return reply({id:l,status:\"landed\",summary:\"ok\"}); }")"
+ return reply({id:l,status:\"landed\",summary:\"ok\",concerns:[]}); }")"
   calls="$(printf '%s\n' "$out" | sed -n 's/^CALLS //p')"
   check "dependents start only after what they need has landed" 'printf "%s" "$calls" | grep -Eq "^plan,A,(B,C|C,B),D,D review,D land,finish$"' "$out"
-  check "a review:always task is reviewed, then landed" 'printf "%s" "$out" | head -1 | jq -e "(.landed | map(.id)) == [\"A\",\"B\",\"C\",\"D\"]" >/dev/null' "$out"
+  check "the plan step records where the run started" 'grep -q "factory-plan --json --start" "$WORK/wf.js"'
+  check "a reviewed and landed task no longer says it awaits review" 'printf "%s" "$out" | head -1 | jq -e "(.agent_notes[] | select(.id==\"D\") | .status == \"landed\" and (.summary | startswith(\"reviewed and landed\")))" >/dev/null' "$out"
+  check "the result leads with what needs attention and the board from disk" 'printf "%s" "$out" | head -1 | jq -e "(keys_unsorted | .[0:2]) == [\"attention\",\"board\"] and .attention[0].concern == \"gap\"" >/dev/null' "$out"
+  check "finish is told every task of the run" 'printf "%s" "$out" | grep -q "^FINISH .*factory-finish --tasks A,B,C,D$"' "$out"
   out="$(harness "$base
- if(l===\"A\") return reply({id:\"A\",status:\"red\",summary:\"x\"});
- if(l===\"A retry\") return reply({id:\"A\",status:\"red\",summary:\"still\"});
- return reply({id:l,status:\"landed\",summary:\"ok\"}); }")"
-  check "a task red twice is blocked and its dependents are skipped" 'printf "%s" "$out" | head -1 | jq -e "(.blocked | map(.id)) == [\"A\"] and (.skipped | map(.id)) == [\"B\",\"C\",\"D\"]" >/dev/null' "$out"
-  check "the red task is retried once, at higher effort" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A block"' "$out"
-  check "nothing landed means no finish step" 'printf "%s" "$out" | head -1 | jq -e ".finish == null" >/dev/null' "$out"
+ if(l===\"A\") return reply({id:\"A\",status:\"red\",summary:\"x\",concerns:[]});
+ if(l===\"A retry\") return reply({id:\"A\",status:\"red\",summary:\"still\",concerns:[]});
+ return reply({id:l,status:\"landed\",summary:\"ok\",concerns:[]}); }")"
+  check "a task red twice is blocked and its dependents are skipped" 'printf "%s" "$out" | head -1 | jq -e "[.agent_notes[] | .status] == [\"blocked\",\"skipped\",\"skipped\",\"skipped\"]" >/dev/null' "$out"
+  check "the red task is retried once, at higher effort" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A block,finish"' "$out"
+  check "nothing landed: finish still reports, without a full check" 'printf "%s" "$out" | grep -q "^FINISH .*--tasks A,B,C,D --no-full"' "$out"
 else
   echo "(JavaScriptCore not found - workflow scheduling tests skipped)"
 fi

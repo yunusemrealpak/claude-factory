@@ -33,7 +33,9 @@ Incremental mode changes the steps below like this:
   the config yourself. The same goes for keys added to the factory after that
   config was written: if `risk_paths` is missing, propose a list for this repo
   (see Step 2) and ask whether to add it - without it no green task is routed
-  to a reviewer by what it touched.
+  to a reviewer by what it touched. Likewise a missing `check` block: propose
+  one from the project's structure (Step 2) and ask - without it every
+  `/factory:fast` check runs the whole suite.
 - **Step 2** - create only directories that are missing, plus `tasks/proposed/`.
   Never write `.factory/config.json`, `gates/verify.sh`, `decisions.md` or
   `.factory/active` in this mode: each already exists and may have been adjusted
@@ -194,11 +196,43 @@ Step 5.
 
 `fast` is optional and configures `/factory:fast`: `workers` (how many builders at
 once, default 4), `effort_build` (default `medium`), `effort_escalate` (the one
-retry of a red task, default `xhigh`) and `effort_review` (default `high`). A
-project with a `pubspec.yaml` needs nothing else: `factory-check` knows the Dart
-and Flutter commands. Any other stack either gets a `check` block
-(`format`, `analyze`, `test`, `full_analyze`, `full_format`, `full_test`, with
-`{files}` and `{tests}` placeholders) or is checked by `gates/verify.sh` as before.
+retry of a red task, default `xhigh`) and `effort_review` (default `high`).
+
+`check` is optional too, and it is how `/factory:fast` judges one task without
+running the whole project. `factory-check` knows no language, framework or build
+tool: everything it runs comes from this block or, where the block is silent,
+from `commands`. Write it from what you found in Step 1, and put in it only what
+the project's own tools already express:
+
+```json
+"check": {
+  "format":    "<command that formats files in place; {files} = the files a task touched>",
+  "units":     [ { "name": "<unit>", "path": "<dir>", "deps": ["<unit it depends on>"],
+                   "test": "<command that runs this unit's tests, from the project root>" } ],
+  "unit_test": "<default per-unit test command, with {path} and {name}>",
+  "count":     "<regex whose group is the number of tests a run reported>",
+  "ignore":    ["<path globs no test can observe>"]
+}
+```
+
+- **units** are the parts the project is already divided into: the packages of a
+  workspace, the projects of a solution, the modules of a build, or feature
+  folders with their own test directories. `deps` comes from the project's own
+  dependency declarations - never guessed. A task's check runs the tests of the
+  units it touched and of every unit that depends on them; a touched file outside
+  every unit runs the whole suite. When the list would go stale as units are
+  added, make `units` a command that prints it as JSON instead of a literal list.
+  A single-unit project needs no `units` at all: every check runs
+  `commands.test`. Split only where the suite is big enough to be worth it -
+  every unit's test command pays the runner's start-up again, and on a small
+  project one suite run is faster than two unit runs.
+- **count** only when the test runner's summary does not say "N passed", "passed:
+  N" or "Total tests: N". Without a count the zero-test guard cannot see a run
+  that executed nothing.
+- **build**, **lint**, **arch** may be overridden with narrower commands (`{files}`,
+  `{paths}` = the reached units' paths). Leave them out and `commands` is used.
+
+Show the `check` block in the approval table in Step 5, as one line per key.
 
 `gate_isolation` stays `false` unless I ask for it. When it is on, the gate
 checks each task in a clean worktree holding HEAD plus the task's own files -
@@ -812,6 +846,8 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/logs/
 .factory/locks/
 .factory/full-check
+.factory/run-start.json
+.factory/last-run.md
 ```
 
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,
@@ -992,8 +1028,8 @@ Rules:
   split it. The working granularity is one pull request: substantial enough to
   be worth a dispatch, small enough that a red gate does not throw away an hour
   of work.
-- `untested_ok: true` only on a task whose Dart change no test can reach -
-  scaffolding, a `main.dart` that only wires things together. `factory-check`
+- `untested_ok: true` only on a task whose change no test can reach -
+  scaffolding, an entry point that only wires things together. `factory-check`
   turns a change no test imports red, because a change nothing exercises proves
   nothing; the flag is how the exception is written down, like the next one.
 - `allow_test_removal: true` only on a task whose actual job is removing or

@@ -76,22 +76,28 @@ model work left is writing each task's code.
 - **One builder per task.** It starts the task (`factory-start` prints the task
   and its lessons in one go), writes the code and the tests the task asks for,
   and does not run tests while it works.
-- **One deterministic check.** `factory-check` formats the touched files in place,
-  analyzes them and everything that imports them, runs only the tests that reach
-  the change through the import graph - bundled into one entrypoint - and runs
-  the task's own acceptance command. Seconds, not minutes, and it keeps every
-  guard of the gate: marker, census, zero tests, self-certifying acceptance,
-  NO PROGRESS.
+- **One deterministic check.** `factory-check` formats the touched files, builds
+  and lints, runs the tests of the units the change reaches - the parts the
+  project is made of and their dependents, declared in the config - and runs
+  the task's own acceptance command. It knows no language: every command comes
+  from the project. It keeps every guard of the gate: marker, zero tests,
+  self-certifying acceptance, NO PROGRESS, and a test census judged per task
+  against HEAD, so tasks in flight cannot trip each other.
 - **Land, then judge the whole once.** `factory-land` moves the task to done and
-  commits it. When the board is built, `factory-finish` runs the full check and
-  the change's acceptance command once.
+  commits it. When the board is built, `factory-finish` runs the project's own
+  gate commands once, refuses a suite that ran zero tests, compares the test
+  census with the run's start, and runs the change's acceptance command.
+- **A report from disk.** The closing report is built from where every task file
+  is and which commit carries it, not from what the agents said - and what the
+  builders flagged and left open (`## Open concerns`) comes first. It is also
+  written to `.factory/last-run.md`.
 - **Escalate, don't loop.** A red task gets one fresh builder at higher effort;
   red again, it is blocked with the reason, and what depends on it is skipped.
 - **Measured, not guessed.** `factory-cost` reads the session's transcripts and
   shows requests, output and thinking tokens and an estimated cost per role.
 
-Measured on the same six-task Flutter feature, same board, same session model and
-effort, both runs finishing 6/6 with a green full check:
+Measured with factory 2.3 on the same six-task Flutter feature, same board, same
+session model and effort, both runs finishing 6/6 with a green full check:
 
 | | `/factory:run` | `/factory:fast` |
 | --- | --- | --- |

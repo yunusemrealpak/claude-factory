@@ -41,11 +41,12 @@ const PLAN = {
 
 const RESULT = {
   type: 'object',
-  required: ['id', 'status', 'summary'],
+  required: ['id', 'status', 'summary', 'concerns'],
   properties: {
     id: { type: 'string' },
     status: { type: 'string', enum: ['landed', 'review', 'red', 'no_progress', 'blocked', 'error'] },
     summary: { type: 'string' },
+    concerns: { type: 'array', items: { type: 'string' } },
     files: { type: 'array', items: { type: 'string' } },
     check_runs: { type: 'number' },
     risk: { type: 'array', items: { type: 'string' } },
@@ -67,9 +68,14 @@ const LINE = {
 
 const FINISH = {
   type: 'object',
-  required: ['full_check'],
+  required: ['board', 'attention', 'full_check'],
   properties: {
-    full_check: { type: 'string', enum: ['green', 'red'] },
+    attention: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, concern: { type: 'string' } } } },
+    board: {
+      type: 'array',
+      items: { type: 'object', properties: { id: { type: 'string' }, lane: { type: 'string' }, commit: { type: ['string', 'null'] }, reason: { type: 'string' } } },
+    },
+    full_check: { type: 'string', enum: ['green', 'red', 'skipped'] },
     full_output: { type: 'string' },
     changes: { type: 'array', items: { type: 'string' } },
     acceptance: { type: 'array', items: { type: 'object', properties: { change: { type: 'string' }, result: { type: 'string' } } } },
@@ -80,7 +86,7 @@ const opts = args && typeof args === 'object' ? args : {}
 
 phase('Plan')
 const plan = await agent(
-  'From the project root, run exactly: factory-plan --json\nIt prints one JSON object. Return that object field for field; do not summarise, reorder or drop anything.',
+  'From the project root, run exactly: factory-plan --json --start\nIt prints one JSON object. Return that object field for field; do not summarise, reorder or drop anything.',
   { label: 'plan', phase: 'Plan', model: 'haiku', schema: PLAN },
 )
 if (!plan) return { error: 'the plan could not be read' }
@@ -162,7 +168,9 @@ async function build(t) {
     const v = await slot(() => agent(reviewPrompt(t, r), { agentType: 'factory:reviewer', effort: E.review, schema: VERDICT, label: `${t.id} review`, phase: 'Build' }))
     if (v && v.verdict === 'pass') {
       const l = await run1(`From the project root run exactly: factory-land ${t.id}\nReturn ok=true if its last line starts with LANDED or LAND SKIPPED, and that line.`, t.id + ' land')
-      return l && l.ok ? Object.assign({}, r, { status: 'landed', reviewed: true }) : Object.assign({}, r, { status: 'error', summary: 'land failed: ' + (l ? l.line : 'no answer') })
+      return l && l.ok
+        ? Object.assign({}, r, { status: 'landed', summary: 'reviewed and landed: ' + r.summary })
+        : Object.assign({}, r, { status: 'error', summary: 'land failed: ' + (l ? l.line : 'no answer') })
     }
     if (round === 2 || !v) return block(t, 'review failed: ' + (v ? v.findings.join('; ') : 'the reviewer returned nothing'))
     r = await slot(() => agent(buildPrompt(t, null, v.findings), { agentType: 'factory:builder', effort: E.escalate, schema: RESULT, label: t.id + ' fix', phase: 'Build' }))
@@ -187,25 +195,28 @@ function schedule(id) {
 }
 const results = (await Promise.all(tasks.map(t => schedule(t.id)))).map((r, i) => r || { id: tasks[i].id, status: 'error', summary: 'no result' })
 
-const by = s => results.filter(r => r.status === s).map(r => ({ id: r.id, summary: r.summary, notes: r.notes || undefined }))
-const landed = by('landed')
-log(`${landed.length}/${tasks.length} landed`)
+const landed = results.filter(r => r.status === 'landed').length
+log(`${landed}/${tasks.length} landed`)
 
+// The report comes from disk, not from the agents: where each task file is now,
+// which commit carries it, what the builders flagged and left open. An agent's
+// last sentence is written before the review, land or block that followed it.
 phase('Finish')
-let finish = null
-if (landed.length) {
-  finish = await agent(
-    'From the project root, run exactly: factory-finish\nIt prints one JSON object. Return it field for field; keep full_output verbatim.',
-    { label: 'finish', phase: 'Finish', model: 'haiku', schema: FINISH },
-  )
-}
+const finish = await agent(
+  `From the project root, run exactly: factory-finish --tasks ${tasks.map(t => t.id).join(',')}${landed ? '' : ' --no-full'}\n` +
+    'It prints one JSON object. Return it field for field; keep every string verbatim.',
+  { label: 'finish', phase: 'Finish', model: 'haiku', schema: FINISH },
+)
 
 return {
-  landed,
-  blocked: by('blocked'),
-  skipped: by('skipped'),
-  failed: results.filter(r => !['landed', 'blocked', 'skipped'].includes(r.status)).map(r => ({ id: r.id, status: r.status, summary: r.summary })),
+  attention: finish ? finish.attention : [],
+  board: finish ? finish.board : results.map(r => ({ id: r.id, lane: 'unknown (the finish step returned nothing)', commit: null })),
+  full_check: finish ? finish.full_check : 'not run',
+  full_output: finish ? finish.full_output : '',
+  acceptance: finish ? finish.acceptance || [] : [],
+  changes: finish ? finish.changes || [] : [],
   held: plan.held || [],
   warnings: plan.warnings || [],
-  finish,
+  report: '.factory/last-run.md',
+  agent_notes: results.map(r => ({ id: r.id, status: r.status, summary: r.summary, notes: r.notes || undefined })),
 }

@@ -1,53 +1,69 @@
 #!/usr/bin/env python3
-"""Factory fast check. NOT a hook: the builder runs it once its task is written.
+"""Factory fast check. NOT a hook: a builder runs it once its task is written.
 
 Usage (from the project root):
-  factory-check <task-id>          the task's check - format, analyze, the tests
-                                   the change reaches, the task's acceptance
-  factory-check --full             the whole tree - analyze, format, every test;
-                                   run once, when the board is built
-  factory-check affected <path>... which test files a change to these paths reaches
+  factory-check <task-id>          judge one task on what it touched
+  factory-check --full             judge the whole tree once, with the project's
+                                   own gate commands
+  factory-check units <path>...    which units a change to these paths reaches
+  factory-check census [--json]    the test census of HEAD
 
-Why this exists. The old gate ran build, the whole test suite, architecture
-rules and lint on every task, and ran it again for the integrator: on a real
-board the full suite ran two to four times per task while the model that asked
-for it waited. Measured on a Flutter project, a single test file takes 1.6s, the
-40-file suite 8.8s, and the same 40 files bundled into one entrypoint 2.5s - the
-machine is not what is slow. What is slow is how often, and on what.
+Nothing in here knows a language, a framework or a build tool. What a project is
+made of and how it is built and tested is data the project supplies:
 
-So a task is judged on what it touched:
-  - format:   the touched Dart files are formatted in place, so a format finding
-              is never a red gate again
-  - analyze:  the touched files plus every file that imports them
-  - tests:    the test files that transitively import a touched file (the import
-              graph), bundled into one entrypoint when there is more than one
-  - accept:   the task's own acceptance command, executed here rather than
-              reported by the agent
-and the whole tree is judged once, by --full, when every task has landed.
+  commands.*   in .factory/config.json - build, test, arch, lint - the same
+               commands gates/verify.sh runs. They are the project's truth.
+  check.*      optional, narrows them for a single task:
+    format     a command that fixes formatting in place, "{files}" = the files
+               the task touched. Absent: nothing is reformatted.
+    build, lint, arch
+               overrides for the per-task stages. Absent: commands.*. May use
+               "{files}" (touched files) and "{paths}" (the reached units'
+               paths, or "." when the change reaches everything).
+    units      the parts of the project a change can be confined to - packages,
+               projects, modules, feature folders, whatever the project is made
+               of: [{"name", "path", "deps": [names], "test": "<command>"}], or a
+               command that prints that list as JSON. "paths": [...] instead of
+               "path" when a unit's code and its tests live in separate trees.
+               A unit without "test" uses "unit_test" with "{path}" (its first
+               path), "{paths}" and "{name}" filled in; a unit whose test is ""
+               or null has no tests of its own.
+    unit_test  the default per-unit test command.
+    max_units  above this many units with tests, run commands.test once
+               instead (default 10).
+    ignore     path globs no test can observe (default: prose and docs).
+    test_files / skip / count
+               regexes overriding what counts as a test file, a suppression
+               marker, and the number of tests a run reported.
 
-The guards of gates/verify.sh carry over unchanged in meaning: the marker is
-removed before anything runs, a self-certifying acceptance is refused, the test
-census may not shrink, a run that exercised no test is not green, and a failure
-seen before on the same task is NO PROGRESS rather than another attempt.
+The task check
+  1. guards that cost nothing - a self-certifying acceptance, an empty
+     "## Files touched", and the task's own census: did THIS task delete a test
+     file or add a skip marker, judged against HEAD rather than against a
+     baseline other tasks in flight keep rewriting
+  2. format, build, lint, arch
+  3. tests - with units: the tests of every unit the task touched and every
+     unit that depends on one of them. A touched file outside every unit can
+     reach anything, and so can a change with no units declared: the whole
+     suite runs, as it would in the gate.
+  4. the task's acceptance command, executed here rather than reported
+  5. a change that ran no test at all is not green (untested_ok: true waives it)
 
-What another task has half-written is not this task's to answer for. Files that
-differ from HEAD but are not in this task's "## Files touched" list belong to
-work still in flight; they are left out of the analysis and the test selection
-here, and judged by --full once they have landed.
+The full check runs commands.build, test, arch and lint exactly as the gate
+would, refuses a test stage that reported zero tests, and compares the test
+census of HEAD with the one recorded when the run was planned.
 
-Stacks. Dart and Flutter projects (a pubspec.yaml) get all of the above with
-built-in commands; "check" in .factory/config.json overrides any of them. Any
-other stack without a "check" block is delegated to gates/verify.sh, so this
-is safe to call everywhere.
+Every stage's output goes to .factory/logs/; the caller gets a short summary and
+the failing part. A failure seen before on the same task is NO PROGRESS.
 
 Exit: 0 green, 1 red, 2 usage or setup error.
 """
+import fnmatch
 import hashlib
 import json
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -56,6 +72,27 @@ sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
+
+# What counts as a test file, a suppression marker and a reported test count
+# when the project does not say. The same table gates/verify.sh carries.
+TEST_FILES = (r"(Tests?\.cs|_test\.go|(^|/)test_[^/]*\.py|_test\.py|_test\.dart|\.test\.[jt]sx?|\.spec\.[jt]sx?|"
+              r"_spec\.rb|Tests?\.java|Tests?\.kt|_test\.rs|Tests?\.swift|Test\.php)$")
+SKIP = (r"\[Ignore\(|\(Skip\s*=|\.skip\(|(^|[^a-zA-Z])xit\(|(^|[^a-zA-Z])xdescribe\(|@Ignore([^a-zA-Z]|$)|"
+        r"@Disabled|@pytest\.mark\.skip|@unittest\.skip|(^|[^a-zA-Z])t\.Skip\(|#\[ignore\]|skip:\s*true|"
+        r"Assert\.Inconclusive|markTestSkipped")
+ZERO_TESTS = re.compile(r"no test files|no tests ran|no tests found|no tests were found|found 0 tests|ran 0 tests|"
+                        r"Tests:\s+0 total|Total tests:\s*0\b|total:\s*0\b", re.I)
+# Plain-English summary phrasings many runners share. A runner that says it
+# differently gets its own regex in check.count - written by /factory:init, which
+# knows the project's runner; nothing here does. One pattern wins; within it
+# every match is summed, because a workspace prints one summary per package.
+COUNTS = [
+    r"(?i)total tests:\s*(\d+)",
+    r"(?i)\btests?:\s*(\d+)\s*passed",
+    r"(?i)\bpassed:\s*(\d+)",
+    r"(?i)(\d+)\s+(?:tests?\s+)?passed",
+]
+DEFAULT_IGNORE = ["*.md", "*.txt", "docs/*", "doc/*", "LICENSE*", ".github/ISSUE_TEMPLATE/*"]
 
 # ---------------------------------------------------------------------------
 # small helpers
@@ -83,7 +120,7 @@ def load_config():
 
 
 def frontmatter(text):
-    """Leading --- block as a dict of raw strings; first copy of a key wins."""
+    """Leading --- block as a dict of raw strings; the first copy of a key wins."""
     data = {}
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -99,8 +136,7 @@ def frontmatter(text):
 
 def set_frontmatter(path, updates):
     """Rewrites keys inside the leading --- block, adding the ones it lacks."""
-    text = read(path)
-    lines = text.split("\n")
+    lines = read(path).split("\n")
     if not lines or lines[0].strip() != "---":
         return
     end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
@@ -112,8 +148,7 @@ def set_frontmatter(path, updates):
         if key in updates and key not in seen:
             lines[i] = "%s: %s" % (key, updates[key])
             seen.add(key)
-    missing = ["%s: %s" % (k, v) for k, v in updates.items() if k not in seen]
-    lines[end:end] = missing
+    lines[end:end] = ["%s: %s" % (k, v) for k, v in updates.items() if k not in seen]
     with open(path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
@@ -132,10 +167,7 @@ def files_touched(text):
             if m:
                 word = m.group(1).replace("`", "").split()
                 if word:
-                    p = word[0]
-                    if p.startswith("./"):
-                        p = p[2:]
-                    out.append(p)
+                    out.append(os.path.normpath(word[0][2:] if word[0].startswith("./") else word[0]))
     return sorted(set(out))
 
 
@@ -149,42 +181,24 @@ def task_file(task_id):
 
 def git(*args):
     try:
-        r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True)
+        r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, errors="replace")
         return r.returncode, r.stdout
     except OSError:
         return 1, ""
 
 
-def dirty_paths():
-    """Project-relative paths that differ from HEAD or are untracked."""
-    rc, prefix = git("rev-parse", "--show-prefix")
-    if rc != 0:
-        return set()
-    prefix = prefix.strip()
-    rc, out = git("status", "--porcelain", "-z", "--untracked-files=all", "--", ".")
-    if rc != 0:
-        return set()
-    paths, parts, i = set(), out.split("\0"), 0
-    while i < len(parts):
-        entry = parts[i]
-        i += 1
-        if len(entry) < 4:
-            continue
-        status, path = entry[:2], entry[3:]
-        if status[0] in "RC":  # a rename carries its source as the next field
-            i += 1
-        if prefix and path.startswith(prefix):
-            path = path[len(prefix):]
-        paths.add(path)
-    return paths
+def fill(cmd, **lists):
+    for key, items in lists.items():
+        cmd = cmd.replace("{%s}" % key, " ".join(shlex.quote(i) for i in items))
+    return cmd
 
 
 class Lock:
-    """One flutter/dart toolchain run at a time per project. Two of them in one
-    tree share .dart_tool and the build directory, and have been seen to kill
-    each other's test process; a check lasts seconds, so waiting is cheap."""
+    """One check at a time per project. Two builds or test runs in one tree
+    share its output directories and have been seen to break each other; a check
+    lasts seconds to a minute, so waiting is cheap."""
 
-    def __init__(self, name, stale_after=900):
+    def __init__(self, name, stale_after=1800):
         self.path = os.path.join(F, "locks", name)
         self.stale_after = stale_after
         self.held = False
@@ -218,125 +232,164 @@ class Lock:
 
 
 # ---------------------------------------------------------------------------
-# the Dart import graph
+# units: what the project says it is made of
 # ---------------------------------------------------------------------------
 
-PRUNE = {".dart_tool", "build", ".git", ".factory", "node_modules", "Pods", ".symlinks",
-         ".fvm", ".idea", ".vscode", "ios", "android", "macos", "linux", "windows", "web"}
-DIRECTIVE = re.compile(r"^\s*(import|export|part)\b(?!\s+of\b)([^;]*);", re.M)
-STRING = re.compile(r"""(['"])(.+?)\1""")
-# A change here can reach any test: dependencies, analyzer rules, code generation,
-# fixtures and assets a test may load by path.
-ALL_TRIGGERS = re.compile(r"^(pubspec\.(yaml|lock)|analysis_options\.yaml|build\.yaml|l10n\.yaml|"
-                          r"dart_test\.yaml|test/.*|assets/.*|lib/.*)$")
-# Platform code and prose that no Dart test can observe.
-NO_TESTS = re.compile(r"^(android|ios|macos|linux|windows|web|docs?|\.github)/|\.(md|txt)$")
+
+def load_units(check):
+    """The unit list from check.units - inline, or printed by a command.
+    Returns (units, problem)."""
+    spec = check.get("units")
+    if not spec:
+        return None, None
+    if isinstance(spec, str):
+        try:
+            r = subprocess.run(["bash", "-c", spec], cwd=ROOT, capture_output=True, text=True)
+            spec = json.loads(r.stdout)
+        except (OSError, ValueError) as err:
+            return None, "check.units did not print a JSON list (%s)" % err
+    if not isinstance(spec, list):
+        return None, "check.units is not a list"
+    units = []
+    default_test = check.get("unit_test")
+    for u in spec:
+        if not isinstance(u, dict):
+            continue
+        raw = u.get("paths") or ([u["path"]] if u.get("path") else [])
+        paths = [os.path.normpath(p) for p in raw if p]
+        if not paths:
+            continue
+        name = u.get("name") or paths[0]
+        test = u["test"] if "test" in u else default_test
+        if test:
+            test = (test.replace("{paths}", " ".join(shlex.quote(p) for p in paths))
+                    .replace("{path}", shlex.quote(paths[0])).replace("{name}", shlex.quote(name)))
+        units.append({"name": name, "paths": paths, "path": paths[0], "deps": list(u.get("deps") or []),
+                      "test": test or ""})
+    return units, None
 
 
-def package_name():
-    m = re.search(r"^name:\s*([A-Za-z0-9_]+)", read(os.path.join(ROOT, "pubspec.yaml")), re.M)
-    return m.group(1) if m else ""
+def owner(path, units):
+    """The unit a path belongs to: the one with the longest matching path."""
+    best, best_len = None, -1
+    for u in units:
+        for p in u["paths"]:
+            if p == "." or path == p or path.startswith(p + os.sep):
+                length = 0 if p == "." else len(p)
+                if length > best_len:
+                    best, best_len = u, length
+    return best
 
 
-def dart_files():
-    out = []
-    for base, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in PRUNE and not (d.startswith(".") and d != ".")]
-        for name in files:
-            if name.endswith(".dart"):
-                out.append(os.path.relpath(os.path.join(base, name), ROOT))
-    return out
+def ignored(path, patterns):
+    return any(fnmatch.fnmatch(path, pat) or fnmatch.fnmatch(os.path.basename(path), pat) for pat in patterns)
 
 
-def build_graph():
-    """rdeps[path] = files that import, export or include path as a part."""
-    pkg = package_name()
+def reach(files, units, ignore):
+    """Units a change reaches: the owners of the changed files and everything
+    that depends on them. None means the change can reach anything."""
+    touched = set()
+    for f in files:
+        if ignored(f, ignore):
+            continue
+        u = owner(f, units)
+        if u is None:
+            return None, "%s belongs to no unit, so it can reach anything" % f
+        touched.add(u["name"])
     rdeps = {}
-    files = dart_files()
-    for src in files:
-        text = read(os.path.join(ROOT, src))
-        for m in DIRECTIVE.finditer(text):
-            for q in STRING.finditer(m.group(2)):
-                uri = q.group(2)
-                if uri.startswith("dart:"):
-                    continue
-                if uri.startswith("package:"):
-                    name, _, rest = uri[len("package:"):].partition("/")
-                    if name != pkg:
-                        continue
-                    target = os.path.normpath(os.path.join("lib", rest))
-                else:
-                    target = os.path.normpath(os.path.join(os.path.dirname(src), uri))
-                rdeps.setdefault(target, set()).add(src)
-    return rdeps, files
-
-
-def is_test(path):
-    return path.startswith("test" + os.sep) and path.endswith("_test.dart")
-
-
-def affected(changed, foreign=frozenset()):
-    """Returns (test files, reached dart files, reason). test files is None when
-    the change can reach any test and the whole suite has to run."""
-    rdeps, files = build_graph()
-    all_tests = sorted(p for p in files if is_test(p) and p not in foreign)
-    for p in changed:
-        if p.endswith(".dart"):
-            continue
-        if NO_TESTS.search(p):
-            continue
-        if ALL_TRIGGERS.match(p):
-            return None, set(files) - set(foreign), "%s can reach any test" % p
-    seen, todo = set(), [p for p in changed if p.endswith(".dart")]
+    for u in units:
+        for d in u["deps"]:
+            rdeps.setdefault(d, set()).add(u["name"])
+    seen, todo = set(), list(touched)
     while todo:
-        cur = todo.pop()
-        if cur in seen or cur in foreign:
+        n = todo.pop()
+        if n in seen:
             continue
-        seen.add(cur)
-        todo.extend(rdeps.get(cur, ()))
-    reached = {p for p in seen if os.path.exists(os.path.join(ROOT, p))}
-    tests = sorted(p for p in reached if is_test(p))
-    return tests, reached, "import graph"
+        seen.add(n)
+        todo.extend(rdeps.get(n, ()))
+    order = [u for u in units if u["name"] in seen]
+    return order, "%d unit(s) touched, %d reached" % (len(touched), len(order))
 
 
 # ---------------------------------------------------------------------------
-# stacks and commands
+# counting tests
 # ---------------------------------------------------------------------------
 
 
-def stack_commands(cfg):
-    """Commands for this project, or None when this is not a Dart project and
-    no "check" block says otherwise."""
-    check = cfg.get("check") or {}
-    pubspec = read(os.path.join(ROOT, "pubspec.yaml"))
-    if not pubspec and not check:
+def count_tests(out, check):
+    """Tests a run reported, or None when the output is not recognised."""
+    if check.get("count"):
+        nums = [int(n) for n in re.findall(check["count"], out, re.M) if str(n).isdigit()]
+        return sum(nums) if nums else None
+    if ZERO_TESTS.search(out):
+        return 0
+    for pat in COUNTS:
+        found = re.findall(pat, out, re.M)
+        if not found:
+            continue
+        total = sum(int(n) for n in found if str(n).isdigit())
+        if total > 0:
+            return total
+    return None
+
+
+# ---------------------------------------------------------------------------
+# census
+# ---------------------------------------------------------------------------
+
+
+def census_regexes(check):
+    return re.compile(check.get("test_files") or TEST_FILES), re.compile(check.get("skip") or SKIP)
+
+
+def skips_in(text, skip_re):
+    return sum(1 for line in text.splitlines() for _ in skip_re.finditer(line))
+
+
+def task_census(listed, fm, check):
+    """What this task did to the tests, judged against HEAD: test files it
+    deleted, suppression markers it added. Other tasks in flight cannot move
+    this number, because it only looks at this task's own files."""
+    tf, skip_re = census_regexes(check)
+    removed, added = [], 0
+    for p in listed:
+        if not tf.search(p.replace(os.sep, "/")):
+            continue
+        rc, before = git("show", "HEAD:./" + p.replace(os.sep, "/"))
+        existed = rc == 0
+        now = os.path.join(ROOT, p)
+        if existed and not os.path.exists(now):
+            removed.append(p)
+            continue
+        after = skips_in(read(now), skip_re)
+        added += max(0, after - (skips_in(before, skip_re) if existed else 0))
+    return removed, added
+
+
+def head_census(check):
+    """Test files and suppression markers in HEAD."""
+    tf, skip_re = census_regexes(check)
+    rc, out = git("ls-tree", "-r", "--name-only", "HEAD", "--", ".")
+    if rc != 0:
         return None
-    flutter = bool(re.search(r"sdk:\s*flutter", pubspec))
-    runner = "flutter test --no-pub" if flutter else "dart test"
-    cmds = {
-        "stack": "flutter" if flutter else ("dart" if pubspec else "custom"),
-        "format": "dart format {files}",
-        "analyze": "dart analyze --fatal-infos {files}",
-        "test": runner + " {tests}",
-        "full_analyze": "flutter analyze" if flutter else "dart analyze --fatal-infos",
-        "full_format": "dart format --output=none --set-exit-if-changed .",
-        "full_test": runner + " {tests}",
-        "bundle": flutter or bool(pubspec),
-    }
-    cmds.update({k: v for k, v in check.items()})
-    return cmds
+    rc2, prefix = git("rev-parse", "--show-prefix")
+    prefix = prefix.strip() if rc2 == 0 else ""
+    files = [p[len(prefix):] if prefix and p.startswith(prefix) else p for p in out.splitlines()]
+    files = [p for p in files if tf.search(p)]
+    per_file = {}
+    for p in files:
+        _, text = git("show", "HEAD:./" + p)
+        per_file[p] = skips_in(text, skip_re)
+    _, head = git("rev-parse", "--short", "HEAD")
+    return {"head": head.strip(), "test_files": len(files), "skipped": sum(per_file.values()), "files": per_file}
 
 
-def fill(cmd, **lists):
-    for key, items in lists.items():
-        cmd = cmd.replace("{%s}" % key, " ".join(shlex.quote(i) for i in items))
-    return cmd
+# ---------------------------------------------------------------------------
+# a run: every step logged, a short summary for the caller
+# ---------------------------------------------------------------------------
 
 
 class Run:
-    """Collects the output of every step in one log; nothing but the summary and
-    a failure excerpt reaches the agent that called the check."""
-
     def __init__(self, label):
         os.makedirs(os.path.join(F, "logs"), exist_ok=True)
         n = 1
@@ -344,19 +397,18 @@ class Run:
             n += 1
         self.log_rel = os.path.join(".factory", "logs", "%s.%d.log" % (label, n))
         self.log = open(os.path.join(ROOT, self.log_rel), "w", encoding="utf-8")
-        self.lines = []          # summary lines
-        self.failed = []         # (step, excerpt)
-        self.sig_text = []       # what the failure signature is computed from
+        self.lines, self.failed, self.sig_text = [], [], []
 
     def step(self, name, cmd):
         self.log.write("### %s: %s\n" % (name, cmd))
         self.log.flush()
+        started = time.time()
         try:
-            r = subprocess.run(["bash", "-c", cmd], cwd=ROOT, capture_output=True, text=True)
+            r = subprocess.run(["bash", "-c", cmd], cwd=ROOT, capture_output=True, text=True, errors="replace")
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
         except OSError as err:
             out, rc = str(err), 127
-        self.log.write(out + "\n")
+        self.log.write(out + "\n### %s: exit %d in %.1fs\n" % (name, rc, time.time() - started))
         self.log.flush()
         return rc, out
 
@@ -375,118 +427,31 @@ class Run:
         self.log.close()
 
 
-RESULT = re.compile(r"(?:^|\s)\+(\d+)(?: ~(\d+))?(?: -(\d+))?: ")
-
-
-def count_tests(out):
-    """(passed, failed) from the last progress line of a dart/flutter reporter."""
-    last = None
-    for m in RESULT.finditer(out):
-        last = m
-    if not last:
-        if re.search(r"No tests? (ran|were found|found)|no test files", out, re.I):
-            return 0, 0
-        return None, None
-    return int(last.group(1)), int(last.group(3) or 0)
-
-
 def excerpt(out, limit=60):
-    """The part of a failing run worth reading: from the first failing test or
-    error line onwards, capped. The full output is in the log."""
+    """The part of a failing run worth reading: from the first line that looks
+    like an error onwards, capped. The whole output is in the log."""
     lines = out.splitlines()
     start = next((i for i, l in enumerate(lines)
-                  if re.search(r"\[E\]|error|Error:|Expected:|FAIL|Exception|failed", l)), max(0, len(lines) - limit))
-    picked = [l for l in lines[start:] if not re.match(r"^\d\d:\d\d \+\d+(?: ~\d+)?: ", l)]
+                  if re.search(r"\berror\b|\bERROR\b|\[E\]|FAIL|Exception|Expected|assert|panic|failed", l)),
+                 max(0, len(lines) - limit))
+    picked = lines[start:]
     if len(picked) > limit:
         picked = picked[:limit - 1] + ["... (%d more lines in the log)" % (len(picked) - limit + 1)]
     return "\n".join(picked)[:6000]
 
 
-def run_tests(run, cmds, tests, label, bundle_ok):
-    """Runs the given test files, bundled into one entrypoint when that is safe.
-    Returns (ok, passed). A bundled failure is confirmed unbundled before it is
-    reported, so a bundling artefact can never be the reason a task goes red."""
-    if not tests:
-        return True, 0
-    bundled = None
-    if bundle_ok and cmds.get("bundle") and len(tests) > 1 and not has_test_configs():
-        bundled = write_bundle(label, tests, cmds.get("stack") == "flutter")
-    if bundled:
-        rc, out = run.step("tests (bundled)", fill(cmds["test"], tests=[bundled]))
-        passed, failed = count_tests(out)
-        try:
-            os.remove(os.path.join(ROOT, bundled))
-        except OSError:
-            pass
-        if rc == 0:
-            return True, passed or 0
-        run.log.write("### bundled run failed - confirming unbundled\n")
-    rc, out = run.step("tests", fill(cmds["test"], tests=tests))
-    passed, failed = count_tests(out)
+def run_stage(run, name, cmd, **lists):
+    rc, out = run.step(name, fill(cmd, **lists))
     if rc == 0:
-        if bundled:
-            run.note("tests", "bundled run failed but the files pass one by one - bundling skipped")
-        return True, passed or 0
-    run.fail("tests", "%s failed" % (failed if failed is not None else "some"), excerpt(out))
-    return False, passed or 0
-
-
-def has_test_configs():
-    for base, dirs, files in os.walk(os.path.join(ROOT, "test")):
-        if "flutter_test_config.dart" in files:
-            return True
-    return False
-
-
-def write_bundle(label, tests, flutter):
-    """One entrypoint importing every selected test file, each under a group
-    named after it: one compile and one test process instead of one per file."""
-    rel_dir = os.path.join(".dart_tool", "factory")
-    os.makedirs(os.path.join(ROOT, rel_dir), exist_ok=True)
-    rel = os.path.join(rel_dir, "bundle_%s.dart" % re.sub(r"[^A-Za-z0-9_]", "_", label))
-    body = ["// Generated by factory-check; removed after the run.",
-            "import 'package:%s' show group;" % ("flutter_test/flutter_test.dart" if flutter else "test/test.dart")]
-    names = []
-    for i, t in enumerate(tests):
-        alias = "t%d" % i
-        names.append((alias, t))
-        body.append("import '%s' as %s;" % (os.path.relpath(t, rel_dir), alias))
-    body.append("void main() {")
-    for alias, t in names:
-        body.append("  group('%s', () { %s.main(); });" % (t.replace("'", ""), alias))
-    body.append("}")
-    with open(os.path.join(ROOT, rel), "w", encoding="utf-8") as fh:
-        fh.write("\n".join(body) + "\n")
-    return rel
+        run.ok(name)
+    else:
+        run.fail(name, "exit %d" % rc, excerpt(out))
+    return rc == 0, out
 
 
 # ---------------------------------------------------------------------------
-# the guards gates/verify.sh carries, with the same meaning
+# failure history: same files and meaning as the gate's
 # ---------------------------------------------------------------------------
-
-SELF_CERT = re.compile(r"decisions\.md|tasks/[^ ]*\.md")
-RUNS_CODE = re.compile(r"(dotnet|npm|pnpm|yarn|npx|node|flutter|melos|dart|pytest|python3?|go test|cargo|mvn|"
-                       r"gradle|gradlew|make|bash gates/|jest|vitest|rspec|phpunit|curl|psql|docker|factory-check)")
-SKIP_RE = re.compile(r"\[Ignore\(|\(Skip\s*=|\.skip\(|(^|[^a-zA-Z])xit\(|(^|[^a-zA-Z])xdescribe\(|@Ignore([^a-zA-Z]|$)|"
-                     r"@pytest\.mark\.skip|@unittest\.skip|(^|[^a-zA-Z])t\.Skip\(|#\[ignore\]|skip:\s*true|Assert\.Inconclusive")
-CENSUS_PRUNE = {"node_modules", "bin", "obj", ".git", "build", ".dart_tool", "Pods", "vendor", "target",
-                "dist", ".next", ".factory"}
-CENSUS_NAME = re.compile(r"(Tests?\.cs|_test\.go|^test_.*\.py|_test\.py|_test\.dart|\.test\.[jt]sx?|"
-                         r"\.spec\.[jt]sx?|_spec\.rb|Tests?\.java|_test\.rs)$")
-
-
-def census(foreign=frozenset()):
-    """Test files and suppression markers in the tree - leaving out another
-    task's work in flight, which is counted when that task lands."""
-    n_files = n_skips = 0
-    for base, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in CENSUS_PRUNE]
-        for name in files:
-            if CENSUS_NAME.search(name) and os.path.relpath(os.path.join(base, name), ROOT) not in foreign:
-                n_files += 1
-                n_skips += sum(1 for line in read(os.path.join(base, name)).splitlines()
-                               for _ in SKIP_RE.finditer(line))
-    return n_files, n_skips
 
 
 def failure_signature(text):
@@ -507,8 +472,6 @@ def failure_signature(text):
 
 
 def record_failure(task_id, text):
-    """Same files and meaning as the gate's record_failure, so /factory:retro
-    and the no-progress rule see both."""
     fail_dir = os.path.join(F, "failures")
     os.makedirs(fail_dir, exist_ok=True)
     sig = failure_signature(text)
@@ -539,33 +502,48 @@ def tree_hash():
         return "unknown"
 
 
+TEXT_READERS = {"grep", "egrep", "fgrep", "rg", "cat", "test", "[", "head", "tail", "wc", "awk", "sed", "diff",
+                "cmp", "ls", "echo", "printf", "true", "stat", "file", "find"}
+
+
+def self_certifying(acc):
+    """An acceptance command whose only evidence is a file the agent writes
+    itself: it names decisions.md or a task file, and every command in it only
+    reads text. Nothing about any language - a command that runs anything else
+    is taken as running the code."""
+    if not acc or not re.search(r"decisions\.md|tasks/[^ ]*\.md", acc):
+        return False
+    for part in re.split(r"&&|\|\||;|\|", acc):
+        words = part.strip().split()
+        while words and ("=" in words[0] or words[0] in ("!", "then", "do")):
+            words = words[1:]
+        if words and os.path.basename(words[0]) not in TEXT_READERS:
+            return False
+    return True
+
+
+def acceptance_covered(acc, commands_run):
+    """An acceptance command identical to one the check already ran adds nothing."""
+    return acc.strip() in {c.strip() for c in commands_run}
+
+
 # ---------------------------------------------------------------------------
 # the task check
 # ---------------------------------------------------------------------------
 
 
-def acceptance_covered(acc, tests):
-    """An acceptance that only runs test files the selection already ran adds
-    nothing but its own startup time."""
-    try:
-        words = shlex.split(acc)
-    except ValueError:
-        return False
-    if len(words) < 3 or words[0] not in ("flutter", "dart") or words[1] != "test":
-        return False
-    paths = [w for w in words[2:] if not w.startswith("-")]
-    return bool(paths) and all(os.path.normpath(p) in tests for p in paths)
-
-
 def check_task(task_id):
     cfg = load_config()
+    check = cfg.get("check") or {}
+    commands = cfg.get("commands") or {}
     path, col = task_file(task_id)
     if not path:
         print("CHECK: no task file for %s under tasks/" % task_id)
         return 2
-    cmds = stack_commands(cfg)
-    if cmds is None:
-        return delegate_to_gate(task_id)
+    units, units_problem = load_units(check)
+    if units_problem:
+        print("CHECK: %s - fix .factory/config.json" % units_problem)
+        return 2
 
     marker = os.path.join(F, "verified", task_id)
     if os.path.exists(marker):
@@ -576,103 +554,113 @@ def check_task(task_id):
     text = read(path)
     fm = frontmatter(text)
     listed = files_touched(text)
+    existing = [p for p in listed if os.path.exists(os.path.join(ROOT, p))]
     run = Run(task_id)
     print("CHECK %s: %d file(s) touched" % (task_id, len(listed)))
 
     # --- guards that cost nothing ------------------------------------------
     acc = fm.get("acceptance", "")
-    if fm.get("needs_human", "").lower() != "true" and acc and SELF_CERT.search(acc) and not RUNS_CODE.search(acc):
+    if fm.get("needs_human", "").lower() != "true" and self_certifying(acc):
         run.fail("accept", "self-certifying: its only evidence is a file the agent writes itself",
                  "replace it with a command that runs the code, or mark the task needs_human: true")
     if not listed:
         run.fail("files", "the task lists nothing under \"## Files touched\"",
                  "list every file you created, changed or deleted, one \"- path\" per line, then run the check again")
-    foreign = frozenset(p for p in dirty_paths() if p not in listed)
-    n_files, n_skips = census(foreign)
-    baseline = {}
-    try:
-        baseline = json.loads(read(os.path.join(F, "baseline.json")) or "{}")
-    except ValueError:
-        pass
-    if baseline and fm.get("allow_test_removal", "").lower() != "true":
-        if n_files < int(baseline.get("test_files", 0) or 0):
-            run.fail("census", "test files went from %s to %d" % (baseline.get("test_files"), n_files),
+    if fm.get("allow_test_removal", "").lower() != "true" and listed:
+        removed, added = task_census(listed, fm, check)
+        if removed:
+            run.fail("census", "this task deletes test file(s): " + " ".join(removed),
                      "a suite does not get greener by losing tests; restore them")
-        if n_skips > int(baseline.get("skipped", 0) or 0):
-            run.fail("census", "suppressions went from %s to %d" % (baseline.get("skipped"), n_skips),
+        if added:
+            run.fail("census", "this task adds %d skip marker(s)" % added,
                      "skipping the failing test is not fixing it; remove the skip")
 
-    tests_ran = 0
+    tests_ran, counted, commands_run = 0, False, []
     if not run.failed:
-        existing = [p for p in listed if os.path.exists(os.path.join(ROOT, p))]
-        dart_listed = [p for p in existing if p.endswith(".dart")]
+        reached, why = (reach(listed, units, check.get("ignore") or DEFAULT_IGNORE) if units is not None
+                        else (None, "no units declared"))
+        paths = ["."] if reached is None else sorted({p for u in reached for p in u["paths"]}) or ["."]
+        with Lock("check"):
+            if check.get("format") and existing:
+                before = {p: read(os.path.join(ROOT, p)) for p in existing}
+                ok, out = run_stage(run, "format", check["format"], files=existing)
+                changed = sum(1 for p in existing if read(os.path.join(ROOT, p)) != before[p])
+                if ok and changed:
+                    run.lines[-1] = "  %-8s PASS (%d file(s) reformatted)" % ("format", changed)
+            for stage in ("build", "lint", "arch"):
+                if run.failed:
+                    break
+                cmd = check.get(stage) if stage in check else commands.get(stage)
+                if cmd and "{files}" in cmd and not existing:
+                    run.note(stage, "skipped (no touched file left to give it)")
+                elif cmd:
+                    ok, _ = run_stage(run, stage, cmd, files=existing, paths=paths)
+                    commands_run.append(fill(cmd, files=existing, paths=paths))
 
-        with Lock("toolchain"):
-            # format: fix, do not judge
-            if dart_listed and cmds.get("format"):
-                before = {p: read(os.path.join(ROOT, p)) for p in dart_listed}
-                rc, out = run.step("format", fill(cmds["format"], files=dart_listed))
-                changed = sum(1 for p in dart_listed if read(os.path.join(ROOT, p)) != before[p])
-                if rc == 0:
-                    run.ok("format", "%d file(s) reformatted" % changed if changed else "")
+            if not run.failed:
+                if reached is None and not commands.get("test"):
+                    targets = []
+                    if (cfg.get("gate_mode") or "full") == "full":
+                        run.fail("tests", "MISSING - gate_mode=full requires commands.test")
+                elif reached is None:
+                    targets = [("suite", commands["test"])]
+                    run.note("reach", why + " - the whole suite runs")
                 else:
-                    run.fail("format", "the formatter could not parse a file", excerpt(out))
-
-            selected, reached, why = affected(listed, foreign) if not run.failed else ([], set(), "")
-            whole = selected is None
-            if whole:
-                rdeps, files = build_graph()
-                selected = sorted(p for p in files if is_test(p) and p not in foreign)
-                run.note("select", "whole suite: %s" % why)
-
-            # analyze: the touched files and everything that imports them
-            if not run.failed and cmds.get("analyze"):
-                targets = sorted(p for p in (set(dart_listed) | reached) if p.endswith(".dart")
-                                 and os.path.exists(os.path.join(ROOT, p)) and p not in foreign)
-                if whole or len(targets) > 300:
-                    targets = ["."]  # the whole package: cheaper than a huge argument list
-                if targets:
-                    rc, out = run.step("analyze", fill(cmds["analyze"], files=targets))
-                    if rc == 0:
-                        run.ok("analyze", "%d file(s)" % len(targets))
+                    targets = [(u["name"], u["test"]) for u in reached if u["test"]]
+                    limit = int(check.get("max_units") or 10)
+                    if len(targets) > limit and commands.get("test"):
+                        # One suite run beats many runs that each pay the runner's start-up.
+                        run.note("reach", "%s - %d units with tests, more than %d: the whole suite runs"
+                                 % (why, len(targets), limit))
+                        targets = [("suite", commands["test"])]
                     else:
-                        run.fail("analyze", "", excerpt(out, 40))
+                        run.note("reach", "%s: %s" % (why, ", ".join(u["name"] for u in reached) or "none"))
+                for name, cmd in targets:
+                    if not cmd:
+                        continue
+                    rc, out = run.step("test %s" % name, cmd)
+                    commands_run.append(cmd)
+                    n = count_tests(out, check)
+                    if n is not None:
+                        tests_ran += n
+                        counted = True
+                    if rc != 0:
+                        run.fail("tests", "%s: exit %d" % (name, rc), excerpt(out))
+                        break
+                if not targets:
+                    counted = True  # nothing the change reaches has tests: zero ran, and that is known
+                elif not run.failed:
+                    run.ok("tests", ("%d test(s)" % tests_ran if counted else "count not recognised")
+                           + " in %d target(s)" % len([t for t in targets if t[1]]))
 
-            # tests the change reaches
-            if not run.failed and selected:
-                ok, passed = run_tests(run, cmds, selected, task_id, bundle_ok=True)
-                if ok:
-                    tests_ran += passed
-                    run.ok("tests", "%d test(s) in %d file(s)" % (passed, len(selected)))
-
-            # the task's own acceptance, run here rather than reported
             if not run.failed and acc:
                 if re.search(r"verify\.sh|factory-check", acc):
                     run.note("accept", "skipped (it names the gate itself)")
-                elif acceptance_covered(acc, set(selected)):
-                    run.ok("accept", "covered by the selected tests")
+                elif acceptance_covered(acc, commands_run):
+                    run.ok("accept", "already ran above")
                 else:
                     rc, out = run.step("accept", acc)
-                    passed, _ = count_tests(out)
+                    n = count_tests(out, check)
                     if rc == 0:
-                        tests_ran += passed or 0
-                        run.ok("accept", "%d test(s)" % passed if passed else "")
+                        if n is not None:
+                            tests_ran += n
+                            counted = True
+                        run.ok("accept", "%d test(s)" % n if n else "")
                     else:
                         run.fail("accept", "exit %d" % rc, excerpt(out))
 
         min_tests = int(cfg.get("min_tests", 1) or 1)
-        untested_ok = fm.get("untested_ok", "").lower() == "true"
-        if not run.failed and dart_listed and tests_ran < min_tests and untested_ok:
-            run.note("tests", "no test reaches this change - waived by untested_ok")
-        elif not run.failed and dart_listed and tests_ran < min_tests:
-            run.fail("tests", "no test exercised this change (%d ran, minimum %d)" % (tests_ran, min_tests),
-                     "no test file imports the files this task changed. Add tests for them, or put the test "
-                     "that covers them in the acceptance command.")
+        if not run.failed and counted and tests_ran < min_tests:
+            if fm.get("untested_ok", "").lower() == "true":
+                run.note("tests", "no test exercised this change - waived by untested_ok")
+            else:
+                run.fail("tests", "no test exercised this change (%d ran, minimum %d)" % (tests_ran, min_tests),
+                         "none of the tests the check ran covers what this task changed. Add the tests the "
+                         "acceptance criteria describe, or put the test that covers it in the acceptance command.")
 
     run.close()
     for line in run.lines:
         print(line)
-    print("  %-8s %d test file(s), %d suppression(s)" % ("census", n_files, n_skips))
 
     if run.failed:
         for name, text_ in run.failed:
@@ -683,7 +671,8 @@ def check_task(task_id):
         print("--- full log: %s" % run.log_rel)
         if repeat:
             print("CHECK RESULT: RED for %s - NO PROGRESS (signature %s, attempt %d): this exact failure already "
-                  "happened on this task. Change the approach, do not run the check again unchanged." % (task_id, sha, attempt))
+                  "happened on this task. Change the approach, do not run the check again unchanged."
+                  % (task_id, sha, attempt))
         else:
             print("CHECK RESULT: RED for %s (signature %s, attempt %d)" % (task_id, sha, attempt))
         return 1
@@ -691,10 +680,8 @@ def check_task(task_id):
     os.makedirs(os.path.join(F, "verified"), exist_ok=True)
     _, head = git("rev-parse", "--short", "HEAD")
     with open(marker, "w", encoding="utf-8") as fh:
-        fh.write("%s\ntests=%d\ntest_files=%d\nskipped=%d\nisolated=no\ncheck=fast\ncommit=%s\ntree=%s\n"
-                 % (now_iso(), tests_ran, n_files, n_skips, head.strip() or "unknown", tree_hash()))
-    with open(os.path.join(F, "baseline.json"), "w", encoding="utf-8") as fh:
-        json.dump({"test_files": n_files, "skipped": n_skips, "updated": now_iso(), "by": task_id}, fh)
+        fh.write("%s\n%sisolated=no\ncheck=fast\ncommit=%s\ntree=%s\n"
+                 % (now_iso(), "tests=%d\n" % tests_ran if counted else "", head.strip() or "unknown", tree_hash()))
     hist = os.path.join(F, "failures", task_id + ".log")
     if os.path.exists(hist):
         os.makedirs(os.path.join(F, "failures", "resolved"), exist_ok=True)
@@ -706,29 +693,6 @@ def check_task(task_id):
     return 0
 
 
-def delegate_to_gate(task_id):
-    """Not a Dart project and no "check" block: the project's own gate decides.
-    Its output goes to the log; the agent sees the GATE lines."""
-    gate = os.path.join(ROOT, "gates", "verify.sh")
-    if not os.path.isfile(gate):
-        print("CHECK: no pubspec.yaml, no \"check\" block in .factory/config.json and no gates/verify.sh")
-        return 2
-    run = Run(task_id)
-    rc, out = run.step("gate", "bash gates/verify.sh %s" % shlex.quote(task_id))
-    run.close()
-    for line in out.splitlines():
-        if line.startswith("GATE") or "NO PROGRESS" in line:
-            print(line)
-    if rc != 0:
-        print("--- failure ---")
-        print(excerpt(out))
-        print("--- full log: %s" % run.log_rel)
-        print("CHECK RESULT: RED for %s" % task_id)
-        return 1
-    print("CHECK RESULT: GREEN for %s (marker written by gates/verify.sh)" % task_id)
-    return 0
-
-
 # ---------------------------------------------------------------------------
 # the whole tree
 # ---------------------------------------------------------------------------
@@ -736,37 +700,72 @@ def delegate_to_gate(task_id):
 
 def check_full():
     cfg = load_config()
-    cmds = stack_commands(cfg)
+    check = cfg.get("check") or {}
+    commands = cfg.get("commands") or {}
+    full_mode = (cfg.get("gate_mode") or "full") == "full"
     run = Run("full")
-    if cmds is None:
-        c = cfg.get("commands") or {}
-        steps = [(k, c.get(k)) for k in ("build", "test", "arch", "lint") if c.get(k)]
-        for name, cmd in steps:
-            rc, out = run.step(name, cmd)
-            (run.ok(name) if rc == 0 else run.fail(name, "exit %d" % rc, excerpt(out)))
-    else:
-        with Lock("toolchain"):
-            for name in ("full_format", "full_analyze"):
-                if cmds.get(name):
-                    rc, out = run.step(name, cmds[name])
-                    label = name.replace("full_", "")
-                    (run.ok(label) if rc == 0 else run.fail(label, "", excerpt(out, 40)))
-            arch = (cfg.get("commands") or {}).get("arch")
-            if arch:
-                rc, out = run.step("arch", arch)
-                (run.ok("arch") if rc == 0 else run.fail("arch", "", excerpt(out)))
-            rdeps, files = build_graph()
-            tests = sorted(p for p in files if is_test(p))
-            full_cmds = dict(cmds, test=cmds.get("full_test") or cmds["test"])
-            ok, passed = run_tests(run, full_cmds, tests, "full", bundle_ok=True)
-            if ok:
-                run.ok("tests", "%d test(s) in %d file(s)" % (passed, len(tests)))
+    tests_ran = None
+    with Lock("check"):
+        for stage in ("build", "test", "arch", "lint"):
+            cmd = commands.get(stage)
+            if not cmd:
+                if full_mode and stage != "arch":
+                    run.fail(stage, "MISSING - gate_mode=full requires commands.%s" % stage)
+                continue
+            rc, out = run.step(stage, cmd)
+            if rc != 0:
+                run.fail(stage, "exit %d" % rc, excerpt(out))
+                continue
+            if stage != "test":
+                run.ok(stage)
+                continue
+            tests_ran = count_tests(out, check)
+            min_tests = int(cfg.get("min_tests", 1) or 1)
+            if tests_ran is None:
+                run.ok("test", "count not recognised - set check.count to a regex for this runner's summary")
+            elif tests_ran < min_tests:
+                run.fail("test", "the suite reported %d test(s), minimum is %d" % (tests_ran, min_tests),
+                         "a suite that runs nothing exits 0 and proves nothing")
+            else:
+                run.ok("test", "%d test(s)" % tests_ran)
+
+    # The run as a whole may not have lost tests either: HEAD now against HEAD
+    # when the run was planned.
+    start = {}
+    try:
+        start = json.loads(read(os.path.join(F, "run-start.json")) or "{}")
+    except ValueError:
+        pass
+    now = head_census(check)
+    if start and now:
+        # A task that declared allow_test_removal answers for its own files only.
+        allowed = set()
+        for tid in start.get("tasks", []):
+            p, _ = task_file(tid)
+            text = read(p) if p else ""
+            if frontmatter(text).get("allow_test_removal", "").lower() == "true":
+                allowed.update(f.replace(os.sep, "/") for f in files_touched(text))
+        before, after = start.get("files") or {}, now["files"]
+        lost = sorted(f for f in before if f not in after and f not in allowed)
+        skipped = sorted(f for f in after if after[f] > before.get(f, 0) and f not in allowed)
+        if lost:
+            run.fail("census", "test files in HEAD went from %d to %d during this run: %s"
+                     % (start.get("test_files", 0), now["test_files"], " ".join(lost[:10])),
+                     "find the task commit that removed them - /factory:bisect, or git log -- <file>")
+        elif skipped:
+            run.fail("census", "skip markers were added during this run: " + " ".join(skipped[:10]),
+                     "find the task commit that added them")
+        else:
+            run.ok("census", "%d test file(s), %d suppression(s); %d/%d when the run started"
+                   % (now["test_files"], now["skipped"], start.get("test_files", 0), start.get("skipped", 0)))
+
     run.close()
     for line in run.lines:
         print(line)
     verdict = "red" if run.failed else "green"
     with open(os.path.join(F, "full-check"), "w", encoding="utf-8") as fh:
-        fh.write("verdict=%s\nat=%s\ntree=%s\nlog=%s\n" % (verdict, now_iso(), tree_hash(), run.log_rel))
+        fh.write("verdict=%s\nat=%s\ntests=%s\ntree=%s\nlog=%s\n"
+                 % (verdict, now_iso(), tests_ran if tests_ran is not None else "unknown", tree_hash(), run.log_rel))
     if run.failed:
         for name, text_ in run.failed:
             if text_:
@@ -784,18 +783,31 @@ def main(argv):
         print("CHECK: %s has no .factory/active - not a factory project, or not its root." % ROOT)
         return 2
     if not argv:
-        print(__doc__.split("\n\n")[1])
+        print(__doc__.split("\n\n")[0])
         return 2
     if argv[0] == "--full":
         return check_full()
-    if argv[0] == "affected":
-        tests, reached, why = affected([os.path.normpath(p) for p in argv[1:]])
-        if tests is None:
-            print("ALL %s" % why)
+    if argv[0] == "units":
+        check = (load_config().get("check") or {})
+        units, problem = load_units(check)
+        if problem:
+            print("UNITS: " + problem)
+            return 2
+        if units is None:
+            print("ALL no units declared in check.units")
+            return 0
+        reached, why = reach([os.path.normpath(p) for p in argv[1:]], units, check.get("ignore") or DEFAULT_IGNORE)
+        if reached is None:
+            print("ALL " + why)
         else:
-            for t in tests:
-                print(t)
+            for u in reached:
+                print("%s %s" % (u["name"], u["path"]))
         return 0
+    if argv[0] == "census":
+        c = head_census(load_config().get("check") or {})
+        print(json.dumps(c) if "--json" in argv else "HEAD %s: %s test file(s), %s suppression(s)"
+              % (c["head"], c["test_files"], c["skipped"]) if c else "CENSUS: not a git repository")
+        return 0 if c else 2
     return check_task(argv[0])
 
 
