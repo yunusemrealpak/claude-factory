@@ -20,6 +20,9 @@
 # depth. So "*/migrations/*" catches db/Migrations/001.sql, "*.sql" every SQL
 # file, and "src/Auth/*" the same directory wherever the repo nests it.
 #
+# A file marked linguist-generated in .gitattributes, or matching a glob in
+# "risk_exclude", is never a reason for review.
+#
 # Exit: 0 nothing risky touched; 1 review needed (the output says why);
 #       2 usage error.
 set -uo pipefail
@@ -60,10 +63,31 @@ if [ -z "${listed}" ]; then
   exit 1
 fi
 
+# Generated files are not reviewed: nobody wrote them, and approving the output
+# of a generator a reviewer cannot change is a dispatch spent on nothing. Two
+# signals, neither tied to any tool: git's own linguist-generated attribute in
+# .gitattributes, and the risk_exclude globs in the config.
+excludes="$(jq -r '.risk_exclude // [] | .[]' "${ROOT}/.factory/config.json" 2>/dev/null)"
+generated=""
+matches_any() {  # <path> <newline-separated globs>
+  local p="$1" pat glob
+  while IFS= read -r pat; do
+    [ -n "${pat}" ] || continue
+    case "${pat}" in /*|\**) glob="${pat}" ;; *) glob="*/${pat}" ;; esac
+    [[ "/${p}" == ${glob} ]] && return 0
+  done <<< "$2"
+  return 1
+}
+
 shopt -s nocasematch
 hits=""
 while IFS= read -r p; do
   [ -n "${p}" ] || continue
+  if [ "$(git -C "${ROOT}" check-attr linguist-generated -- "${p}" 2>/dev/null | awk -F': ' '{print $3}')" = "true" ] \
+     || { [ -n "${excludes}" ] && matches_any "${p}" "${excludes}"; }; then
+    generated="${generated} ${p}"
+    continue
+  fi
   while IFS= read -r pat; do
     [ -n "${pat}" ] || continue
     case "${pat}" in
@@ -80,6 +104,7 @@ while IFS= read -r p; do
 done <<< "${listed}"
 shopt -u nocasematch
 
+[ -n "${generated}" ] && echo "RISK skipped for ${TASK_ID}: generated or excluded:${generated}"
 if [ -n "${hits}" ]; then
   printf '%s' "${hits}"
   echo "RISK ${TASK_ID}: review before commit - the gate cannot judge these files."

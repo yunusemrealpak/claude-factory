@@ -89,7 +89,7 @@ lint_one() {  # <file>
     grep -qF "${sec}" "${f}" || say "the ${sec} section is missing"
   done
   grep -qE '^- \[[ xX]\] ' "${f}" || say "## Acceptance criteria lists no checkable criterion"
-  grep -qE '^<(what must be true|files/modules|filled in by|appended by)' "${f}" \
+  grep -qE '^<(what must be true|files/modules|filled in by|appended by|the files a builder)' "${f}" \
     && say "template placeholder text is still in the body"
 
   [ "${bad}" -eq 0 ] && echo "LINT OK ${id}"

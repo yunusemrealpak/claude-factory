@@ -175,7 +175,7 @@ jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers
   retry_limit:2, min_tests:1, gate_mode:"staged", gate_isolation:false, isolation_links:[], risk_paths:["*.sql"],
   agent_stale_after_min:45,
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n' > .gitignore
+printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n' > .gitignore
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
 check "a current project reports nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"

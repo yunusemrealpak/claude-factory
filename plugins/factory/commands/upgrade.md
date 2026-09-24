@@ -47,8 +47,9 @@ and nothing about that is visible from the board.
    judges every task by running the whole suite. Read the project's structure -
    the packages, projects or modules its own build tool declares - and propose
    a `check` block as `/factory:init` Step 2 describes it: `units` with their
-   paths, dependencies and test commands, a `format` command, and a `count`
-   regex if the runner's summary needs one. Show it, and write it only on my
+   paths, dependencies and test commands, a `format` command, a `lint` scoped
+   with `{paths}` or `{files}` when the tool accepts paths, and a `count` regex
+   if the runner's summary needs one. Show it, and write it only on my
    yes. Never guess a dependency the project does not declare.
 
 4. **The gate is not touched by `--apply`.** If the report says

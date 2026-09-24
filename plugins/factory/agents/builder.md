@@ -28,7 +28,9 @@ You build exactly one task: the one whose id the workflow gave you.
    prints the whole task file plus the lessons for its module. That output is
    your brief: do not read the task file again. On a retry, its
    `## Attempts` section says what was tried and ruled out - start from there.
-2. **Read** only the source files the change needs.
+2. **Read** the files the task's `## Context` names first, then only what the
+   change needs beyond them. Search the codebase for what Context does not
+   cover, not for what it already tells you.
 3. **Implement** the smallest change that satisfies every acceptance criterion,
    including the tests the criteria ask for. Put a test where the check will run
    it: in the part of the project (the unit) that owns the code it tests.
@@ -43,7 +45,8 @@ You build exactly one task: the one whose id the workflow gave you.
 5. **Record your files**, then **check:** fill `## Files touched` in the task
    file - every file you created, changed or deleted, tests included, one
    `- path` per line, repo-relative; not `decisions.md`, not task files, nothing
-   under `.factory/` - then run `factory-check <task-id>`.
+   under `.factory/` - then run `factory-check <task-id>` with a 10-minute Bash
+   timeout: it may wait for another task's work (see WAITING below).
    - `CHECK RESULT: GREEN` - go to step 6.
    - `CHECK RESULT: RED` - read the excerpt it printed (open the full log only
      if the excerpt is not enough), fix the cause, add an entry to
@@ -52,6 +55,11 @@ You build exactly one task: the one whose id the workflow gave you.
      check runs in total.
    - `NO PROGRESS` - stop. The same failure came back unchanged; another run
      will not change it. Return `no_progress`.
+   - `CHECK RESULT: WAITING` - every error is in another task's unlanded work,
+     not in yours. Change nothing and do not run the check again: write the
+     `decisions.md` line of step 6 - about what you built, not about the wait -
+     then return `waiting`. The workflow
+     re-checks the task once that work has landed.
 6. **Land:** append exactly one line to `decisions.md`:
    `- <task-id>: <decision taken> - <one-clause reason>`. After a red attempt
    that you then fixed, add `Resolved by: <the change that made the difference>`

@@ -191,12 +191,18 @@ case-insensitive, `*` crossing directories, a pattern without a leading `/` or
 Adapt it to the repository: look at its directory and file names, add what
 guards security, tenancy, money and data (`*/Policies/*`, `*Guard*`,
 `*/Tenancy/*`), and drop what would match half the repo, because every false
-match costs a review dispatch. The final list is part of what I approve in
+match costs a review dispatch. Generated files are never a reason for review:
+mark them `linguist-generated=true` in `.gitattributes` if the project does not
+already, or list their globs under `risk_exclude` in the config. The final list is part of what I approve in
 Step 5.
 
 `fast` is optional and configures `/factory:fast`: `workers` (how many builders at
 once, default 4), `effort_build` (default `medium`), `effort_escalate` (the one
-retry of a red task, default `xhigh`) and `effort_review` (default `high`).
+retry of a red task, default `xhigh`), `effort_review` (default `high`),
+`risk_review` (`after`, the default: a task sent to review only by a risk path
+lands first and is reviewed alongside the run; `before`: it waits for the
+review), `audit` (default `true`: one auditor reads the run's seams at the end)
+and `effort_audit` (default `high`).
 
 `check` is optional too, and it is how `/factory:fast` judges one task without
 running the whole project. `factory-check` knows no language, framework or build
@@ -231,6 +237,10 @@ the project's own tools already express:
   that executed nothing.
 - **build**, **lint**, **arch** may be overridden with narrower commands (`{files}`,
   `{paths}` = the reached units' paths). Leave them out and `commands` is used.
+  A lint or format check that walks the whole tree judges every other task's
+  unfinished files too: when the project's tool accepts paths, give `lint` a
+  `{paths}` or `{files}` form - the full check still runs the whole-tree one
+  once, at the end.
 
 Show the `check` block in the approval table in Step 5, as one line per key.
 
@@ -604,6 +614,12 @@ guard_test_census() {
 # summary and treat "nothing ran" as red.
 count_tests() {
   local out="\$1" n
+  # A runner whose summary none of the patterns below know is described in the
+  # config ("check.count", a regex) and counted by the factory's own tool.
+  if [ -n "$(jq -r '.check.count // ""' "${CONFIG}" 2>/dev/null)" ] && command -v factory-check >/dev/null 2>&1; then
+    n="$(factory-check count "${out}" 2>/dev/null)"
+    case "${n}" in ''|*[!0-9]*) ;; *) TEST_COUNT="${n}"; return 0 ;; esac
+  fi
   # Explicit zero-test signatures. Unambiguous across runners.
   if grep -qiE 'no test files|no tests ran|no tests found|no tests were found|found 0 tests|ran 0 tests|Tests:[[:space:]]+0 total|Total tests:[[:space:]]*0' "${out}"; then
     TEST_COUNT=0
@@ -848,6 +864,9 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/full-check
 .factory/run-start.json
 .factory/last-run.md
+.factory/parked/
+.factory/audit.md
+.factory/gate-start/
 ```
 
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,
@@ -974,6 +993,9 @@ stage_since:
 ## Constraints
 <files/modules in scope, files explicitly out of scope>
 
+## Context
+<the files a builder reads first and why, the existing code to copy, where new pieces are registered or wired in>
+
 ## Acceptance criteria
 - [ ] <criterion that the acceptance command actually checks>
 - [ ] <criterion>
@@ -990,6 +1012,13 @@ Rules:
 - Ids: the first run uses `P0-NN` for Phase 0 and `T-NNN` for product tasks,
   and together they form change C1. Every later run uses its change prefix;
   see Step 0.
+- `## Context` is what you already found out in Step 1 and while splitting the
+  spec, written down so a builder does not have to find it again: the files to
+  read first (path, and one clause on why), the existing code whose pattern to
+  copy, where new pieces are registered or wired in, and any convention the code
+  does not make obvious. At most ten lines, paths rather than prose. Every
+  builder starts cold; on a real board, builders without it spent about sixty
+  reads per task rediscovering the same code.
 - `## Files touched` starts empty. The implementer fills it in, and the commit
   that records the task takes exactly those files, so this list is the line
   between this task's work and everything else in a shared working tree.
@@ -1024,6 +1053,16 @@ Rules:
   isolation, authentication, payments, data deletion, and public contracts other
   modules compile against. Be sparing: every `always` costs a dispatch on every
   attempt.
+- Graph shape: the longest dependency chain, not the number of workers, bounds
+  how fast the board is built - tasks on one chain run one after another.
+  Before Step 5, measure it: `factory-plan --proposed` (incremental mode) or
+  `factory-plan` prints a `CRITICAL` line and warns when one chain holds more
+  than half the tasks. Then shorten it: merge consecutive links that change the
+  same part of the code into one task (every link pays a task's fixed cost), and
+  move work that has to happen in sequence - a generated artifact, a schema
+  migration, a lockfile - into one task after the parallel work instead of
+  threading it through every link. Depend on a contract, not on an
+  implementation, wherever the contract is enough.
 - Task size: one implementer, one gate run. If it needs three unrelated gates,
   split it. The working granularity is one pull request: substantial enough to
   be worth a dispatch, small enough that a red gate does not throw away an hour
@@ -1065,7 +1104,8 @@ in a folder name and a git ref name, which is why the alphabet is narrow.
 
 Print a table: `id | title | module | depends_on | acceptance | needs_human`,
 grouped by phase/module, in dependency order. Then the totals: task count,
-Phase 0 count, needs-human count, longest dependency chain. On the first run,
+Phase 0 count, needs-human count, and the longest dependency chain and widest
+level as `factory-plan` measured them. On the first run,
 also print the `risk_paths` list you wrote into the config, one line: green
 tasks touching these get a reviewer before commit.
 

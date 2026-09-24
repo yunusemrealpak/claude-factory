@@ -18,6 +18,7 @@
 # Precondition: this hook is inert unless <project>/.factory/active exists.
 set -uo pipefail
 
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 input="$(cat)"
 
 project_dir="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
@@ -77,6 +78,16 @@ case "$tool_name" in
     moves="$(printf '%s\n' "$payload" \
       | grep -E '(^|[|;&(]|[[:space:]])(mv|cp|rsync|ln|install)([[:space:]]|$)|git[[:space:]]+mv|>[[:space:]]*[^[:space:]]*tasks/done' \
       | grep 'tasks/done')"
+    # A gate run is about to start: fingerprint the tree it will see. The event
+    # hook compares this with the tree when the run went green, and only when
+    # the two match does it write the fingerprint into the marker - which is what
+    # lets the integrator skip testing the same bytes twice, for a gate too old
+    # to write the fingerprint itself.
+    gate_id="$(printf '%s\n' "$payload" | sed -n -E 's#.*verify\.sh[[:space:]]+([A-Za-z0-9._][A-Za-z0-9._-]*).*#\1#p' | head -1)"
+    if [ -n "$gate_id" ]; then
+      mkdir -p "$project_dir/.factory/gate-start" 2>/dev/null
+      bash "$HOOK_DIR/factory-gate-skip.sh" hash "$project_dir" > "$project_dir/.factory/gate-start/$gate_id" 2>/dev/null
+    fi
     [ -n "$moves" ] || exit 0
     payload="$moves"
     ;;

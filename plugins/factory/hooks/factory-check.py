@@ -7,6 +7,7 @@ Usage (from the project root):
                                    own gate commands
   factory-check units <path>...    which units a change to these paths reaches
   factory-check census [--json]    the test census of HEAD
+  factory-check count <file>       the number of tests a runner's output reports
 
 Nothing in here knows a language, a framework or a build tool. What a project is
 made of and how it is built and tested is data the project supplies:
@@ -56,7 +57,14 @@ census of HEAD with the one recorded when the run was planned.
 Every stage's output goes to .factory/logs/; the caller gets a short summary and
 the failing part. A failure seen before on the same task is NO PROGRESS.
 
-Exit: 0 green, 1 red, 2 usage or setup error.
+When every error a failing stage points at is in a file another task has in
+flight - changed, uncommitted, not on this task's list - the failure is not
+this task's: nothing is recorded against it, and the check waits, holding no
+lock and spending nothing, for that work to land or change (check.foreign_wait
+seconds, default 120), then runs again. Still blocked at the end: WAITING.
+
+Exit: 0 green, 1 red, 2 usage or setup error, 3 waiting on another task's
+work in flight.
 """
 import fnmatch
 import hashlib
@@ -397,7 +405,7 @@ class Run:
             n += 1
         self.log_rel = os.path.join(".factory", "logs", "%s.%d.log" % (label, n))
         self.log = open(os.path.join(ROOT, self.log_rel), "w", encoding="utf-8")
-        self.lines, self.failed, self.sig_text = [], [], []
+        self.lines, self.failed, self.sig_text, self.raw = [], [], [], []
 
     def step(self, name, cmd):
         self.log.write("### %s: %s\n" % (name, cmd))
@@ -418,9 +426,11 @@ class Run:
     def note(self, name, detail):
         self.lines.append("  %-8s %s" % (name, detail))
 
-    def fail(self, name, detail, excerpt=""):
+    def fail(self, name, detail, excerpt="", raw=None):
         self.lines.append("  %-8s FAIL%s" % (name, " (%s)" % detail if detail else ""))
         self.failed.append((name, excerpt))
+        if raw:
+            self.raw.append(raw)
         self.sig_text.append("### %s\n%s\n%s" % (name, detail, excerpt))
 
     def close(self):
@@ -445,7 +455,7 @@ def run_stage(run, name, cmd, **lists):
     if rc == 0:
         run.ok(name)
     else:
-        run.fail(name, "exit %d" % rc, excerpt(out))
+        run.fail(name, "exit %d" % rc, excerpt(out), raw=out)
     return rc == 0, out
 
 
@@ -532,6 +542,167 @@ def acceptance_covered(acc, commands_run):
 # ---------------------------------------------------------------------------
 
 
+def dirty_paths():
+    """Project-relative paths that differ from HEAD or are untracked."""
+    rc, prefix = git("rev-parse", "--show-prefix")
+    if rc != 0:
+        return set()
+    prefix = prefix.strip()
+    rc, out = git("status", "--porcelain", "-z", "--untracked-files=all", "--", ".")
+    if rc != 0:
+        return set()
+    paths, parts, i = set(), out.split("\0"), 0
+    while i < len(parts):
+        entry = parts[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        status, path = entry[:2], entry[3:]
+        if status[0] in "RC":  # a rename carries its source as the next field
+            i += 1
+        if prefix and path.startswith(prefix):
+            path = path[len(prefix):]
+        paths.add(os.path.normpath(path))
+    return paths
+
+
+ERROR_LINE = re.compile(r"(?i)\b(error|errors|failed|failure|exception|fatal)\b|\[E\]")
+PATH_TOKEN = re.compile(r"[\w@+.\-/\\]+\.\w{1,10}")
+
+
+def first_repo_file(line):
+    """The first token on a line that names a file in this project. Compilers,
+    linters and test runners all put the location of a problem there."""
+    real = os.path.realpath(ROOT)
+    for m in PATH_TOKEN.finditer(line):
+        tok = m.group(0).strip("'\"()[],:")
+        for base in (real, ROOT):
+            if tok.startswith(base + os.sep):
+                tok = tok[len(base) + 1:]
+        if tok.startswith("./"):
+            tok = tok[2:]
+        if tok and not os.path.isabs(tok) and os.path.isfile(os.path.join(ROOT, tok)):
+            return os.path.normpath(tok)
+    return None
+
+
+def foreign_blockers(outputs, listed):
+    """When every error a failing stage points at is in a file another task has
+    in flight - changed, not committed, not on this task's list - the failure is
+    that task's, not this one's. Returns those files, or [] when any error is
+    somewhere this task has to answer for."""
+    dirty = dirty_paths()
+    foreign = {p for p in dirty if p not in set(listed)}
+    located = set()
+    for out in outputs:
+        for line in out.splitlines():
+            if ERROR_LINE.search(line):
+                f = first_repo_file(line)
+                if f:
+                    located.add(f)
+    return sorted(located) if located and located <= foreign else []
+
+
+def wait_for(files, deadline):
+    """Blocks, spending nothing, until one of the files lands or changes."""
+    def state():
+        dirty = dirty_paths()
+        out = {}
+        for f in files:
+            try:
+                out[f] = (f in dirty, os.path.getmtime(os.path.join(ROOT, f)))
+            except OSError:
+                out[f] = (False, None)
+        return out
+    before = state()
+    while time.time() < deadline:
+        time.sleep(3)
+        if state() != before:
+            return True
+    return False
+
+
+def run_stages(run, ctx):
+    """format, build, lint, arch, the reached tests and the acceptance command.
+    Returns (tests_ran, counted)."""
+    cfg, check, commands = ctx["cfg"], ctx["check"], ctx["commands"]
+    existing, listed, acc = ctx["existing"], ctx["listed"], ctx["acc"]
+    units = ctx["units"]
+    tests_ran, counted, commands_run = 0, False, []
+    reached, why = (reach(listed, units, check.get("ignore") or DEFAULT_IGNORE) if units is not None
+                    else (None, "no units declared"))
+    paths = ["."] if reached is None else sorted({p for u in reached for p in u["paths"]}) or ["."]
+    with Lock("check"):
+        if check.get("format") and existing:
+            before = {p: read(os.path.join(ROOT, p)) for p in existing}
+            ok, out = run_stage(run, "format", check["format"], files=existing)
+            changed = sum(1 for p in existing if read(os.path.join(ROOT, p)) != before[p])
+            if ok and changed:
+                run.lines[-1] = "  %-8s PASS (%d file(s) reformatted)" % ("format", changed)
+        for stage in ("build", "lint", "arch"):
+            if run.failed:
+                break
+            cmd = check.get(stage) if stage in check else commands.get(stage)
+            if cmd and "{files}" in cmd and not existing:
+                run.note(stage, "skipped (no touched file left to give it)")
+            elif cmd:
+                run_stage(run, stage, cmd, files=existing, paths=paths)
+                commands_run.append(fill(cmd, files=existing, paths=paths))
+
+        if not run.failed:
+            if reached is None and not commands.get("test"):
+                targets = []
+                if (cfg.get("gate_mode") or "full") == "full":
+                    run.fail("tests", "MISSING - gate_mode=full requires commands.test")
+            elif reached is None:
+                targets = [("suite", commands["test"])]
+                run.note("reach", why + " - the whole suite runs")
+            else:
+                targets = [(u["name"], u["test"]) for u in reached if u["test"]]
+                limit = int(check.get("max_units") or 10)
+                if len(targets) > limit and commands.get("test"):
+                    # One suite run beats many runs that each pay the runner's start-up.
+                    run.note("reach", "%s - %d units with tests, more than %d: the whole suite runs"
+                             % (why, len(targets), limit))
+                    targets = [("suite", commands["test"])]
+                else:
+                    run.note("reach", "%s: %s" % (why, ", ".join(u["name"] for u in reached) or "none"))
+            for name, cmd in targets:
+                if not cmd:
+                    continue
+                rc, out = run.step("test %s" % name, cmd)
+                commands_run.append(cmd)
+                n = count_tests(out, check)
+                if n is not None:
+                    tests_ran += n
+                    counted = True
+                if rc != 0:
+                    run.fail("tests", "%s: exit %d" % (name, rc), excerpt(out), raw=out)
+                    break
+            if not targets:
+                counted = True  # nothing the change reaches has tests: zero ran, and that is known
+            elif not run.failed:
+                run.ok("tests", ("%d test(s)" % tests_ran if counted else "count not recognised")
+                       + " in %d target(s)" % len([t for t in targets if t[1]]))
+
+        if not run.failed and acc:
+            if re.search(r"verify\.sh|factory-check", acc):
+                run.note("accept", "skipped (it names the gate itself)")
+            elif acceptance_covered(acc, commands_run):
+                run.ok("accept", "already ran above")
+            else:
+                rc, out = run.step("accept", acc)
+                n = count_tests(out, check)
+                if rc == 0:
+                    if n is not None:
+                        tests_ran += n
+                        counted = True
+                    run.ok("accept", "%d test(s)" % n if n else "")
+                else:
+                    run.fail("accept", "exit %d" % rc, excerpt(out), raw=out)
+    return tests_ran, counted
+
+
 def check_task(task_id):
     cfg = load_config()
     check = cfg.get("check") or {}
@@ -554,101 +725,33 @@ def check_task(task_id):
     text = read(path)
     fm = frontmatter(text)
     listed = files_touched(text)
-    existing = [p for p in listed if os.path.exists(os.path.join(ROOT, p))]
-    run = Run(task_id)
+    ctx = {"cfg": cfg, "check": check, "commands": commands, "units": units, "listed": listed,
+           "existing": [p for p in listed if os.path.exists(os.path.join(ROOT, p))], "acc": fm.get("acceptance", "")}
     print("CHECK %s: %d file(s) touched" % (task_id, len(listed)))
+    sys.stdout.flush()
 
-    # --- guards that cost nothing ------------------------------------------
-    acc = fm.get("acceptance", "")
-    if fm.get("needs_human", "").lower() != "true" and self_certifying(acc):
-        run.fail("accept", "self-certifying: its only evidence is a file the agent writes itself",
-                 "replace it with a command that runs the code, or mark the task needs_human: true")
-    if not listed:
-        run.fail("files", "the task lists nothing under \"## Files touched\"",
-                 "list every file you created, changed or deleted, one \"- path\" per line, then run the check again")
-    if fm.get("allow_test_removal", "").lower() != "true" and listed:
-        removed, added = task_census(listed, fm, check)
-        if removed:
-            run.fail("census", "this task deletes test file(s): " + " ".join(removed),
-                     "a suite does not get greener by losing tests; restore them")
-        if added:
-            run.fail("census", "this task adds %d skip marker(s)" % added,
-                     "skipping the failing test is not fixing it; remove the skip")
+    deadline = time.time() + float(check.get("foreign_wait", 120))
+    waits = 0
+    while True:
+        run = Run(task_id)
+        # --- guards that cost nothing: always this task's own ----------------
+        if fm.get("needs_human", "").lower() != "true" and self_certifying(ctx["acc"]):
+            run.fail("accept", "self-certifying: its only evidence is a file the agent writes itself",
+                     "replace it with a command that runs the code, or mark the task needs_human: true")
+        if not listed:
+            run.fail("files", "the task lists nothing under \"## Files touched\"",
+                     "list every file you created, changed or deleted, one \"- path\" per line, then run the check again")
+        if fm.get("allow_test_removal", "").lower() != "true" and listed:
+            removed, added = task_census(listed, fm, check)
+            if removed:
+                run.fail("census", "this task deletes test file(s): " + " ".join(removed),
+                         "a suite does not get greener by losing tests; restore them")
+            if added:
+                run.fail("census", "this task adds %d skip marker(s)" % added,
+                         "skipping the failing test is not fixing it; remove the skip")
+        guarded = bool(run.failed)
 
-    tests_ran, counted, commands_run = 0, False, []
-    if not run.failed:
-        reached, why = (reach(listed, units, check.get("ignore") or DEFAULT_IGNORE) if units is not None
-                        else (None, "no units declared"))
-        paths = ["."] if reached is None else sorted({p for u in reached for p in u["paths"]}) or ["."]
-        with Lock("check"):
-            if check.get("format") and existing:
-                before = {p: read(os.path.join(ROOT, p)) for p in existing}
-                ok, out = run_stage(run, "format", check["format"], files=existing)
-                changed = sum(1 for p in existing if read(os.path.join(ROOT, p)) != before[p])
-                if ok and changed:
-                    run.lines[-1] = "  %-8s PASS (%d file(s) reformatted)" % ("format", changed)
-            for stage in ("build", "lint", "arch"):
-                if run.failed:
-                    break
-                cmd = check.get(stage) if stage in check else commands.get(stage)
-                if cmd and "{files}" in cmd and not existing:
-                    run.note(stage, "skipped (no touched file left to give it)")
-                elif cmd:
-                    ok, _ = run_stage(run, stage, cmd, files=existing, paths=paths)
-                    commands_run.append(fill(cmd, files=existing, paths=paths))
-
-            if not run.failed:
-                if reached is None and not commands.get("test"):
-                    targets = []
-                    if (cfg.get("gate_mode") or "full") == "full":
-                        run.fail("tests", "MISSING - gate_mode=full requires commands.test")
-                elif reached is None:
-                    targets = [("suite", commands["test"])]
-                    run.note("reach", why + " - the whole suite runs")
-                else:
-                    targets = [(u["name"], u["test"]) for u in reached if u["test"]]
-                    limit = int(check.get("max_units") or 10)
-                    if len(targets) > limit and commands.get("test"):
-                        # One suite run beats many runs that each pay the runner's start-up.
-                        run.note("reach", "%s - %d units with tests, more than %d: the whole suite runs"
-                                 % (why, len(targets), limit))
-                        targets = [("suite", commands["test"])]
-                    else:
-                        run.note("reach", "%s: %s" % (why, ", ".join(u["name"] for u in reached) or "none"))
-                for name, cmd in targets:
-                    if not cmd:
-                        continue
-                    rc, out = run.step("test %s" % name, cmd)
-                    commands_run.append(cmd)
-                    n = count_tests(out, check)
-                    if n is not None:
-                        tests_ran += n
-                        counted = True
-                    if rc != 0:
-                        run.fail("tests", "%s: exit %d" % (name, rc), excerpt(out))
-                        break
-                if not targets:
-                    counted = True  # nothing the change reaches has tests: zero ran, and that is known
-                elif not run.failed:
-                    run.ok("tests", ("%d test(s)" % tests_ran if counted else "count not recognised")
-                           + " in %d target(s)" % len([t for t in targets if t[1]]))
-
-            if not run.failed and acc:
-                if re.search(r"verify\.sh|factory-check", acc):
-                    run.note("accept", "skipped (it names the gate itself)")
-                elif acceptance_covered(acc, commands_run):
-                    run.ok("accept", "already ran above")
-                else:
-                    rc, out = run.step("accept", acc)
-                    n = count_tests(out, check)
-                    if rc == 0:
-                        if n is not None:
-                            tests_ran += n
-                            counted = True
-                        run.ok("accept", "%d test(s)" % n if n else "")
-                    else:
-                        run.fail("accept", "exit %d" % rc, excerpt(out))
-
+        tests_ran, counted = (0, False) if guarded else run_stages(run, ctx)
         min_tests = int(cfg.get("min_tests", 1) or 1)
         if not run.failed and counted and tests_ran < min_tests:
             if fm.get("untested_ok", "").lower() == "true":
@@ -657,8 +760,26 @@ def check_task(task_id):
                 run.fail("tests", "no test exercised this change (%d ran, minimum %d)" % (tests_ran, min_tests),
                          "none of the tests the check ran covers what this task changed. Add the tests the "
                          "acceptance criteria describe, or put the test that covers it in the acceptance command.")
+        run.close()
 
-    run.close()
+        blockers = foreign_blockers(run.raw, listed) if run.failed and not guarded and run.raw else []
+        if not blockers:
+            break
+        # Another task's half-written work, not this task's failure: nothing is
+        # recorded against this task, and the check waits - outside the lock, so
+        # the other task can finish - for that work to land or change.
+        waits += 1
+        print("  waiting  the failure is in work another task has in flight: %s" % " ".join(blockers[:5]))
+        sys.stdout.flush()
+        if time.time() >= deadline or waits > 3 or not wait_for(blockers, deadline):
+            for line in run.lines:
+                print(line)
+            print("--- full log: %s" % run.log_rel)
+            print("CHECK RESULT: WAITING for %s - the failure is in work another task has in flight (%s). "
+                  "Nothing here is this task's to fix: change nothing, and report that the task is waiting."
+                  % (task_id, " ".join(blockers[:5])))
+            return 3
+
     for line in run.lines:
         print(line)
 
@@ -802,6 +923,13 @@ def main(argv):
         else:
             for u in reached:
                 print("%s %s" % (u["name"], u["path"]))
+        return 0
+    if argv[0] == "count":
+        # For gates/verify.sh: the number of tests a run reported, by check.count
+        # or the plain-English defaults; nothing when it cannot tell.
+        n = count_tests(read(argv[1]) if len(argv) > 1 else sys.stdin.read(), load_config().get("check") or {})
+        if n is not None:
+            print(n)
         return 0
     if argv[0] == "census":
         c = head_census(load_config().get("check") or {})

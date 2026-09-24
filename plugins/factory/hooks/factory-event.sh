@@ -86,10 +86,20 @@ case "$event" in
       verdict=unknown
       case "$out" in
         *"NO PROGRESS"*)                                   verdict=no-progress ;;
+        *"CHECK RESULT: WAITING"*)                         verdict=waiting ;;
         *"GATE RESULT: GREEN"*|*"CHECK RESULT: GREEN"*)    verdict=green ;;
         *"GATE RESULT: RED"*|*"CHECK RESULT: RED"*)        verdict=red ;;
       esac
       emit gate --argjson extra "$(jq -cn --arg id "$id" --arg v "$verdict" '{task: $id, verdict: $v}')"
+      # A gate too old to fingerprint its tree gets the fingerprint here - only
+      # when the tree the run ended on is the one it started on, so the marker
+      # never vouches for bytes the gate did not test.
+      marker="$F/verified/$id"; started="$F/gate-start/$id"
+      if [ "$verdict" = green ] && [ -f "$marker" ] && [ -s "$started" ] && ! grep -q '^tree=' "$marker"; then
+        now_tree="$(bash "$HOOK_DIR/factory-gate-skip.sh" hash "$project_dir" 2>/dev/null)"
+        [ -n "$now_tree" ] && [ "$now_tree" != unknown ] && [ "$now_tree" = "$(cat "$started")" ] && echo "tree=$now_tree" >> "$marker"
+      fi
+      rm -f "$started"
     fi
 
     # A task changing column. Every move goes through Bash, so this is the

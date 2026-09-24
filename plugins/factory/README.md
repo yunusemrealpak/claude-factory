@@ -93,6 +93,21 @@ model work left is writing each task's code.
   written to `.factory/last-run.md`.
 - **Escalate, don't loop.** A red task gets one fresh builder at higher effort;
   red again, it is blocked with the reason, and what depends on it is skipped.
+- **Tasks in flight cannot fail each other.** When every error a check points at
+  is in another task's unlanded files, the check waits for that work to land
+  instead of blaming this task, and a blocked task's half-written work is parked
+  out of the tree (`factory-block --unpark` brings it back).
+- **Reviews where they pay.** Generated files (`linguist-generated` in
+  `.gitattributes`, or `risk_exclude`) never trigger one. A task sent to review
+  only by a risk path lands first and is reviewed alongside the run, so nothing
+  waits on it; `review: always` is still reviewed before it lands.
+- **An audit of the seams.** After the build, one auditor reads everything the
+  run landed against the goal - data passed between tasks, flows nothing wires
+  in, races, contracts - the defects no single task's check or review can see.
+- **A graph built for speed.** `factory-plan` measures the longest dependency
+  chain and warns before a run that is mostly one chain; `/factory:init` uses it
+  to merge links and move serial work to the end, and writes a `## Context` for
+  every task so a builder does not rediscover the codebase.
 - **Measured, not guessed.** `factory-cost` reads the session's transcripts and
   shows requests, output and thinking tokens and an estimated cost per role.
 
@@ -177,7 +192,9 @@ rewritten without you watching.
 
 ```bash
 claude --plugin-dir ./plugins/factory     # load it without installing
-bash plugins/factory/tests/run-all.sh     # 369 tests, sandboxes only
+# with the plugin also installed, its bin/ shadows yours - put yours first:
+PATH="$PWD/plugins/factory/bin:$PATH" claude --plugin-dir ./plugins/factory
+bash plugins/factory/tests/run-all.sh     # 409 tests, sandboxes only
 claude plugin validate ./plugins/factory
 ```
 

@@ -5,6 +5,8 @@ reads it before it starts anything.
 Usage (from the project root):
   factory-plan            human-readable
   factory-plan --json     one JSON object, what the workflow consumes
+  add --proposed to plan tasks/proposed as well - how /factory:init measures a
+  task list before it is approved; nothing is ever dispatched from there
   add --start to record the run's starting point in .factory/run-start.json:
   HEAD and its test census, which the full check at the end compares against
 
@@ -57,7 +59,7 @@ def lane(name):
         return []
 
 
-def build():
+def build(proposed=False):
     out = {"ok": True, "problems": [], "warnings": [], "tasks": [], "held": []}
     if not os.path.isfile(os.path.join(F, "active")):
         out.update(ok=False, problems=["no .factory/active here - not a factory project, or not its root"])
@@ -68,9 +70,12 @@ def build():
         cfg = {}
     fast = cfg.get("fast") or {}
     out["workers"] = int(fast.get("workers") or 4)
+    out["risk_review"] = fast.get("risk_review") or "after"
+    out["audit"] = fast.get("audit", True) is not False
     out["effort"] = {"build": fast.get("effort_build") or "medium",
                      "escalate": fast.get("effort_escalate") or "xhigh",
-                     "review": fast.get("effort_review") or "high"}
+                     "review": fast.get("effort_review") or "high",
+                     "audit": fast.get("effort_audit") or "high"}
 
     ids = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
                          capture_output=True, text=True)
@@ -84,7 +89,9 @@ def build():
         out["warnings"].append("taken over from an earlier run, still in tasks/in-progress: " + " ".join(lanes["in-progress"]))
 
     meta, held = {}, {}
-    for col in ("backlog", "in-progress"):
+    if proposed:
+        lanes["proposed"] = lane("proposed")
+    for col in ("backlog", "in-progress") + (("proposed",) if proposed else ()):
         for tid in lanes[col]:
             fm = frontmatter(os.path.join(ROOT, "tasks", col, tid + ".md"))
             deps = [d.strip().strip("\"'") for d in re.split(r"[,\s]+", fm.get("depends_on", "").strip("[]")) if d.strip()]
@@ -142,6 +149,39 @@ def build():
                              "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true"})
     out["held"] = [{"id": t, "reason": r} for t, r in sorted(held.items())]
 
+    # The shape of the graph bounds the run more than any worker count does:
+    # tasks on one chain run one after another however many builders there are.
+    if not out["problems"] and active:
+        depth, parent = {}, {}
+
+        def level(t):
+            if t not in depth:
+                best = None
+                for d in active[t]["deps"]:
+                    if d in active and (best is None or level(d) > level(best)):
+                        best = d
+                depth[t] = 1 + (level(best) if best else 0)
+                parent[t] = best
+            return depth[t]
+
+        for t in active:
+            level(t)
+        end = max(sorted(active), key=lambda t: depth[t])
+        chain = []
+        while end:
+            chain.append(end)
+            end = parent[end]
+        per_level = {}
+        for t in active:
+            per_level[depth[t]] = per_level.get(depth[t], 0) + 1
+        out["critical_path"] = list(reversed(chain))
+        out["width"] = max(per_level.values())
+        if len(active) >= 4 and len(chain) * 2 > len(active):
+            out["warnings"].append(
+                "%d of %d tasks sit on one dependency chain (%s): they run one after another however many "
+                "builders there are. Merge links that belong together, or move work that must be serial to the end."
+                % (len(chain), len(active), " -> ".join(chain[:12]) + (" ..." if len(chain) > 12 else "")))
+
     try:
         st = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--", "."], capture_output=True, text=True)
         mine = [l[3:] for l in st.stdout.splitlines() if l[3:] and not l[3:].startswith(FACTORY_PATHS)]
@@ -174,9 +214,13 @@ def record_start(plan):
 
 
 def main(argv):
-    plan = build()
-    if "--start" in argv and plan["ok"]:
+    plan = build(proposed="--proposed" in argv)
+    if "--start" in argv and plan["ok"] and "--proposed" not in argv:
         record_start(plan)
+        try:
+            plan["start_head"] = json.load(open(os.path.join(F, "run-start.json"))).get("head")
+        except (OSError, ValueError):
+            pass
         for t in plan["tasks"]:
             t.pop("allow_test_removal", None)
     if "--json" in argv:
@@ -193,8 +237,11 @@ def main(argv):
                                      "(review)" if t["review"] else ""))
         for h in plan["held"]:
             print("HELD  %s %s" % (h["id"], h["reason"]))
-        print("SUMMARY ok=%s tasks=%d held=%d workers=%s" % (str(plan["ok"]).lower(), len(plan["tasks"]),
-                                                             len(plan["held"]), plan.get("workers", "-")))
+        if plan.get("critical_path"):
+            print("CRITICAL %d task(s): %s" % (len(plan["critical_path"]), " -> ".join(plan["critical_path"])))
+        print("SUMMARY ok=%s tasks=%d held=%d workers=%s width=%s chain=%s" % (
+            str(plan["ok"]).lower(), len(plan["tasks"]), len(plan["held"]), plan.get("workers", "-"),
+            plan.get("width", "-"), len(plan.get("critical_path") or [])))
     return 0 if plan["ok"] else 1
 
 

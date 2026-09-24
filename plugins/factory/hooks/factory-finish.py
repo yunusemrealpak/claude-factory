@@ -87,6 +87,13 @@ def main(argv):
         board.append(entry)
         for c in section(text, "Open concerns"):
             attention.append({"id": tid, "concern": c})
+        # The last review on file, when it failed - a task that landed before
+        # its review carries the verdict here and nowhere else.
+        reviews = re.findall(r"^##\s+Review\b[^\n]*\n(.*?)(?=^#{1,2}\s|\Z)", text, re.M | re.S)
+        if reviews and re.search(r"^verdict:\s*fail", reviews[-1], re.M):
+            found = [l.strip()[2:] for l in reviews[-1].splitlines() if l.strip().startswith("- ")]
+            for f in found[:5] or ["the review failed without listing findings"]:
+                attention.append({"id": tid, "concern": "review failed: " + f})
 
     full = {"verdict": "skipped", "output": "nothing landed, so there was nothing new to judge"}
     if "--no-full" not in argv and any(b["lane"] == "done" for b in board):

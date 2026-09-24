@@ -88,6 +88,23 @@ echo
 echo "=== tasks/in-progress/${TASK_ID}.md"
 cat "${file}"
 module="$(fm "${file}" module)"
+# What earlier tasks of this module decided: the cheapest context there is, and
+# the part a fresh builder would otherwise rediscover or contradict.
+if [ -n "${module}" ] && [ -s "${ROOT}/decisions.md" ]; then
+  mine=""
+  while IFS= read -r line; do
+    id="$(printf '%s' "${line}" | sed -n -E 's/^- ([A-Za-z0-9._-]+):.*/\1/p')"
+    [ -n "${id}" ] && [ "${id}" != "${TASK_ID}" ] || continue
+    tf="$(ls "${T}"/*/"${id}.md" 2>/dev/null | head -1)"
+    [ -n "${tf}" ] && [ "$(fm "${tf}" module)" = "${module}" ] && mine="${mine}${line}
+"
+  done < "${ROOT}/decisions.md"
+  if [ -n "${mine}" ]; then
+    echo
+    echo "=== decisions already taken in module ${module}"
+    printf '%s' "${mine}" | tail -8
+  fi
+fi
 for scope in general ${module}; do
   lf="${F}/lessons/${scope}.md"
   if [ -s "${lf}" ]; then
