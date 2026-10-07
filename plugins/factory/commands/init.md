@@ -267,17 +267,15 @@ existing one):
 
 ```json
 {
-  "autoCompactWindow": 400000,
   "autoCompactEnabled": true
 }
 ```
 
-`autoCompactWindow` is a token count, not a percentage, and Claude Code caps it at
-the model's real context window. 400000 is 40% of a 1M window: the lead compacts
-early instead of at ~95%, which keeps its per-turn context - and therefore its
-cost - from growing without bound. On a 200K-window session the value is capped
-and the default behaviour applies. Keep it project-scoped so other projects are
-unaffected.
+A long run outlives its context, and the lead carries the run across a
+compaction (see "After a compaction" in the lead agent), so auto-compact must
+stay on. Do not write `autoCompactWindow`: when to compact is the developer's
+own setting (`~/.claude/settings.json` or `/autocompact`), and a project value
+would silently override it.
 
 `gates/verify.sh` - **only when the file does not already exist.** An existing
 gate is never overwritten: on a real project it is the file most likely to have

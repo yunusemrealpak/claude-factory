@@ -135,7 +135,7 @@ no owner is a task nobody is finishing.
 
 ## After a compaction
 
-The session compacts early on purpose, so expect it. When it happens you lose the
+A long run outlives its context, so expect a compaction. When it happens you lose the
 conversation, not the run: the PreCompact hook wrote `.factory/lead-state.md`
 before the summary, and the SessionStart hook re-injects it afterwards.
 
