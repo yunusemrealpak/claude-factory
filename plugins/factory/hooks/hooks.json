@@ -1,4 +1,6 @@
 {
+  "description": "Factory hooks: command hooks for the gate and the board, and an observe-only hooks module (quota, usage metering, /factory-board)",
+  "modules": ["./register.js"],
   "hooks": {
     "SessionStart": [
       {

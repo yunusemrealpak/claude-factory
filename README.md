@@ -137,6 +137,29 @@ session model and effort, both runs finishing 6/6 with a green full check:
 | `/factory:retro` | what went wrong in this run, and what to change about the factory |
 | `/factory:upgrade` | bring an older project's factory files up to date |
 | `/factory:selftest` | run the factory's own test suite |
+| `/factory-board` | lane counts, what is ready and the week's quota, straight from disk: no model turn, so no tokens |
+
+## The hooks module
+
+Besides its command hooks, the plugin ships a [mod](https://code.claude.com/docs/en/plugins/mods/overview):
+`hooks/register.js`, listed under `modules` in `hooks/hooks.json`. It needs Claude Code
+2.1.287 or later (tested on 2.1.296) and is observe-only: no hook in it refuses or
+rewrites anything, nothing in it calls a model, and a failure inside it is swallowed
+rather than allowed to stop a turn.
+
+- **Quota.** Each rate-limit reading goes to `~/.claude/.factory-quota.json` — the
+  5-hour and 7-day windows, and the line an even spend of the week would be at now.
+  The status line below writes the same file; the mod also writes it in `claude -p`
+  runs, where there is no status line.
+- **Usage metering.** Every agent turn in a project with `.factory/active` adds one
+  line to `.factory/usage.jsonl` (gitignored): the agent's id, type and label, the
+  model, and its input, output, cache-read and cache-write tokens. This is what cost
+  per task is computed from.
+- **`/factory-board`.** The board read from disk and printed as is; it runs
+  `factory-ready` and costs no model turn.
+
+`claude --safe-mode`, `--bare` and `disableAllHooks` turn mods off; the command hooks
+are what the factory's gate relies on, never the mod.
 
 ## The status line
 
@@ -194,8 +217,9 @@ rewritten without you watching.
 claude --plugin-dir ./plugins/factory     # load it without installing
 # with the plugin also installed, its bin/ shadows yours - put yours first:
 PATH="$PWD/plugins/factory/bin:$PATH" claude --plugin-dir ./plugins/factory
-bash plugins/factory/tests/run-all.sh     # 409 tests, sandboxes only
-claude plugin validate ./plugins/factory
+bash plugins/factory/tests/run-all.sh     # the shell suites, sandboxes only
+claude plugin validate --strict ./plugins/factory   # what Claude Code reads from the mod
+(cd plugins/factory && claude plugin test)          # the mod's own tests, no session
 ```
 
 The test suites build throwaway git repositories, boards and gates and run the real

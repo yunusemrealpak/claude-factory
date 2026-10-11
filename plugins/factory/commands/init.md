@@ -865,6 +865,7 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/parked/
 .factory/audit.md
 .factory/gate-start/
+.factory/usage.jsonl
 ```
 
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,

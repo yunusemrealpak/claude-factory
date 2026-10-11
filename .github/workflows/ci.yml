@@ -32,5 +32,13 @@ jobs:
           jq -e . .claude-plugin/marketplace.json > /dev/null
           jq -e . plugins/factory/.claude-plugin/plugin.json > /dev/null
           jq -e . plugins/factory/hooks/hooks.json > /dev/null
+      - name: Hooks module validates and its tests pass
+        # Static analysis of hooks/register.js plus its tests (tests/*.test.ts):
+        # no session, sign-in or model call. Pinned to the version it was built on.
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s 2.1.296
+          export PATH="$HOME/.local/bin:$PATH"
+          claude plugin validate --strict plugins/factory
+          (cd plugins/factory && claude plugin test)
       - name: Factory self-test
         run: bash plugins/factory/tests/run-all.sh
