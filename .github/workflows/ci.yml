@@ -18,7 +18,9 @@ jobs:
           manifest="$(jq -r .version plugins/factory/.claude-plugin/plugin.json)"
           stamp="$(awk '{print $1}' plugins/factory/hooks/factory-version.txt)"
           echo "manifest=$manifest stamp=$stamp"
-          [ "$manifest" = "${stamp}.0" ] || { echo "plugin.json version and factory-version.txt disagree"; exit 1; }
+          # The stamp is major.minor: a patch release must not tell every
+          # project it is out of date (factory-upgrade compares the stamp).
+          [ "${manifest%.*}" = "$stamp" ] || { echo "plugin.json version and factory-version.txt disagree"; exit 1; }
       - name: Shell syntax
         run: |
           for f in plugins/factory/hooks/*.sh plugins/factory/bin/* plugins/factory/tests/*.sh plugins/factory/statusline/*.sh; do

@@ -141,6 +141,10 @@ echo "=== version check"
 V="$WORK/version"; rm -rf "$V"; mkdir -p "$V/.factory" "$V/gates" "$V/tasks/backlog"; cd "$V" || exit 1
 : > .factory/active
 harness="$(cat "$H/factory-version.txt")"
+# A patch release keeps the stamp, so a project set up by 2.5.0 is not told it
+# is behind by 2.5.1; the manifest's major.minor is what the stamp must match.
+manifest="$(jq -r .version "$H/../.claude-plugin/plugin.json")"
+check "the stamp is the manifest's major.minor" '[ "${manifest%.*}" = "${harness%% *}" ]' "manifest=$manifest stamp=$harness"
 # an old project: a config from before, a gate from before, a task from before
 jq -n '{verify:"gates/verify.sh", workers:2, gate_mode:"staged", commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
 printf '#!/usr/bin/env bash\n# old gate\ncount_tests() { :; }\nrecord_failure() { :; }\n' > gates/verify.sh
