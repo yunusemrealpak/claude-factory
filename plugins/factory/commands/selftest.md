@@ -23,7 +23,7 @@ What it covers:
 | 3 | the event log, the dashboard, the question inbox, the status line segment, the end-of-run message |
 | 4 | skipping the integrator's duplicate gate run, the task lint, the ready set |
 | 5 | change-level acceptance, the commit bisect, the version check that spots a project running an older factory |
-| 6 | the fast lane on a project in no language: units and reach, the per-task census, waiting on another task's unlanded work, parking a blocked task's work, the guards and no-progress rule, the full check's zero-test refusal and run census, the graph measure, plan/start/land/block/finish, generated files in risk routing, the `/factory:fast` scheduling - recheck, review after landing, the seam audit, the report from disk - and the classic gate's fingerprint and count fixes |
+| 6 | the fast lane on a project in no language: units and reach, the per-task census, waiting on another task's unlanded work, parking a blocked task's work, the guards and no-progress rule, the full check's zero-test refusal and run census, the graph measure, plan/start/land/block/finish, generated files in risk routing, the `/factory:fast` scheduling - recheck, review after landing, the seam audit, the report from disk - the 2.6 lean-run pieces - CLAUDE.md size guard, stray untracked files, an unread `check.count`, the runner agent and `retry_limit` binding, `metrics.jsonl`, the idle two-line brief, nested-key migration - and the classic gate's fingerprint and count fixes |
 
 Report:
 

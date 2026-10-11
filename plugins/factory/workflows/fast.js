@@ -16,7 +16,11 @@ export const meta = {
 // Here that arithmetic is code. The only model work left is building each task;
 // the lead's context receives the final tally and nothing else.
 //
-// args (all optional): { workers: 4, effort: { build, escalate, review } }
+// args (all optional): { workers: 4, attempts: 2, effort: { build, escalate, review } }
+//
+// Every step that is only "run this command and copy what it printed" goes to
+// the factory:runner agent type: one cheap type, so those calls also share one
+// prompt cache and none of them loads the project's CLAUDE.md.
 
 const PLAN = {
   type: 'object',
@@ -27,6 +31,7 @@ const PLAN = {
     warnings: { type: 'array', items: { type: 'string' } },
     workers: { type: 'number' },
     risk_review: { type: 'string', enum: ['after', 'before'] },
+    retry_limit: { type: 'number' },
     audit: { type: 'boolean' },
     start_head: { type: 'string' },
     critical_path: { type: 'array', items: { type: 'string' } },
@@ -103,17 +108,25 @@ const FINISH = {
 }
 
 const opts = args && typeof args === 'object' ? args : {}
+const RUNNER = 'factory:runner'
+
+// A string as one shell word. JSON.stringify double-quotes it, and a double
+// quoted shell word still expands $(...) and backticks.
+const shq = s => "'" + String(s).replace(/'/g, "'\\''") + "'"
 
 phase('Plan')
 const plan = await agent(
   'From the project root, run exactly: factory-plan --json --start\nIt prints one JSON object. Return that object field for field; do not summarise, reorder or drop anything.',
-  { label: 'plan', phase: 'Plan', model: 'haiku', schema: PLAN },
+  { agentType: RUNNER, label: 'plan', phase: 'Plan', schema: PLAN },
 )
 if (!plan) return { error: 'the plan could not be read' }
 if (!plan.ok) return { error: 'the board is not ready to build', problems: plan.problems || [] }
 for (const w of plan.warnings || []) log('warning: ' + w)
 
-const E = Object.assign({ build: 'medium', escalate: 'xhigh', review: 'high', audit: 'high' }, plan.effort || {}, opts.effort || {})
+const E = Object.assign({ build: 'medium', escalate: 'high', review: 'high', audit: 'high' }, plan.effort || {}, opts.effort || {})
+// retry_limit counts attempts at a task, the first included: 2 is the build and
+// one escalated retry.
+const ATTEMPTS = Math.max(1, Math.min(4, Math.floor(Number(opts.attempts || plan.retry_limit || 2))))
 const WORKERS = Math.max(1, Math.min(8, Number(opts.workers || plan.workers || 4)))
 // A task sent to review only because it touched a risk path lands first and is
 // reviewed alongside the rest of the run, so nothing that depends on it waits
@@ -198,10 +211,10 @@ async function settle(t, r) {
   return r
 }
 
-function buildPrompt(t, previous, findings) {
+function buildPrompt(t, previous, findings, attempt) {
   const lines = [`Build factory task ${t.id}. Start with: factory-start ${t.id} ${previous ? 'builder-retry' : 'builder'}`]
   if (previous) {
-    lines.push(`This is the second attempt. The first ended "${previous.status}": ${previous.summary}${previous.notes ? ' (' + previous.notes + ')' : ''}.`)
+    lines.push(`This is attempt ${attempt || 2}. The one before it ended "${previous.status}": ${previous.summary}${previous.notes ? ' (' + previous.notes + ')' : ''}.`)
     lines.push('Read ## Attempts in the task file first and do not repeat an approach it already ruled out.')
   }
   if (findings) {
@@ -223,10 +236,10 @@ function reviewPrompt(t, r, landed) {
   ].join('\n')
 }
 
-const run1 = (prompt, label) => slot(() => agent(prompt, { label, phase: 'Build', model: 'haiku', schema: LINE }))
+const run1 = (prompt, label) => slot(() => agent(prompt, { agentType: RUNNER, label, phase: 'Build', schema: LINE }))
 
 async function block(t, reason) {
-  await run1(`From the project root run exactly: factory-block ${t.id} ${JSON.stringify(reason)}\nReturn ok=true if the output starts with BLOCKED, and the output line.`, t.id + ' block')
+  await run1(`From the project root run exactly: factory-block ${t.id} ${shq(reason)}\nReturn ok=true if the output starts with BLOCKED, and the output line.`, t.id + ' block')
   return { id: t.id, status: 'blocked', summary: reason }
 }
 
@@ -241,15 +254,18 @@ async function build(t) {
 }
 
 async function buildInner(t) {
-  let r = await settle(t, await slot(() => agent(buildPrompt(t), { agentType: 'factory:builder', effort: E.build, schema: RESULT, label: t.id, phase: 'Build' })))
+  let r = null
+  // Attempt 1 at the build effort; each further one is a fresh builder with
+  // more reasoning and the attempts on file.
+  for (let n = 1; n <= ATTEMPTS; n++) {
+    const previous = n === 1 ? null : r || { status: 'error', summary: 'the builder returned nothing' }
+    if (previous) log(`${t.id}: ${previous.status} - attempt ${n} of ${ATTEMPTS} at ${E.escalate} effort`)
+    const label = n === 1 ? t.id : n === 2 ? t.id + ' retry' : `${t.id} retry ${n - 1}`
+    r = await settle(t, await slot(() => agent(buildPrompt(t, previous, null, n), { agentType: 'factory:builder', effort: n === 1 ? E.build : E.escalate, schema: RESULT, label, phase: 'Build' })))
+    if (r && !FAILED.includes(r.status)) break
+  }
   if (!r || FAILED.includes(r.status)) {
-    // One escalation: a fresh builder, more reasoning, the attempts on file.
-    const first = r || { status: 'error', summary: 'the builder returned nothing' }
-    log(`${t.id}: ${first.status} - one more attempt at ${E.escalate} effort`)
-    r = await settle(t, await slot(() => agent(buildPrompt(t, first), { agentType: 'factory:builder', effort: E.escalate, schema: RESULT, label: t.id + ' retry', phase: 'Build' })))
-    if (!r || FAILED.includes(r.status)) {
-      return block(t, r ? `${r.status} after an escalated retry: ${r.summary}` : 'the builder failed twice')
-    }
+    return block(t, r ? `${r.status} after ${ATTEMPTS} attempt(s): ${r.summary}` : `the builder failed ${ATTEMPTS} time(s)`)
   }
   if (r.status !== 'review') return r
 
@@ -306,9 +322,9 @@ phase('Finish')
 const auditing = landed >= 2 && plan.audit !== false && opts.audit !== false && plan.start_head
 const [finish, audit] = await Promise.all([
   agent(
-    `From the project root, run exactly: factory-finish --tasks ${tasks.map(t => t.id).join(',')}${landed ? '' : ' --no-full'}\n` +
+    `From the project root, run exactly: factory-finish --tasks ${tasks.map(t => t.id).join(',')}${landed ? '' : ' --no-full'}   (use a 10-minute Bash timeout: it runs the project's whole check)\n` +
       'It prints one JSON object. Return it field for field; keep every string verbatim.',
-    { label: 'finish', phase: 'Finish', model: 'haiku', schema: FINISH },
+    { agentType: RUNNER, label: 'finish', phase: 'Finish', schema: FINISH },
   ),
   auditing
     ? agent(

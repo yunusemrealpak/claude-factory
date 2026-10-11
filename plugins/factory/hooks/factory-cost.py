@@ -32,8 +32,12 @@ sys.dont_write_bytecode = True
 PRICES = {
     "claude-opus-5-5": (4.0, 20.0, 0.20, 5.0, 8.0),
     "claude-opus-5": (5.0, 25.0, 0.50, 6.25, 10.0),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.10, 2.5, 4.0),
     "claude-sonnet-5": (2.0, 10.0, 0.20, 2.5, 4.0),
     "claude-sonnet-4-6": (3.0, 15.0, 0.30, 3.75, 6.0),
+    # Haiku 5.5 is priced by prompt size; this is the tier up to 100k tokens,
+    # which is where a runner's few-line prompts live.
+    "claude-haiku-5-5": (0.10, 0.50, 0.01, 0.125, 0.20),
     "claude-haiku-4-5": (1.0, 5.0, 0.10, 1.25, 2.0),
     "claude-fable-5-1": (10.0, 50.0, 0.25, 12.5, 20.0),
 }

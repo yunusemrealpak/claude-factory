@@ -131,6 +131,19 @@ if [ -f "$project_dir/.factory/lead-state.md" ]; then
   lead_state="$(cat "$project_dir/.factory/lead-state.md")"
 fi
 
+# An empty board with nothing open anywhere is two lines: the full briefing
+# would only spend tokens on "(none)" in every session of an idle project.
+if [ "$((backlog + in_progress + blocked + proposed))" -eq 0 ] \
+   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] \
+   && [ "$stalled" = "(none)" ] && [ "$changes" = "(none open)" ] \
+   && { [ "$questions" = "(none)" ] || [ "$questions" = "  - (no questions)" ]; }; then
+  brief="FACTORY ACTIVE in this project: the board is empty (done=${done_count}), nothing is open or waiting.
+Session id: ${session_id:-unknown}. /factory:status for detail."
+  jq -n --arg ctx "$brief" \
+    '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
+  exit 0
+fi
+
 brief="$(cat <<BRIEF
 FACTORY ACTIVE in this project (.factory/active present).
 

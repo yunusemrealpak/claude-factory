@@ -24,11 +24,14 @@ project's own gate commands and compares the test census with the run's start;
 the change archive is synced and every change whose tasks are all done runs its
 own acceptance command.
 """
+import glob
+import importlib.util
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +59,106 @@ def section(text, title):
 def run(cmd):
     r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, errors="replace")
     return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+HELPER_SUFFIXES = ("land", "block", "recheck")
+
+
+def pricer():
+    """factory-cost's price table, loaded from its sibling file."""
+    try:
+        spec = importlib.util.spec_from_file_location("factory_cost", os.path.join(HOOK_DIR, "factory-cost.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.price
+    except Exception:
+        return lambda model: None
+
+
+def agent_labels():
+    """agent id -> description, from the transcripts' .meta.json files: the way
+    to name a turn the module could not label when the agent was spawned."""
+    pdir = os.path.join(os.path.expanduser("~"), ".claude", "projects", re.sub(r"[^A-Za-z0-9]", "-", ROOT))
+    out = {}
+    for path in glob.glob(os.path.join(pdir, "*", "subagents", "**", "agent-*.meta.json"), recursive=True):
+        try:
+            with open(path, encoding="utf-8") as fh:
+                desc = json.load(fh).get("description")
+        except (OSError, ValueError):
+            continue
+        if desc:
+            out[os.path.basename(path)[len("agent-"):-len(".meta.json")]] = desc
+    return out
+
+
+def split_label(label, ids):
+    """("T-01 retry") -> ("T-01", "retry"); run-level steps have no task."""
+    label = (label or "").strip()
+    first, _, rest = label.partition(" ")
+    if first in ids:
+        return first, rest
+    # Workflow descriptions may carry a prefix before the label.
+    m = re.search(r"\b(%s)\b\s*(.*)$" % "|".join(re.escape(i) for i in ids), label) if ids else None
+    return (m.group(1), m.group(2).strip()) if m else (None, label)
+
+
+def metrics(ids, board, started):
+    """One line for this run in .factory/metrics.jsonl: what the run cost and
+    how it went, from the module's usage.jsonl. The point is a number to compare
+    from one run to the next, so the same fields are written every time."""
+    landed = [b["id"] for b in board if b["lane"] == "done"]
+    rec = {"ts": int(time.time()), "tasks": len(ids), "landed": len(landed)}
+    rows = []
+    for line in read(os.path.join(F, "usage.jsonl")).splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not started or (row.get("ts") or 0) >= started:
+            rows.append(row)
+    rec["turns"] = len(rows)
+    by_label = {}
+    names = agent_labels() if any(not r.get("label") for r in rows) else {}
+    price = pricer()
+    total = helpers = unlabeled = 0.0
+    tasks_usd, retried = {}, set()
+    for r in rows:
+        label = r.get("label") or names.get(r.get("agent"))
+        p = price(r.get("model"))
+        usd = 0.0
+        if p:
+            usd = ((r.get("input") or 0) * p[0] + (r.get("output") or 0) * p[1]
+                   + (r.get("cache_read") or 0) * p[2] + (r.get("cache_write") or 0) * p[3]) / 1e6
+        total += usd
+        tid, kind = split_label(label, ids)
+        if not label:
+            unlabeled += usd
+        if (r.get("type") or "").endswith("runner") or (tid and kind.split(" ")[0] in HELPER_SUFFIXES) \
+                or label in ("plan", "finish"):
+            helpers += usd
+        if tid:
+            tasks_usd[tid] = tasks_usd.get(tid, 0.0) + usd
+            if kind.startswith(("retry", "fix")):
+                retried.add(tid)
+    first_try = [t for t in landed if t not in retried]
+    stalled = [i for i in ids if os.path.exists(os.path.join(F, "no-progress", i))]
+    rec.update({
+        "first_try_green": len(first_try),
+        "first_try_rate": round(len(first_try) / len(ids), 2) if ids else None,
+        "stalled": len(stalled),
+        "stalled_rate": round(len(stalled) / len(ids), 2) if ids else None,
+        "usd_total": round(total, 3) if rows else None,
+        "usd_per_landed": round(total / len(landed), 3) if rows and landed else None,
+        "helpers_share": round(helpers / total, 3) if total else None,
+        "unlabeled_share": round(unlabeled / total, 3) if total else None,
+        "usd_by_task": {k: round(v, 3) for k, v in sorted(tasks_usd.items())},
+    })
+    try:
+        with open(os.path.join(F, "metrics.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    return rec
 
 
 def main(argv):
@@ -113,6 +216,13 @@ def main(argv):
         _, sync = run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
     run(["bash", os.path.join(HOOK_DIR, "factory-dash.sh")])
 
+    started = 0
+    try:
+        started = int(json.loads(read(os.path.join(F, "run-start.json")) or "{}").get("started") or 0)
+    except (ValueError, TypeError):
+        pass
+    m = metrics(ids, board, started)
+
     result = {
         "attention": attention,
         "board": board,
@@ -127,6 +237,10 @@ def main(argv):
         lines += ["## Needs your attention", ""] + ["- %s: %s" % (a["id"], a["concern"]) for a in attention] + [""]
     lines += ["## Tasks", "", "| task | where it is | commit | note |", "| --- | --- | --- | --- |"]
     lines += ["| %s | %s | %s | %s |" % (b["id"], b["lane"], b["commit"] or "-", b.get("reason", "")) for b in board]
+    if m["usd_total"] is not None:
+        lines += ["", "Cost: $%.2f over %d turn(s), $%s per landed task, helpers %.0f%% of it; first try green %d/%d." % (
+            m["usd_total"], m["turns"], m["usd_per_landed"] if m["usd_per_landed"] is not None else "-",
+            100 * (m["helpers_share"] or 0), m["first_try_green"], m["tasks"])]
     lines += ["", "## Full check: %s" % full["verdict"], "", "```", full["output"], "```", ""]
     if acceptance:
         lines += ["## Change acceptance", ""] + ["- %s" % a["result"] for a in acceptance] + [""]

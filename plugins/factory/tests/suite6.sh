@@ -276,7 +276,7 @@ mktask in-progress R "" "x" a
 j="$(factory-plan --json)"
 check "plan lists what can run, with only the deps still to land" '[ "$(jq -r ".tasks[] | .id + \":\" + (.deps | join(\"+\"))" <<< "$j" | tr "\n" " ")" = "A: B:A R: " ]' "$j"
 check "blocked dependencies hold their whole chain" '[ "$(jq -c "[.held[] | .id]" <<< "$j")" = "[\"C\",\"D\",\"E\",\"F\"]" ]' "$j"
-check "plan carries the fast-lane config" '[ "$(jq -c "[.workers, .effort.build, .effort.escalate]" <<< "$j")" = "[3,\"high\",\"xhigh\"]" ]' "$j"
+check "plan carries the fast-lane config" '[ "$(jq -c "[.workers, .effort.build, .effort.escalate]" <<< "$j")" = "[3,\"high\",\"high\"]" ]' "$j"
 check "a task left in progress is named" 'jq -e ".warnings | map(select(test(\"in-progress: R\"))) | length == 1" <<< "$j" >/dev/null' "$j"
 check "plan measures the graph: its longest chain and its widest level" 'jq -e ".critical_path == [\"A\",\"B\"] and .width == 2" <<< "$j" >/dev/null' "$j"
 for n in 1 2 3 4 5; do mktask backlog S$n "$([ $n -gt 1 ] && echo S$((n - 1)))" "x" a; done
@@ -350,6 +350,70 @@ mktask in-progress R-02 "" "x" db/migrations/0002_drop_users.sql src/auth.txt
 out="$(factory-risk R-02)"; rc=$?
 check "a hand-written migration still does" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "db/migrations/0002_drop_users.sql matches"' "$out"
 
+echo "=== 2.6: CLAUDE.md size, stray untracked files, an unread test count"
+P="$WORK/guards"; rm -rf "$P"; mkdir -p "$P"; cd "$P" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+mkdir -p .factory/verified core/src core/tests ui/src ui/tests tasks/backlog tasks/in-progress tasks/done tasks/blocked
+: > .factory/active
+for u in core ui; do printf 'value\n' > $u/src/main.src; printf 'exit 0\n' > $u/tests/main.t; done
+cat > runner.sh <<'SH'
+n=0
+for t in $(find "$1" -name '*.t' | sort); do n=$((n + 2)); bash "$t" || exit 1; done
+echo "$n passed"
+SH
+cat > .factory/config.json <<'JSON'
+{ "gate_mode": "full", "min_tests": 1,
+  "commands": { "build": "", "test": "bash runner.sh .", "arch": "", "lint": "" },
+  "check": { "unit_test": "bash runner.sh {path}", "test_files": "\\.t$",
+    "units": [ {"name": "core", "path": "core", "deps": []}, {"name": "ui", "path": "ui", "deps": ["core"]} ] } }
+JSON
+printf '.factory/\n' > .gitignore
+git add -A; git commit -qm base
+: > .factory/tool.log
+seq 1 250 | sed 's/^/line /' > core/CLAUDE.md
+printf 'v\n' >> core/src/main.src
+mktask in-progress M-01 "" "bash runner.sh core" core/src/main.src core/CLAUDE.md
+out="$(factory-check M-01)"; rc=$?
+check "a CLAUDE.md past the limit is red at the task check" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "core/CLAUDE.md is 250 lines"' "$out"
+jq '.check.claude_md_max_lines = 0' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check M-01)"; rc=$?
+check "claude_md_max_lines 0 turns the guard off" '! printf "%s" "$out" | grep -q "CLAUDE.md is"' "$out"
+jq 'del(.check.claude_md_max_lines)' .factory/config.json > c && mv c .factory/config.json
+git add core/CLAUDE.md; git commit -qm "big claude.md" >/dev/null
+git checkout -q core/src/main.src
+out="$(factory-check --full 2>&1)"
+check "and at the full check, over the tracked files" 'printf "%s" "$out" | grep -q "claude_md.*core/CLAUDE.md (250)"' "$out"
+git rm -qf core/CLAUDE.md; git commit -qm "drop" >/dev/null
+rm -f tasks/in-progress/*.md
+mktask in-progress U-01 "" "bash runner.sh core" core/src/main.src
+printf 'x\n' >> core/src/main.src; printf 'generated\n' > core/src/migration_001.src
+out="$(factory-check U-01)"; rc=$?
+check "an untracked file in the task's unit that the list leaves out is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "core/src/migration_001.src"' "$out"
+printf -- '- core/src/migration_001.src\n' >> tasks/in-progress/U-01.md
+mktask in-progress U-01 "" "bash runner.sh core" core/src/main.src core/src/migration_001.src
+out="$(factory-check U-01)"; rc=$?
+check "listing it makes the guard pass" '! printf "%s" "$out" | grep -q "untracked"' "$out"
+mktask in-progress U-01 "" "bash runner.sh core" core/src/main.src
+mktask in-progress U-02 "" "bash runner.sh ui" ui/src/main.src
+printf 'y\n' > ui/src/other.src
+out="$(factory-check U-01)"
+check "an untracked file in another unit is not this task's" '! printf "%s" "$out" | grep -q "other.src"' "$out"
+mktask in-progress U-02 "" "bash runner.sh core"
+out="$(factory-check U-01)"; rc=$?
+check "when another task has listed nothing yet it is a note, not a red" '! printf "%s" "$out" | grep -q "untracked file(s)"' "$out"
+rm -f core/src/migration_001.src ui/src/other.src; git checkout -q core/src/main.src; rm -f tasks/in-progress/*.md
+
+cat > count.sh <<'SH'
+echo "all tests passed"
+SH
+jq '.check.count = "([0-9]+) passed" | .check.unit_test = "bash count.sh {path}"' .factory/config.json > c && mv c .factory/config.json
+mktask in-progress N-01 "" "bash count.sh" core/src/main.src
+printf 'z\n' >> core/src/main.src
+out="$(factory-check N-01)"; rc=$?
+check "check.count that matches nothing in the output is red, not silently unguarded" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "check.count is set and matched nothing"' "$out"
+git checkout -q core/src/main.src; rm -f tasks/in-progress/*.md
+jq 'del(.check.count) | .check.unit_test = "bash runner.sh {path}"' .factory/config.json > c && mv c .factory/config.json
+
 echo "=== finish reports from disk"
 Z="$WORK/finish"; rm -rf "$Z"; mkdir -p "$Z/.factory" "$Z/src"; cd "$Z" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
@@ -402,7 +466,7 @@ function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
   check "the plan step records where the run started" 'grep -q "factory-plan --json --start" "$WORK/wf.js"'
   check "a reviewed and landed task no longer says it awaits review" 'printf "%s" "$out" | head -1 | jq -e "(.agent_notes[] | select(.id==\"D\") | .status == \"landed\" and (.summary | startswith(\"reviewed and landed\")))" >/dev/null' "$out"
   check "the result leads with what needs attention and the board from disk" 'printf "%s" "$out" | head -1 | jq -e "(keys_unsorted | .[0:2]) == [\"attention\",\"board\"] and .attention[0].concern == \"gap\"" >/dev/null' "$out"
-  check "finish is told every task of the run" 'printf "%s" "$out" | grep -q "^FINISH .*factory-finish --tasks A,B,C,D$"' "$out"
+  check "finish is told every task of the run" 'printf "%s" "$out" | grep -Eq "^FINISH .*factory-finish --tasks A,B,C,D( |$)"' "$out"
   out="$(harness "$base
  if(l===\"A\") return reply({id:\"A\",status:\"red\",summary:\"x\",concerns:[]});
  if(l===\"A retry\") return reply({id:\"A\",status:\"red\",summary:\"still\",concerns:[]});
@@ -441,6 +505,62 @@ function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
 else
   echo "(JavaScriptCore not found - workflow scheduling tests skipped)"
 fi
+
+echo "=== 2.6: the runner agent, helper calls, metrics, the idle brief"
+check "runner.md is a cheap, bounded, CLAUDE.md-free agent" 'f="$PLUGIN/agents/runner.md"; grep -q "^name: runner" "$f" && grep -q "^model: haiku" "$f" && grep -q "^effort: low" "$f" && grep -q "^maxTurns: 4" "$f" && grep -q "^omitClaudeMd: true" "$f"'
+if [ -x "$JSC" ]; then
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l+"@"+((o&&o.agentType)||"-")+(o&&o.model?"!model":""));
+ if(l==="A block") prompts.finish=p;
+ if(l==="finish") { prompts.finish=prompts.finish+"|||"+p; return reply({attention:[],board:[],full_check:"green"}) }
+ if(l==="plan") return reply({ok:true,retry_limit:2,tasks:[{id:"A",deps:[]}]});
+ if(/ block$/.test(l)) return reply({ok:true,line:"BLOCKED A"});
+ if(/ land$/.test(l)) return reply({ok:true,line:"LANDED A"});
+ return reply({id:"A",status:"red",summary:"it'"'"'s $(whoami) \"x\" `id`",concerns:[]}); }')"
+  check "every step that only runs a command goes to factory:runner, with no model override" 'printf "%s" "$out" | grep -q "^CALLS plan@factory:runner,A@factory:builder,A retry@factory:builder,A block@factory:runner,finish@factory:runner$"' "$out"
+  check "a block reason is one single-quoted shell word" 'printf "%s" "$out" | grep -q "factory-block A '"'"'.*it'"'"'\\\\'"'"''"'"'s \$(whoami)"' "$out"
+  check "the finish step is given a long timeout" 'printf "%s" "$out" | grep -q "10-minute"' "$out"
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l);
+ if(l==="plan") return reply({ok:true,retry_limit:3,tasks:[{id:"A",deps:[]}]});
+ if(l==="finish") return reply({attention:[],board:[],full_check:"green"});
+ if(/ block$/.test(l)) return reply({ok:true,line:"BLOCKED A"});
+ return reply({id:"A",status:"red",summary:"no",concerns:[]}); }')"
+  check "retry_limit is bound: 3 attempts = the build and two escalated retries" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A retry 2,A block,finish$"' "$out"
+fi
+
+# metrics.jsonl: one line per finished run
+cd "$Z" || exit 1
+rm -f .factory/metrics.jsonl
+now=$(date +%s)
+{
+  echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a1\",\"type\":\"factory:builder\",\"label\":\"F-01\",\"model\":\"claude-sonnet-5-5\",\"input\":1000,\"output\":2000,\"cache_read\":10000,\"cache_write\":0}"
+  echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a2\",\"type\":\"factory:runner\",\"label\":\"F-01 land\",\"model\":\"claude-haiku-5-5\",\"input\":500,\"output\":100,\"cache_read\":0,\"cache_write\":0}"
+  echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a3\",\"type\":\"factory:runner\",\"label\":\"finish\",\"model\":\"claude-haiku-5-5\",\"input\":500,\"output\":100,\"cache_read\":0,\"cache_write\":0}"
+} > .factory/usage.jsonl
+factory-finish --tasks F-01 --no-full >/dev/null
+check "a finished run appends one metrics line" '[ "$(wc -l < .factory/metrics.jsonl | tr -d " ")" = 1 ] && jq -e ".tasks == 1 and .landed >= 1 and .usd_total > 0 and (.helpers_share > 0 and .helpers_share < 0.1) and .unlabeled_share == 0" .factory/metrics.jsonl >/dev/null' "$(cat .factory/metrics.jsonl 2>/dev/null)"
+rm -f .factory/usage.jsonl .factory/metrics.jsonl
+factory-finish --tasks F-01 --no-full >/dev/null
+check "without usage rows the line says so instead of inventing a cost" 'jq -e ".usd_total == null and .turns == 0" .factory/metrics.jsonl >/dev/null' "$(cat .factory/metrics.jsonl 2>/dev/null)"
+
+# idle board: two-line brief
+IDLE="$WORK/idle"; rm -rf "$IDLE"; mkdir -p "$IDLE/.factory" "$IDLE/tasks/"{backlog,in-progress,blocked,done,proposed}; cd "$IDLE" || exit 1
+git init -q -b main; : > .factory/active; printf '{"commands":{}}\n' > .factory/config.json
+mkdir -p gates; printf '# count_tests guard_test_census guard_acceptance record_failure\nrm -f "${ROOT}/.factory/verified/x"\ntree=1\nisolate() { :; }\n' > gates/verify.sh
+: > .gitignore; (bash "$H/factory-upgrade.sh" --apply >/dev/null 2>&1)
+out="$(jq -n --arg c "$IDLE" '{cwd:$c, session_id:"S9", hook_event_name:"SessionStart", source:"startup"}' | bash "$H/factory-brief.sh" 2>/dev/null)"
+ctx="$(printf "%s" "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')"
+check "an empty board gets a short brief, not the full one" '[ -n "$ctx" ] && [ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ] && printf "%s" "$ctx" | grep -q "board is empty"' "$out"
+
+# nested config keys are migrated
+NEST="$WORK/nest"; rm -rf "$NEST"; mkdir -p "$NEST/gates" "$NEST/tasks/backlog" "$NEST/.factory"; cd "$NEST" || exit 1
+: > .factory/active
+printf '{"factory_version":"2.5","verify":"gates/verify.sh","fast":{"workers":7},"check":{"count":"x"}}\n' > .factory/config.json
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"
+check "the report names missing nested keys" 'printf "%s" "$out" | grep -q "fast.effort_escalate" && printf "%s" "$out" | grep -q "check.claude_md_max_lines"' "$out"
+bash "$H/factory-upgrade.sh" --apply >/dev/null 2>&1
+check "--apply adds them and keeps the project's own values" 'jq -e ".fast.workers == 7 and .fast.effort_escalate == \"high\" and .check.count == \"x\" and .check.claude_md_max_lines == 200" .factory/config.json >/dev/null' "$(cat .factory/config.json)"
 
 echo "=== fixes the fast lane depends on"
 Q="$WORK/fixes"; rm -rf "$Q"; mkdir -p "$Q/.factory"; cd "$Q" || exit 1; : > .factory/active

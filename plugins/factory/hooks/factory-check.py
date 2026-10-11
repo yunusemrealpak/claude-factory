@@ -566,6 +566,54 @@ def dirty_paths():
     return paths
 
 
+def untracked_paths():
+    """Project-relative paths git does not track and does not ignore."""
+    rc, out = git("ls-files", "--others", "--exclude-standard", "-z", "--", ".")
+    return [os.path.normpath(p) for p in out.split("\0") if p] if rc == 0 else []
+
+
+def stray_untracked(task_id, listed, units, check):
+    """Untracked files inside the units this task's files belong to that its
+    "## Files touched" does not name - the generated migration, the new file
+    nobody listed, and so left out of the task's commit. Files another task in
+    progress lists are that task's. Returns (strays, open_listing): open_listing
+    is true when another task in progress has listed nothing yet, so a stray
+    could be its work and cannot be blamed on this one."""
+    mine = {owner(os.path.normpath(p), units)["name"] for p in listed if owner(os.path.normpath(p), units)}
+    if not mine:
+        return [], False
+    ignore = check.get("ignore") or DEFAULT_IGNORE
+    claimed = {os.path.normpath(p) for p in listed}
+    open_listing = False
+    d = os.path.join(ROOT, "tasks", "in-progress")
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not name.endswith(".md") or name[:-3] == task_id:
+            continue
+        other = files_touched(read(os.path.join(d, name)))
+        open_listing = open_listing or not other
+        claimed.update(os.path.normpath(p) for p in other)
+    strays = []
+    for p in untracked_paths():
+        if p in claimed or ignored(p, ignore) or p == "decisions.md" or p.split(os.sep)[0] in (".factory", "tasks"):
+            continue
+        u = owner(p, units)
+        if u and u["name"] in mine:
+            strays.append(p)
+    return sorted(strays), open_listing
+
+
+def claude_md_over(paths, limit):
+    """CLAUDE.md files longer than limit lines: [(path, lines)]. Every agent
+    loads these on every turn, so their size is a per-token cost of the run."""
+    over = []
+    for p in paths:
+        if os.path.basename(p) == "CLAUDE.md" and os.path.isfile(os.path.join(ROOT, p)):
+            n = len(read(os.path.join(ROOT, p)).splitlines())
+            if n > limit:
+                over.append((p, n))
+    return over
+
+
 ERROR_LINE = re.compile(r"(?i)\b(error|errors|failed|failure|exception|fatal)\b|\[E\]")
 PATH_TOKEN = re.compile(r"[\w@+.\-/\\]+\.\w{1,10}")
 
@@ -749,6 +797,21 @@ def check_task(task_id):
             if added:
                 run.fail("census", "this task adds %d skip marker(s)" % added,
                          "skipping the failing test is not fixing it; remove the skip")
+        limit = int(check.get("claude_md_max_lines", 200) or 0)
+        for p, n in claude_md_over(listed, limit) if limit and listed else []:
+            run.fail("claude_md", "%s is %d lines, the limit is %d" % (p, n, limit),
+                     "every agent loads CLAUDE.md on every turn: move reference material into docs/ and "
+                     "leave a pointer (check.claude_md_max_lines changes the limit, 0 turns it off)")
+        if listed and units is not None and check.get("untracked_guard", True) is not False:
+            strays, open_listing = stray_untracked(task_id, listed, units, check)
+            if strays and open_listing:
+                run.note("untracked", "%s - not listed, but another task in progress has not listed its files yet"
+                         % " ".join(strays[:5]))
+            elif strays:
+                run.fail("untracked", "untracked file(s) in this task's unit that \"## Files touched\" does not name: "
+                         + " ".join(strays[:10]),
+                         "a file the list leaves out is left out of the task's commit. Add each one that belongs to "
+                         "this change to the list, and delete the ones that do not")
         guarded = bool(run.failed)
 
         tests_ran, counted = (0, False) if guarded else run_stages(run, ctx)
@@ -760,6 +823,10 @@ def check_task(task_id):
                 run.fail("tests", "no test exercised this change (%d ran, minimum %d)" % (tests_ran, min_tests),
                          "none of the tests the check ran covers what this task changed. Add the tests the "
                          "acceptance criteria describe, or put the test that covers it in the acceptance command.")
+        if not run.failed and not counted and check.get("count"):
+            run.fail("tests", "check.count is set and matched nothing in the test output",
+                     "the tests ran, but their count could not be read, so \"no test ran\" cannot be told apart "
+                     "from \"the regex is wrong\". Fix check.count for this runner's summary line.")
         run.close()
 
         blockers = foreign_blockers(run.raw, listed) if run.failed and not guarded and run.raw else []
@@ -879,6 +946,17 @@ def check_full():
         else:
             run.ok("census", "%d test file(s), %d suppression(s); %d/%d when the run started"
                    % (now["test_files"], now["skipped"], start.get("test_files", 0), start.get("skipped", 0)))
+
+    limit = int(check.get("claude_md_max_lines", 200) or 0)
+    if limit:
+        rc, tracked = git("ls-files", "--", "CLAUDE.md", "*/CLAUDE.md")
+        over = claude_md_over([p for p in tracked.splitlines() if p], limit) if rc == 0 else []
+        if over:
+            run.fail("claude_md", "over %d lines: %s" % (limit, ", ".join("%s (%d)" % o for o in over[:5])),
+                     "every agent loads CLAUDE.md on every turn: move reference material into docs/ "
+                     "(check.claude_md_max_lines changes the limit, 0 turns it off)")
+        else:
+            run.ok("claude_md", "no CLAUDE.md over %d lines" % limit)
 
     run.close()
     for line in run.lines:

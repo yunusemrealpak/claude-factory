@@ -25,6 +25,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import sys
 
 sys.dont_write_bytecode = True
@@ -72,8 +73,10 @@ def build(proposed=False):
     out["workers"] = int(fast.get("workers") or 4)
     out["risk_review"] = fast.get("risk_review") or "after"
     out["audit"] = fast.get("audit", True) is not False
+    # retry_limit counts attempts at a task, the first included.
+    out["retry_limit"] = max(1, int(cfg.get("retry_limit") or 2))
     out["effort"] = {"build": fast.get("effort_build") or "medium",
-                     "escalate": fast.get("effort_escalate") or "xhigh",
+                     "escalate": fast.get("effort_escalate") or "high",
                      "review": fast.get("effort_review") or "high",
                      "audit": fast.get("effort_audit") or "high"}
 
@@ -209,6 +212,7 @@ def record_start(plan):
     except ValueError:
         return
     census["tasks"] = [t["id"] for t in plan["tasks"]]
+    census["started"] = int(time.time())
     with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
         json.dump(census, fh)
 

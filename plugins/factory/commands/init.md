@@ -198,11 +198,12 @@ Step 5.
 
 `fast` is optional and configures `/factory:fast`: `workers` (how many builders at
 once, default 4), `effort_build` (default `medium`), `effort_escalate` (the one
-retry of a red task, default `xhigh`), `effort_review` (default `high`),
+retry of a red task, default `high`), `effort_review` (default `high`),
 `risk_review` (`after`, the default: a task sent to review only by a risk path
 lands first and is reviewed alongside the run; `before`: it waits for the
 review), `audit` (default `true`: one auditor reads the run's seams at the end)
-and `effort_audit` (default `high`).
+and `effort_audit` (default `high`). The top-level `retry_limit` (default 2)
+is how many attempts a red task gets in total, the first included.
 
 `check` is optional too, and it is how `/factory:fast` judges one task without
 running the whole project. `factory-check` knows no language, framework or build
@@ -217,7 +218,9 @@ the project's own tools already express:
                    "test": "<command that runs this unit's tests, from the project root>" } ],
   "unit_test": "<default per-unit test command, with {path} and {name}>",
   "count":     "<regex whose group is the number of tests a run reported>",
-  "ignore":    ["<path globs no test can observe>"]
+  "ignore":    ["<path globs no test can observe>"],
+  "claude_md_max_lines": 200,
+  "untracked_guard":     true
 }
 ```
 
@@ -232,6 +235,12 @@ the project's own tools already express:
   `commands.test`. Split only where the suite is big enough to be worth it -
   every unit's test command pays the runner's start-up again, and on a small
   project one suite run is faster than two unit runs.
+- **claude_md_max_lines** (default 200, `0` turns it off): a CLAUDE.md a task
+  touches, or any tracked one at the full check, that is longer is red. Every
+  agent loads it on every turn, so its size is a per-token cost of the run.
+- **untracked_guard** (default `true`): a file git does not track, inside a unit
+  the task touched and not in its `## Files touched`, is red - it would be left
+  out of the task's commit (a generated migration, a new file nobody listed).
 - **count** only when the test runner's summary does not say "N passed", "passed:
   N" or "Total tests: N". Without a count the zero-test guard cannot see a run
   that executed nothing.

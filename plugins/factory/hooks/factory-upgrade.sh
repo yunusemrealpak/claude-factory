@@ -51,6 +51,13 @@ for key in verify workers max_concurrent_agents retry_limit min_tests gate_mode 
   jq -e --arg k "${key}" 'has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
 
+# Keys one level down, in the blocks the fast lane reads. Only the ones that
+# have a default worth writing down: the rest are optional and absent on purpose.
+for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effort_escalate fast.effort_review fast.effort_audit check.claude_md_max_lines check.untracked_guard; do
+  block="${key%%.*}"; leaf="${key#*.}"
+  jq -e --arg b "${block}" --arg k "${leaf}" '(.[$b] // {}) | has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
+done
+
 missing_dirs=""
 for d in verified failures no-progress changes lessons questions inflight; do
   [ -d "${F}/${d}" ] || missing_dirs="${missing_dirs} ${d}"
@@ -131,6 +138,11 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
       gate_isolation: false,
       agent_stale_after_min: 45,
       isolation_links: [],
+      fast: {
+        workers: 4, risk_review: "after", audit: true,
+        effort_build: "medium", effort_escalate: "high", effort_review: "high", effort_audit: "high"
+      },
+      check: { claude_md_max_lines: 200, untracked_guard: true },
       risk_paths: [
         "*/auth/*", "*authentication*", "*authorization*", "*identity*",
         "*permission*", "*tenant*", "*payment*", "*billing*",
