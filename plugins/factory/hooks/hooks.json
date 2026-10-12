@@ -1,5 +1,5 @@
 {
-  "description": "Factory hooks: command hooks for the gate and the board, and an observe-only hooks module (quota, usage metering, /factory-board)",
+  "description": "Factory hooks: command hooks for the gate, the board, the hard bans and the autonomy consent, and a hooks module (quota, usage metering, /factory-board, hard blocks for subagents, consent record)",
   "modules": ["./register.js"],
   "hooks": {
     "SessionStart": [
@@ -20,6 +20,13 @@
         "matcher": "Agent",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/factory-agent-limit.sh", "timeout": 10 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/factory-consent.sh", "timeout": 10 }
         ]
       }
     ],

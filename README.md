@@ -46,7 +46,7 @@ identical error is stopped rather than retried until its budget runs out.
 
 **One commit per task, locally.** After the post-integration gate, the integrator
 commits exactly the files the task listed, with `Factory-Task` and `Factory-Change`
-trailers. Nothing is ever pushed, and your own uncommitted work is never swept in.
+trailers. An agent never pushes (a script publishes only when the autonomy level you consented to allows it), and your own uncommitted work is never swept in.
 When every task of a change is done, the change is archived with a summary and a
 local ref under `refs/factory/`.
 
@@ -210,7 +210,7 @@ rewritten without you watching.
 
 ## Safety
 
-- Nothing is pushed, ever. The only git write in the loop is one commit per task.
+- An agent never pushes; a script publishes only when your autonomy level allows it. The only git write in the loop is one commit per task.
 - The hooks are inert in a project with no `.factory/active`, so having the plugin
   enabled changes nothing anywhere else.
 - No `--dangerously-skip-permissions`. Commands declare narrow `allowed-tools`.

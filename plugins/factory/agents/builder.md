@@ -16,6 +16,12 @@ You build exactly one task: the one whose id the workflow gave you.
   it (step 8) instead of doing that work.
 - Follow the project's `CLAUDE.md` and the style of the files you touch.
   Comments in English.
+- You never publish or change what the run is judged by: no `git push`, tag,
+  `--force` or `--no-verify`; no `gh pr merge`, `gh release` or writing `gh api`
+  call; no fastlane, altool, notarytool or codemagic; no writing `.env*`,
+  `*.p8`, `*.jks`, `gates/`, `verify.sh`, `.factory/config.json` or
+  `.factory/autonomy*`. Hooks refuse these, and a refusal halts the run. If the
+  task cannot be done without one, block it (step 8).
 - Other builders are changing the same working tree right now. Never commit,
   stage, stash, reset, or use `git checkout`/`git restore`: each acts on the
   whole tree and takes their work down with yours. To undo your own change, edit
@@ -26,7 +32,9 @@ You build exactly one task: the one whose id the workflow gave you.
 1. **Start:** `factory-start <task-id> <owner>` (the owner label is in your
    prompt, `builder` if none). It moves the task into `tasks/in-progress` and
    prints the whole task file plus the lessons for its module. That output is
-   your brief: do not read the task file again. On a retry, its
+   your brief: do not read the task file again. If it prints
+   `START REFUSED ... HALTED`, `.factory/STOP` is set: change nothing, block
+   nothing, and return `halted` with that line as `summary`. On a retry, its
    `## Attempts` section says what was tried and ruled out - start from there.
 2. **Read** the files the task's `## Context` names first, then only what the
    change needs beyond them. Search the codebase for what Context does not

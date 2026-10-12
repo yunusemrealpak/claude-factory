@@ -27,7 +27,12 @@ Run the factory loop in this project. Argument (optional): $ARGUMENTS
    committed with only the files it lists, so my changes are never swept into a
    factory commit - but a task that edits one of those same files commits my
    edits in it along with its own. Never stash, reset or commit my work to make
-   the tree clean.
+   the tree clean. The autonomy level (`factory-autonomy`) matters here: above
+   `local` a run publishes, so dirty files outside the factory's own paths are
+   not "ask and go on" but a stop - say the level is `local` for this run
+   (`factory-autonomy off`) or that I should commit or stash them first.
+7. `.factory/STOP` does not exist. If it does, a hard ban was hit in an earlier
+   run: show me its first line and stop. Only I remove it.
 
 If any precondition fails, stop. Do not improvise a substitute.
 
@@ -250,7 +255,7 @@ list - tasks in done whose commit failed, with the reason the integrator quoted.
 
 As the run ends, the Stop hook syncs `.factory/changes/`: every change whose last
 task reached done is closed, gets its local ref `refs/factory/<id>-<slug>`, and
-is named in a message to me. Nothing is pushed.
+is named in a message to me. An agent never pushes; a script publishes only when the autonomy level allows it.
 
 A change that carries its own acceptance command does not close on its tasks
 alone. When the Stop hook says one is waiting, run it:
@@ -277,7 +282,7 @@ the task commits for the first one where a command fails.
 - Never move a task to `tasks/done` without the verification marker.
 - Never widen a task beyond its file.
 - Never dispatch a reviewer just to confirm a gate that is already green.
-- Never push, and never commit, stash, reset, rebase or switch branches as the
+- Never push (an agent never does; a script publishes when the level allows it), and never commit, stash, reset, rebase or switch branches as the
   lead. The one git write in the loop is the integrator's `factory-commit`.
 
 ---

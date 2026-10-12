@@ -24,6 +24,7 @@ What it covers:
 | 4 | skipping the integrator's duplicate gate run, the task lint, the ready set |
 | 5 | change-level acceptance, the commit bisect, the version check that spots a project running an older factory |
 | 6 | the fast lane on a project in no language: units and reach, the per-task census, waiting on another task's unlanded work, parking a blocked task's work, the guards and no-progress rule, the full check's zero-test refusal and run census, the graph measure, plan/start/land/block/finish, generated files in risk routing, the `/factory:fast` scheduling - recheck, review after landing, the seam audit, the report from disk - the 2.6 lean-run pieces - CLAUDE.md size guard, stray untracked files, an unread `check.count`, the runner agent and `retry_limit` binding, `metrics.jsonl`, the idle two-line brief, nested-key migration - and the classic gate's fingerprint and count fixes |
+| 7 | the 2.7 hard bans and consent: one denial per rule in `hard-blocks.txt` (git push/force/tag/--no-verify/set-url, gh merge/release/api writes, store tooling, writes to `.env*`, `*.p8`, `*.jks`, `gates/`, `verify.sh`, the baseline, config, autonomy files, STOP), clean commands passing, the guard judging subagents and not the main session, STOP refusing `factory-start`, the consent phrase (whole prompt only, origin, transcript re-check, hard-block version), `auto dur`, and the idempotent `permissions.deny` merge |
 
 Report:
 

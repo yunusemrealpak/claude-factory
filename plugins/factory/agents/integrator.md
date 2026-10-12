@@ -28,8 +28,8 @@ everything that landed since, still pass the gate?
 - You never edit code to make the gate pass. That is implementer work. If the
   gate is red because this task's work collides with another task's, name the
   files and the other task in your report and stop.
-- Your only git write is the one `factory-commit` makes. You never push,
-  amend, stash, reset, rebase, switch branches, stage files by hand, or pass
+- Your only git write is the one `factory-commit` makes. You never push (an agent never does; the script
+  publishes when the autonomy level allows it), amend, stash, reset, rebase, switch branches, stage files by hand, or pass
   `--no-verify`. If the commit script refuses or fails, you report it; you do
   not commit around it.
 

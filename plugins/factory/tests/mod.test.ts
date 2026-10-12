@@ -1,4 +1,5 @@
-// Tests for hooks/register.js, the factory's observe-only hooks module.
+// Tests for hooks/register.js, the factory's hooks module: the observers, the
+// hard blocks for subagents and the consent record.
 // Run with `claude plugin test` from plugins/factory (no session, no network).
 import { describe, expect, test } from 'claude-code/testing'
 
@@ -10,6 +11,15 @@ const LIMITS = [
   { kind: 'seven_day', percentUsed: 41, resetsAt: '2026-10-12T00:00:00Z' },
 ]
 
+// A cut of hooks/hard-blocks.txt, in its own format.
+const RULES = [
+  'hard_blocks_version: 1',
+  'bash ## git-push ## (^|[^[:alnum:]_.-])git([[:space:]]+-[A-Za-z-]+)*[[:space:]]+push([[:space:];&|)]|$)',
+  'path ## env-file ## any ## \\.env(\\.[^/[:space:]]*)?',
+  'path ## autonomy-consent ## root ## \\.factory/autonomy.*',
+  'deny ## Bash(git push *)',
+].join('\n')
+
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
 function world(on, { active = true, runFails = false, files = {} } = {}) {
@@ -20,9 +30,11 @@ function world(on, { active = true, runFails = false, files = {} } = {}) {
   on('clock.now', () => ({ value: NOW }))
   on('env.get', () => ({ value: '/home/u' }))
   on('fs.exists', (_$, e) => ({ value: e.path.endsWith('/.factory/active') ? active : e.path in files }))
-  on('fs.read', (_$, e) => ({ value: files[e.path] }))
+  on('fs.read', (_$, e) => ({ value: e.path.endsWith('/hard-blocks.txt') ? RULES : files[e.path] }))
   on('fs.list', () => ({ value: [{ name: 'T1.md', kind: 'file', size: 1, isLink: false }] }))
   on('agent.list', () => ({ value: [] }))
+  on('session.id', () => ({ value: 's1' }))
+  on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('session.usage', () => ({ value: { context: {}, rateLimits: [] } }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
@@ -165,5 +177,66 @@ describe('/factory-board', () => {
     await start($)
     const r = await $.command.run({ command: 'factory-board', args: '', origin: { kind: 'user' } })
     expect(r.text).toBe('factory is not initialised in this project')
+  })
+})
+
+describe('hard blocks', () => {
+  const call = ($, tool, input, agentId) => $.tool.call({ tool, ...input, ...(agentId ? { agentId } : {}) })
+
+  test('a subagent git push is refused and the run is stopped', async ($, on) => {
+    const runs = world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: 'git push origin main' }, 'a1')
+    expect(JSON.stringify(r)).toContain('git-push')
+    expect(runs.some((x) => JSON.stringify(x).includes('hard-blocks') || JSON.stringify(x).includes('trip'))).toBe(true)
+  })
+
+  test('the same push in the main session is not this hook\'s to refuse', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: 'git push origin main' })
+    expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+
+  test('a subagent write to .env is refused', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Write', { file_path: '/proj/.env', content: 'K=1' }, 'a1')
+    expect(JSON.stringify(r)).toContain('env-file')
+  })
+
+  test('a clean subagent command goes through', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: 'git status' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+
+  test('nothing is judged where the factory is not open', async ($, on) => {
+    world(on, { active: false })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: 'git push' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+})
+
+describe('autonomy consent', () => {
+  test('the phrase typed by the developer is handed to factory-consent.sh', async ($, on) => {
+    const runs = world(on)
+    await start($)
+    await $.prompt.submit({ text: 'auto devam et', origin: { kind: 'composer' } })
+    expect(runs.some((x) => JSON.stringify(x).includes('factory-consent.sh'))).toBe(true)
+  })
+
+  test('the phrase with other words is not handed over', async ($, on) => {
+    const runs = world(on)
+    await start($)
+    await $.prompt.submit({ text: 'yarın auto devam et', origin: { kind: 'composer' } })
+    expect(runs.some((x) => JSON.stringify(x).includes('factory-consent.sh'))).toBe(false)
   })
 })

@@ -280,6 +280,12 @@ existing one):
 }
 ```
 
+Then add the hard-ban rules (`permissions.deny`: no push, tag, force, merge,
+release, store tooling, no writes to `.env*`, `*.p8`, `*.jks`) with
+`factory-deny --apply`. It is a union: the project's own rules stay, a second run
+changes nothing. These rules are the second layer of `hooks/hard-blocks.txt`;
+the hooks enforce the same list against agents.
+
 A long run outlives its context, and the lead carries the run across a
 compaction (see "After a compaction" in the lead agent), so auto-compact must
 stay on. Do not write `autoCompactWindow`: when to compact is the developer's
@@ -875,6 +881,9 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/audit.md
 .factory/gate-start/
 .factory/usage.jsonl
+.factory/autonomy.json
+.factory/autonomy-off
+.factory/STOP
 ```
 
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,
@@ -918,7 +927,7 @@ entegrasyon kapısı yeşil dönüp `tasks/done` altına taşındıktan sonra
 `factory-commit <task-id>` ile TEK commit olarak
 kaydedilir. Commit yalnızca görev dosyasının `## Files touched` listesindeki
 dosyaları, görev dosyasını ve `decisions.md` dosyasını içerir; mesajında
-`Factory-Task` ve `Factory-Change` trailer'ları bulunur. Fabrika push yapmaz, dal
+`Factory-Task` ve `Factory-Change` trailer'ları bulunur. Ajan asla push etmez; kademe izin veriyorsa betik yayımlar. Fabrika dal
 açmaz, geçmişi yeniden yazmaz, commit hook'larını atlamaz. Commit'i yalnızca
 entegratör atar. Paylaşılan ağaçta `git checkout`, `restore`, `stash` ve `reset`
 başka bir görevin işini de silebileceği için hiçbir ajan bunları kullanmaz.
@@ -935,7 +944,7 @@ Her `/factory:init` onayı bir değişiklik açar (C1, C2, ...). İstek
 `.factory/changes/<id>-<slug>/goal.md` dosyasında, görevler, commit'ler ve
 kararlar `summary.md` dosyasında durur. Son görevi biten değişiklik kapanır ve
 yerel `refs/factory/<id>-<slug>` ref'i o değişikliğin son commit'ini gösterir. Bu
-ref push edilmez.
+ref ajan tarafından push edilmez.
 
 ### Kapı kuralı
 Bir görev `tasks/done` dizinine ancak `bash gates/verify.sh <task-id>` yeşil
@@ -1160,3 +1169,17 @@ When I approve:
    on - and a first `summary.md`. It refuses a reused id, a malformed slug or
    type, and a change with no tasks: fix what it names and run it again.
 3. Tell me the change is open and that `/factory:run` builds it.
+### The one line that approves and hands over
+
+End the board with exactly one line: `Onaylıyorsanız "auto devam et" yazın.` That
+single phrase, typed by me and nothing else in the message, approves the board
+**and** records my consent to run at the autonomy level (`autonomy_default` in
+`.factory/config.json`: `local` commits only, `pr` also pushes a branch and opens
+a pull request, `merge` also merges it when its checks are green; default
+`merge`). Ask me which level I want once, as part of this step, and write the
+answer to `autonomy_default`. A hook records the consent; you never write
+`.factory/autonomy.json` yourself, and a phrase with other words in it is not
+consent - ask again. `auto dur` (or `/factory:autonomy off`) returns to `local`.
+The hard bans (no push by an agent, no writes to `.env*`, keys, `gates/`) hold at
+every level.
+

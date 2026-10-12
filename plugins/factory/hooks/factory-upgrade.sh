@@ -47,7 +47,7 @@ gaps=0
 note() { gaps=$((gaps + 1)); [ "${mode}" = "brief" ] || echo "  - $*"; }
 
 missing_keys=""
-for key in verify workers max_concurrent_agents retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min; do
+for key in verify workers max_concurrent_agents retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min autonomy_default; do
   jq -e --arg k "${key}" 'has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
 
@@ -65,9 +65,16 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl"; do
+  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/STOP"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
+fi
+
+# The hard bans' second layer: the permissions.deny rules of hard-blocks.txt in
+# .claude/settings.json. factory-deny.sh holds the list and does the merge.
+missing_deny=""
+if ! FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" >/dev/null 2>&1; then
+  missing_deny=" permissions.deny"
 fi
 
 missing_gate=""
@@ -96,6 +103,7 @@ done
 [ -n "${missing_keys}" ]     && note "config.json is missing:${missing_keys}"
 [ -n "${missing_dirs}" ]     && note ".factory/ is missing:${missing_dirs}"
 [ -n "${missing_ignore}" ]   && note ".gitignore is missing:${missing_ignore}"
+[ -n "${missing_deny}" ]     && note ".claude/settings.json is missing hard-ban rules in:${missing_deny}"
 [ -n "${missing_gate}" ]     && note "gates/verify.sh is missing:${missing_gate}"
 [ -n "${missing_sections}" ] && note "task files with no '## Files touched' / '## Attempts':${missing_sections}"
 [ "${project_version}" = "${HARNESS}" ] || note "initialised by factory ${project_version}, harness is now ${HARNESS}"
@@ -114,7 +122,7 @@ fi
 
 if [ "${mode}" = "report" ]; then
   echo
-  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines and task sections."
+  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections."
   [ -n "${missing_gate}" ] && echo "The gate is never touched by --apply: run /factory-init in this project and it will offer to merge the missing parts into gates/verify.sh, keeping everything the file already does."
   exit 1
 fi
@@ -137,6 +145,7 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
       gate_mode: "staged",
       gate_isolation: false,
       agent_stale_after_min: 45,
+      autonomy_default: "merge",
       isolation_links: [],
       fast: {
         workers: 4, risk_review: "after", audit: true,
@@ -165,6 +174,11 @@ if [ -n "${missing_ignore}" ] && [ -f "${ROOT}/.gitignore" ]; then
     for line in ${missing_ignore}; do echo "${line}"; done
   } >> "${ROOT}/.gitignore"
   echo "  added gitignore lines:${missing_ignore}"
+  applied=$((applied + 1))
+fi
+
+if [ -n "${missing_deny}" ]; then
+  FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" --apply | sed 's/^/  /'
   applied=$((applied + 1))
 fi
 

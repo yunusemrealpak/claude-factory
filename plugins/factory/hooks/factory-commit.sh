@@ -20,7 +20,8 @@
 # which is how factory-change.sh finds a change's commits even when other
 # commits landed in between.
 #
-# Never pushes, never amends, never bypasses the project's commit hooks.
+# Never pushes (an agent never does; publishing is a separate, level-gated
+# script), never amends, never bypasses the project's commit hooks.
 #
 # Exit: 0 committed, or skipped because there is no repository / nothing to
 # commit (the output says which); 1 refused or failed (the output says why).

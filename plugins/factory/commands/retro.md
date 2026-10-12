@@ -1,6 +1,7 @@
 ---
 description: Retrospective on the factory itself - cluster recorded failures into mechanisms and propose minimal harness changes for approval
 argument-hint: [project dir, defaults to cwd]
+disable-model-invocation: true
 ---
 
 # Factory retrospective

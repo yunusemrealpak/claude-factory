@@ -56,6 +56,29 @@ stage_claim() {
   printf '%s\n' "$session_id" > "$owner_file.pending"
 }
 
+# The hard blocks (hooks/hard-blocks.txt), second layer. register.js holds the
+# same list in the session; this copy answers when the hooks module is off
+# (--safe-mode, an older Claude Code). Only a subagent's call is judged: the
+# developer's own session pushes and writes gates when it has to.
+agent_id="$(printf '%s' "$input" | jq -r '.agent_id // empty' 2>/dev/null)"
+if [ -n "$agent_id" ]; then
+  hb_kind=""; hb_text=""
+  case "$tool_name" in
+    Bash) hb_kind=bash; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" ;;
+    Write|Edit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)" ;;
+    NotebookEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // empty' 2>/dev/null)" ;;
+  esac
+  if [ -n "$hb_kind" ] && [ -n "$hb_text" ]; then
+    hb_rule="$(printf '%s' "$hb_text" | bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
+    hb_rc=$?
+    if [ "$hb_rc" -ne 0 ]; then
+      [ "$hb_rc" -eq 3 ] || hb_rule="rule-list-unreadable"
+      bash "$HOOK_DIR/factory-hardblock.sh" trip "$project_dir" "$hb_rule" "$tool_name" "$agent_id" >/dev/null 2>&1
+      deny "Factory hard block (${hb_rule}): no agent of a factory run may do this - it publishes, spends or rewrites the rules the run is judged by. Do not look for another way. Say in your result that the task needs it, and stop; the run is halted (.factory/STOP) until the developer has looked."
+    fi
+  fi
+fi
+
 case "$tool_name" in
   Bash)
     payload="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"

@@ -25,8 +25,11 @@ Run the acceptance command of change `$ARGUMENTS` and record the verdict.
      its own gate, so this is a seam between them: what they add up to does not
      do what the change asked for. Say what you think the seam is, in two or
      three sentences. Then stop - leave the change open, do not open a task, do
-     not touch the acceptance command. What to do about it is my call. If I want
-     the commit that broke it, `/factory:bisect` searches the task commits.
+     not touch the acceptance command. At autonomy `local` what to do about it is
+     my call; if I want the commit that broke it, `/factory:bisect` searches the
+     task commits. Above `local`, publish and merge nothing for this change: run
+     `/factory:bisect` for the commit and propose one fix task in
+     `tasks/proposed/` for me to approve. Never write it into the backlog.
    - `ACCEPT NONE` - this change closes on its tasks alone; nothing to do.
 
 Never edit the command in `goal.md` to make it pass. It is the thing I approved

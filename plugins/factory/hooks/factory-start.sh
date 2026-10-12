@@ -13,7 +13,8 @@
 # A task already in tasks/in-progress is a retry, or a task a dead run left
 # behind: it is taken over as it is, attempts and all.
 #
-# Exit: 0 started; 1 refused (the output says why); 2 usage error.
+# Exit: 0 started; 1 refused (the output says why; "HALTED" when .factory/STOP
+# is set); 2 usage error.
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +29,13 @@ ROOT="$PWD"
 T="${ROOT}/tasks"
 F="${ROOT}/.factory"
 [ -f "${F}/active" ] || { echo "START REFUSED for ${TASK_ID}: ${ROOT} has no .factory/active - not a factory project, or not its root."; exit 1; }
+
+# The kill switch. A hard block was hit, or the developer wrote this file: no
+# task starts, and the builder reports `halted` instead of working around it.
+if [ -f "${F}/STOP" ]; then
+  echo "START REFUSED for ${TASK_ID}: HALTED - .factory/STOP is set ($(head -1 "${F}/STOP" 2>/dev/null)). Do nothing else and return status halted; only the developer removes that file."
+  exit 1
+fi
 
 src=""
 for col in in-progress backlog; do

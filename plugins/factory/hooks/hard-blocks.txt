@@ -1,0 +1,78 @@
+# Factory hard blocks (class D): what no agent of a factory run may do.
+#
+# One file, three readers: the hooks module (register.js, tool.call), the
+# PreToolUse guard (factory-done-guard.sh via factory-hardblock.sh) and
+# factory-deny.sh, which copies the `deny` lines into a project's
+# .claude/settings.json. Change a rule here and every layer changes with it.
+#
+# Fields are separated by " ## ". Regexes are POSIX ERE that also parse as
+# JavaScript once [[:space:]] / [:alnum:] are spelled out, which register.js
+# does; keep to that subset (no \b, \d, lookahead).
+#
+#   hard_blocks_version: N        raised whenever a rule is added or loosened;
+#                                 an autonomy consent written under another
+#                                 number counts for nothing (factory-autonomy)
+#   bash ## name ## regex          a Bash command (newlines are read as ';')
+#   path ## name ## any|root ## X  a file written by a write tool, or by a Bash
+#                                  redirect / tee / cp / mv / rm / sed -i ...;
+#                                  "root" is relative to the project root,
+#                                  "any" matches at any depth
+#   deny ## rule                   a Claude Code permissions.deny rule
+
+hard_blocks_version: 1
+
+# --- git: an agent never publishes ------------------------------------------
+bash ## git-push ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+push([[:space:];&|)]|$)
+bash ## git-force ## (^|[^[:alnum:]_.-])git[[:space:]]+[^;&|]*[[:space:]]--force
+bash ## git-tag ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+tag([[:space:];&|)]|$)
+bash ## git-no-verify ## (^|[^[:alnum:]_.-])git[[:space:]]+[^;&|]*[[:space:]]--no-verify([[:space:];&|)]|$)
+bash ## git-remote-set-url ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+remote[[:space:]]+([^;&|]*[[:space:]])?set-url([[:space:];&|)]|$)
+
+# --- gh: no merge, no release, no state-changing API call --------------------
+bash ## gh-pr-merge ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?pr[[:space:]]+merge([[:space:];&|)]|$)
+bash ## gh-release ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?release([[:space:];&|)]|$)
+bash ## gh-api-write ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?api[[:space:]]+([^;&|]*[[:space:]])?(-X|--method|-f|-F|--field|--raw-field|--input)
+
+# --- store and deploy tooling, at the start of a command ---------------------
+bash ## store-deploy ## (^|[;&|(`"']|\$\()[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*((sudo|xcrun|env|time|nohup|command|exec|bundle[[:space:]]+exec|bundler[[:space:]]+exec)[[:space:]]+)*([^[:space:];&|]*/)?(fastlane|altool|notarytool|codemagic[A-Za-z_-]*)([[:space:];&|)"']|$)
+
+# --- writes ------------------------------------------------------------------
+path ## env-file ## any ## \.env(\.[^/[:space:]]*)?
+path ## apple-key ## any ## [^/[:space:]]*\.p8
+path ## android-keystore ## any ## [^/[:space:]]*\.jks
+path ## gates-dir ## root ## gates/.*
+path ## verify-script ## any ## verify\.sh
+path ## census-baseline ## root ## \.factory/baseline\.json
+path ## factory-config ## root ## \.factory/config\.json
+path ## autonomy-consent ## root ## \.factory/autonomy.*
+path ## stop-switch ## root ## \.factory/STOP
+
+# --- second layer: the same bans as permissions.deny -------------------------
+# Not here: gates/, verify.sh, baseline.json and config.json. The developer's own
+# session writes those (/factory:init), and a deny rule cannot tell it from an
+# agent. The first layer and the guard hold them against agents.
+deny ## Bash(git push)
+deny ## Bash(git push *)
+deny ## Bash(git tag)
+deny ## Bash(git tag *)
+deny ## Bash(git * --force*)
+deny ## Bash(git * --no-verify*)
+deny ## Bash(git remote set-url *)
+deny ## Bash(gh pr merge *)
+deny ## Bash(gh release *)
+deny ## Bash(gh api * --method *)
+deny ## Bash(gh api * -X *)
+deny ## Bash(gh api * -f *)
+deny ## Bash(gh api * -F *)
+deny ## Bash(gh api * --field *)
+deny ## Bash(gh api * --raw-field *)
+deny ## Bash(gh api * --input *)
+deny ## Bash(fastlane *)
+deny ## Bash(*altool *)
+deny ## Bash(*notarytool *)
+deny ## Bash(codemagic*)
+deny ## Edit(**/.env*)
+deny ## Edit(**/*.p8)
+deny ## Edit(**/*.jks)
+deny ## Edit(/.factory/autonomy*)
+deny ## Edit(/.factory/STOP)

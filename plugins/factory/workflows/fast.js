@@ -54,7 +54,7 @@ const RESULT = {
   required: ['id', 'status', 'summary', 'concerns'],
   properties: {
     id: { type: 'string' },
-    status: { type: 'string', enum: ['landed', 'review', 'waiting', 'red', 'no_progress', 'blocked', 'error'] },
+    status: { type: 'string', enum: ['landed', 'review', 'waiting', 'red', 'no_progress', 'blocked', 'halted', 'error'] },
     summary: { type: 'string' },
     concerns: { type: 'array', items: { type: 'string' } },
     files: { type: 'array', items: { type: 'string' } },
@@ -160,6 +160,11 @@ function slot(fn) {
 
 const FAILED = ['red', 'no_progress', 'error']
 
+// .factory/STOP stops the run: a builder that finds it returns `halted`, and
+// from then on no task starts. What was building finishes; what was waiting to
+// start is reported as halted, not blocked - the board is left as it was.
+let halted = null
+
 // --- progress: a task waiting on another task's unlanded work re-checks when
 // something lands, or when nothing else is building any more ---
 let building = 0
@@ -244,6 +249,7 @@ async function block(t, reason) {
 }
 
 async function build(t) {
+  if (halted) return { id: t.id, status: 'halted', summary: halted }
   building++
   try {
     return await buildInner(t)
@@ -262,6 +268,11 @@ async function buildInner(t) {
     if (previous) log(`${t.id}: ${previous.status} - attempt ${n} of ${ATTEMPTS} at ${E.escalate} effort`)
     const label = n === 1 ? t.id : n === 2 ? t.id + ' retry' : `${t.id} retry ${n - 1}`
     r = await settle(t, await slot(() => agent(buildPrompt(t, previous, null, n), { agentType: 'factory:builder', effort: n === 1 ? E.build : E.escalate, schema: RESULT, label, phase: 'Build' })))
+    if (r && r.status === 'halted') {
+      halted = halted || r.summary || '.factory/STOP is set'
+      log(`${t.id}: halted - ${halted}`)
+      return r
+    }
     if (r && !FAILED.includes(r.status)) break
   }
   if (!r || FAILED.includes(r.status)) {
@@ -282,6 +293,10 @@ async function buildInner(t) {
     if (v && v.verdict === 'pass') return land(t, r, 'reviewed and landed: ')
     if (round === 2 || !v) return block(t, 'review failed: ' + (v ? v.findings.join('; ') : 'the reviewer returned nothing'))
     r = await slot(() => agent(buildPrompt(t, null, v.findings), { agentType: 'factory:builder', effort: E.escalate, schema: RESULT, label: t.id + ' fix', phase: 'Build' }))
+    if (r && r.status === 'halted') {
+      halted = halted || r.summary || '.factory/STOP is set'
+      return r
+    }
     if (!r || r.status !== 'review') return r && r.status === 'blocked' ? r : block(t, 'could not address the review findings')
   }
 }
@@ -295,6 +310,7 @@ function schedule(id) {
   const t = byId.get(id)
   const p = Promise.all(t.deps.filter(d => byId.has(d)).map(schedule)).then(deps => {
     const bad = deps.find(d => !d || d.status !== 'landed')
+    if (halted) return { id, status: 'halted', summary: halted }
     if (bad) return { id, status: 'skipped', summary: `waits on ${bad.id}, which ended ${bad.status}` }
     return build(t)
   })
