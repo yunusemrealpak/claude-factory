@@ -506,6 +506,15 @@ else
   echo "(JavaScriptCore not found - workflow scheduling tests skipped)"
 fi
 
+echo "=== 2.6.1: what chains a plan, and where the lead wakes"
+SC="$WORK/chain"; rm -rf "$SC"; mkdir -p "$SC/.factory" "$SC/tasks/backlog"; P="$SC"; cd "$SC" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '{"commands":{}}\n' > .factory/config.json
+for n in 1 2 3 4; do mktask backlog K$n "$([ $n -gt 1 ] && echo K$((n - 1)))" "x" lib/strings.arb lib/page$n.dart; done
+out="$(factory-plan)"
+check "a serial chain names the file that holds it together" 'printf "%s" "$out" | grep -q "Files they share: lib/strings.arb (4 tasks)"' "$out"
+check "the brief tells the lead not to watch a running workflow" 'grep -q "do not attach a Monitor" "$H/factory-brief.sh"'
+
 echo "=== 2.6: the runner agent, helper calls, metrics, the idle brief"
 check "runner.md is a cheap, bounded, CLAUDE.md-free agent" 'f="$PLUGIN/agents/runner.md"; grep -q "^name: runner" "$f" && grep -q "^model: haiku" "$f" && grep -q "^effort: low" "$f" && grep -q "^maxTurns: 4" "$f" && grep -q "^omitClaudeMd: true" "$f"'
 if [ -x "$JSC" ]; then
@@ -536,10 +545,11 @@ now=$(date +%s)
 {
   echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a1\",\"type\":\"factory:builder\",\"label\":\"F-01\",\"model\":\"claude-sonnet-5-5\",\"input\":1000,\"output\":2000,\"cache_read\":10000,\"cache_write\":0}"
   echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a2\",\"type\":\"factory:runner\",\"label\":\"F-01 land\",\"model\":\"claude-haiku-5-5\",\"input\":500,\"output\":100,\"cache_read\":0,\"cache_write\":0}"
+  echo "{\"ts\":$now,\"turn\":1,\"agent\":\"main\",\"type\":\"main\",\"label\":null,\"model\":\"claude-opus-5-5\",\"input\":10,\"output\":1000,\"cache_read\":100000,\"cache_write\":0}"
   echo "{\"ts\":$now,\"turn\":1,\"agent\":\"a3\",\"type\":\"factory:runner\",\"label\":\"finish\",\"model\":\"claude-haiku-5-5\",\"input\":500,\"output\":100,\"cache_read\":0,\"cache_write\":0}"
 } > .factory/usage.jsonl
 factory-finish --tasks F-01 --no-full >/dev/null
-check "a finished run appends one metrics line" '[ "$(wc -l < .factory/metrics.jsonl | tr -d " ")" = 1 ] && jq -e ".tasks == 1 and .landed >= 1 and .usd_total > 0 and (.helpers_share > 0 and .helpers_share < 0.1) and .unlabeled_share == 0" .factory/metrics.jsonl >/dev/null' "$(cat .factory/metrics.jsonl 2>/dev/null)"
+check "a finished run appends one metrics line" '[ "$(wc -l < .factory/metrics.jsonl | tr -d " ")" = 1 ] && jq -e ".tasks == 1 and .landed >= 1 and .usd_total > 0 and (.helpers_share > 0 and .helpers_share < 0.1) and .unlabeled_share == 0 and .lead_turns == 1 and .lead_share > 0" .factory/metrics.jsonl >/dev/null' "$(cat .factory/metrics.jsonl 2>/dev/null)"
 rm -f .factory/usage.jsonl .factory/metrics.jsonl
 factory-finish --tasks F-01 --no-full >/dev/null
 check "without usage rows the line says so instead of inventing a cost" 'jq -e ".usd_total == null and .turns == 0" .factory/metrics.jsonl >/dev/null' "$(cat .factory/metrics.jsonl 2>/dev/null)"

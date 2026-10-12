@@ -186,6 +186,7 @@ Session id: ${session_id:-unknown}
 Run owner: ${run_owner}
 
 Rules in force: a task enters tasks/done only after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. The Stop hook keeps the session running while actionable tasks remain. Run /factory-status for detail, /factory-run to continue the loop.
+While /factory:fast runs: do not attach a Monitor, a poll or a progress message to it. Every builder result that wakes this session re-reads its whole context; the workflow reports once, when it is done.
 BRIEF
 )"
 

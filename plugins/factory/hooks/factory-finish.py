@@ -120,7 +120,7 @@ def metrics(ids, board, started):
     by_label = {}
     names = agent_labels() if any(not r.get("label") for r in rows) else {}
     price = pricer()
-    total = helpers = unlabeled = 0.0
+    total = helpers = unlabeled = lead = 0.0
     tasks_usd, retried = {}, set()
     for r in rows:
         label = r.get("label") or names.get(r.get("agent"))
@@ -131,7 +131,12 @@ def metrics(ids, board, started):
                    + (r.get("cache_read") or 0) * p[2] + (r.get("cache_write") or 0) * p[3]) / 1e6
         total += usd
         tid, kind = split_label(label, ids)
-        if not label:
+        # The session that runs the workflow is not an unknown: its turns are
+        # what waiting on the run costs, and the number to bring down.
+        is_lead = r.get("type") == "main" or r.get("agent") == "main"
+        if is_lead:
+            lead += usd
+        elif not label:
             unlabeled += usd
         if (r.get("type") or "").endswith("runner") or (tid and kind.split(" ")[0] in HELPER_SUFFIXES) \
                 or label in ("plan", "finish"):
@@ -150,6 +155,8 @@ def metrics(ids, board, started):
         "usd_total": round(total, 3) if rows else None,
         "usd_per_landed": round(total / len(landed), 3) if rows and landed else None,
         "helpers_share": round(helpers / total, 3) if total else None,
+        "lead_share": round(lead / total, 3) if total else None,
+        "lead_turns": sum(1 for r in rows if r.get("type") == "main" or r.get("agent") == "main"),
         "unlabeled_share": round(unlabeled / total, 3) if total else None,
         "usd_by_task": {k: round(v, 3) for k, v in sorted(tasks_usd.items())},
     })
@@ -238,9 +245,10 @@ def main(argv):
     lines += ["## Tasks", "", "| task | where it is | commit | note |", "| --- | --- | --- | --- |"]
     lines += ["| %s | %s | %s | %s |" % (b["id"], b["lane"], b["commit"] or "-", b.get("reason", "")) for b in board]
     if m["usd_total"] is not None:
-        lines += ["", "Cost: $%.2f over %d turn(s), $%s per landed task, helpers %.0f%% of it; first try green %d/%d." % (
+        lines += ["", "Cost: $%.2f over %d turn(s), $%s per landed task, helpers %.0f%% and the lead session %.0f%% (%d turn(s)) of it; first try green %d/%d." % (
             m["usd_total"], m["turns"], m["usd_per_landed"] if m["usd_per_landed"] is not None else "-",
-            100 * (m["helpers_share"] or 0), m["first_try_green"], m["tasks"])]
+            100 * (m["helpers_share"] or 0), 100 * (m["lead_share"] or 0), m["lead_turns"],
+            m["first_try_green"], m["tasks"])]
     lines += ["", "## Full check: %s" % full["verdict"], "", "```", full["output"], "```", ""]
     if acceptance:
         lines += ["## Change acceptance", ""] + ["- %s" % a["result"] for a in acceptance] + [""]

@@ -60,6 +60,21 @@ def lane(name):
         return []
 
 
+def files_touched(path):
+    """The paths a task file lists under "## Files touched"."""
+    out, on = [], False
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("## "):
+                    on = line.strip() == "## Files touched"
+                elif on and line.lstrip().startswith("- "):
+                    out.append(line.lstrip()[2:].strip().strip("`"))
+    except OSError:
+        pass
+    return [p for p in out if p]
+
+
 def build(proposed=False):
     out = {"ok": True, "problems": [], "warnings": [], "tasks": [], "held": []}
     if not os.path.isfile(os.path.join(F, "active")):
@@ -98,7 +113,8 @@ def build(proposed=False):
         for tid in lanes[col]:
             fm = frontmatter(os.path.join(ROOT, "tasks", col, tid + ".md"))
             deps = [d.strip().strip("\"'") for d in re.split(r"[,\s]+", fm.get("depends_on", "").strip("[]")) if d.strip()]
-            meta[tid] = {"deps": [d for d in deps if d not in done], "fm": fm}
+            meta[tid] = {"deps": [d for d in deps if d not in done], "fm": fm,
+                         "files": files_touched(os.path.join(ROOT, "tasks", col, tid + ".md"))}
             if fm.get("needs_human", "").lower() == "true":
                 held[tid] = "needs_human - a decision for the developer"
             elif os.path.exists(os.path.join(F, "no-progress", tid)):
@@ -180,10 +196,18 @@ def build(proposed=False):
         out["critical_path"] = list(reversed(chain))
         out["width"] = max(per_level.values())
         if len(active) >= 4 and len(chain) * 2 > len(active):
+            # What chains them is usually a file they all list: say which.
+            seen = {}
+            for t in chain:
+                for f in set(active[t]["files"]):
+                    seen[f] = seen.get(f, 0) + 1
+            shared = sorted(((n, f) for f, n in seen.items() if n >= 3), key=lambda x: (-x[0], x[1]))[:4]
+            why = (" Files they share: " + ", ".join("%s (%d tasks)" % (f, n) for n, f in shared)
+                   + ". One file listed by many tasks forces them into a line; split it, or give each task its own.") if shared else ""
             out["warnings"].append(
                 "%d of %d tasks sit on one dependency chain (%s): they run one after another however many "
-                "builders there are. Merge links that belong together, or move work that must be serial to the end."
-                % (len(chain), len(active), " -> ".join(chain[:12]) + (" ..." if len(chain) > 12 else "")))
+                "builders there are. Merge links that belong together, or move work that must be serial to the end.%s"
+                % (len(chain), len(active), " -> ".join(chain[:12]) + (" ..." if len(chain) > 12 else ""), why))
 
     try:
         st = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--", "."], capture_output=True, text=True)

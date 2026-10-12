@@ -73,6 +73,11 @@ between tasks. It is a Claude Code workflow: the dependency graph, the
 scheduling, the retry and the review routing are plain JavaScript, so the only
 model work left is writing each task's code.
 
+Leave the run alone while it works. A Monitor or a poll on it wakes the main
+session once per builder, and every wake-up re-reads that session's whole
+context: on a 14-task run that was about a quarter of its cost. The workflow
+reports once, at the end.
+
 - **One builder per task.** It starts the task (`factory-start` prints the task
   and its lessons in one go), writes the code and the tests the task asks for,
   and does not run tests while it works.
