@@ -75,7 +75,14 @@ def files_touched(path):
     return [p for p in out if p]
 
 
-def build(proposed=False):
+def change_of_task(tid):
+    """The change a task belongs to: the C<n>- prefix of its id; a task without
+    one belongs to C1, the change every project starts with."""
+    m = re.match(r"^(C[0-9]+)-", tid)
+    return m.group(1) if m else "C1"
+
+
+def build(proposed=False, change=None):
     out = {"ok": True, "problems": [], "warnings": [], "tasks": [], "held": []}
     if not os.path.isfile(os.path.join(F, "active")):
         out.update(ok=False, problems=["no .factory/active here - not a factory project, or not its root"])
@@ -120,6 +127,22 @@ def build(proposed=False):
             elif os.path.exists(os.path.join(F, "no-progress", tid)):
                 held[tid] = "stalled - the check saw the same failure twice; it needs a different approach"
     blocked = set(lanes["blocked"])
+
+    if change:
+        # One change at a time: the others stay on the board, untouched. A task
+        # of this change that waits on another change says so - it is not
+        # ready, and the reason names the change to land first.
+        other = {t for t in meta if change_of_task(t) != change}
+        for tid in list(meta):
+            if tid in other:
+                continue
+            for d in meta[tid]["deps"]:
+                if d in other:
+                    held[tid] = "waits on %s of change %s, which has to be delivered first" % (d, change_of_task(d))
+                    break
+        for tid in other:
+            meta.pop(tid, None)
+            held.pop(tid, None)
 
     changed = True
     while changed:  # a task waiting on something that cannot land is held too
@@ -241,8 +264,44 @@ def record_start(plan):
         json.dump(census, fh)
 
 
+def delivery_gate(change):
+    """What stops a run from starting at the level it runs at. Returns a list of
+    problems (empty when the run may start)."""
+    problems = []
+    level = "local"
+    try:
+        r = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")],
+                           capture_output=True, text=True, cwd=ROOT, timeout=20)
+        level = (r.stdout.strip() or "local").split()[0]
+    except (OSError, subprocess.SubprocessError, IndexError):
+        pass
+    if change:
+        b = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-branch.sh"), change],
+                           capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
+        if b.returncode != 0:
+            problems.append((b.stdout.strip() or b.stderr.strip() or "factory-branch refused").splitlines()[0])
+    if level == "merge":
+        q = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
+                           capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
+        if q.returncode != 0:
+            problems.append((q.stdout.strip() or "quota check failed").splitlines()[0]
+                            + " - at level merge a new change does not start on a guess")
+    return problems
+
+
 def main(argv):
-    plan = build(proposed="--proposed" in argv)
+    change = None
+    if "--change" in argv:
+        i = argv.index("--change")
+        change = argv[i + 1] if i + 1 < len(argv) else None
+    plan = build(proposed="--proposed" in argv, change=change)
+    if change:
+        plan["change"] = change
+    if "--start" in argv and plan["ok"] and "--proposed" not in argv:
+        gate = delivery_gate(change)
+        if gate:
+            plan["ok"] = False
+            plan["problems"] += gate
     if "--start" in argv and plan["ok"] and "--proposed" not in argv:
         record_start(plan)
         try:

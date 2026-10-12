@@ -46,6 +46,11 @@ case "${1:-}" in
       printf 'hard block "%s" hit by %s (%s) at %s. Remove this file once you have looked.\n' \
         "${rule}" "${agent:-an agent}" "${tool}" "${now}" > "${root}/.factory/STOP"
     fi
+    # A ban was hit: the run may not publish more than a PR until the developer
+    # consents again.
+    if [ ! -s "${root}/.factory/autonomy-cap" ]; then
+      printf 'pr\nhard block "%s" at %s\n' "${rule}" "${now}" > "${root}/.factory/autonomy-cap"
+    fi
     jq -cn --arg ts "${now}" --argjson epoch "$(date +%s)" --arg rule "${rule}" --arg tool "${tool}" --arg agent "${agent}" \
       '{ts: $ts, epoch: $epoch, kind: "hard_block", rule: $rule, tool: $tool, agent_id: $agent}' \
       >> "${root}/.factory/events.jsonl" 2>/dev/null

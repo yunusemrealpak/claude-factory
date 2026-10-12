@@ -21,6 +21,7 @@ ROOT="${FACTORY_ROOT:-$PWD}"
 F="${ROOT}/.factory"
 CONSENT="${F}/autonomy.json"
 OFF="${F}/autonomy-off"
+CAP="${F}/autonomy-cap"
 GLOBAL_OFF="${HOME}/.claude/.factory-autonomy-off"
 
 cmd="${1:-level}"
@@ -71,6 +72,16 @@ resolve() {
         | select(test("\\A\\s*auto devam( et)?\\s*\\z"; "i"))' >/dev/null 2>&1; then
     WHY="the transcript holds no line of yours that says exactly 'auto devam et'"
     return
+  fi
+  # A breaker's cap: the level may be lowered by the factory, never raised.
+  if [ -s "${CAP}" ]; then
+    cap="$(head -1 "${CAP}" | tr -d '[:space:]')"
+    rank() { case "$1" in local) echo 0 ;; pr) echo 1 ;; merge) echo 2 ;; *) echo 0 ;; esac; }
+    if [ "$(rank "${cap}")" -lt "$(rank "${level}")" ]; then
+      LEVEL="${cap}"
+      WHY="capped to ${cap} by a breaker (.factory/autonomy-cap): $(sed -n 2p "${CAP}")"
+      return
+    fi
   fi
   LEVEL="${level}"
   WHY="consent by $(jq -r '.consented_by // "unknown"' "${CONSENT}" 2>/dev/null) at $(jq -r '.consented_at // "?"' "${CONSENT}" 2>/dev/null)"

@@ -74,6 +74,9 @@ fi
 version="$(bash "${HOOK_DIR}/factory-hardblock.sh" version 2>/dev/null)"
 email="$(git -C "${cwd}" config user.email 2>/dev/null)"
 
+# The typed phrase answers a breaker even when the consent itself is unchanged.
+rm -f "${F}/autonomy-cap"
+
 # Same consent already on file: nothing to write, nothing to announce.
 if [ -s "${F}/autonomy.json" ] && [ ! -f "${F}/autonomy-off" ] \
    && [ "$(jq -r '[.level, .session_id, .hard_blocks_version | tostring] | join("|")' "${F}/autonomy.json" 2>/dev/null)" = "${level}|${sid}|${version}" ]; then
@@ -87,6 +90,9 @@ jq -n --arg level "${level}" --arg scope "project" --arg at "${now}" --arg by "$
     session_id: $sid, transcript_path: $tp, hard_blocks_version: $v}' > "${tmp}" 2>/dev/null \
   && mv -f "${tmp}" "${F}/autonomy.json"
 rm -f "${F}/autonomy-off"
+# A new, deliberate consent is the developer's answer to a breaker: it clears
+# the cap the breaker set.
+rm -f "${F}/autonomy-cap"
 notify "${project}: autonomy raised to ${level}"
 echo "Factory: autonomy level ${level} recorded from your 'auto devam et'. 'auto dur' turns it off."
 exit 0

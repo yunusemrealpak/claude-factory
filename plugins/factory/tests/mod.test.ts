@@ -22,7 +22,7 @@ const RULES = [
 
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
-function world(on, { active = true, runFails = false, files = {} } = {}) {
+function world(on, { active = true, runFails = false, files = {}, level = '', limits = [] } = {}) {
   const runs = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: '/proj' }))
@@ -35,13 +35,14 @@ function world(on, { active = true, runFails = false, files = {} } = {}) {
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 's1' }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
-  on('session.usage', () => ({ value: { context: {}, rateLimits: [] } }))
+  on('session.usage', () => ({ value: { context: {}, rateLimits: limits } }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('process.run', (_$, e) => {
     runs.push(e)
     if (runFails) return { deny: 'no processes in this test' }
+    if (level && JSON.stringify(e).includes('factory-autonomy.sh')) return { value: { exitCode: 0, stdout: level + '\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: 'READY T1 api Add login\n', stderr: '' } }
   })
   return runs
@@ -238,5 +239,43 @@ describe('autonomy consent', () => {
     await start($)
     await $.prompt.submit({ text: 'yarın auto devam et', origin: { kind: 'composer' } })
     expect(runs.some((x) => JSON.stringify(x).includes('factory-consent.sh'))).toBe(false)
+  })
+})
+
+describe('quota breaker on agent.spawn', () => {
+  // elapsed is 42.9%, so 60% is past the line plus the margin of 10
+  const LIMITS = [{ kind: 'seven_day', percentUsed: 60, resetsAt: '2026-10-12T00:00:00Z' }]
+  const spawn = ($, type) => $.agent.spawn({ subagentType: type, description: 'T1', prompt: 'go' })
+
+  test('a builder past the even line at level merge is refused', async ($, on) => {
+    world(on, { level: 'merge', limits: LIMITS })
+    await start($)
+    await $.turn.complete(turn())
+    const r = await spawn($, 'factory:builder')
+    expect(JSON.stringify(r)).toContain('quota breaker')
+  })
+
+  test('the same spawn is allowed at level pr', async ($, on) => {
+    world(on, { level: 'pr', limits: LIMITS })
+    await start($)
+    await $.turn.complete(turn())
+    const r = await spawn($, 'factory:builder')
+    expect(JSON.stringify(r)).not.toContain('quota breaker')
+  })
+
+  test('a reviewer is never gated', async ($, on) => {
+    world(on, { level: 'merge', limits: LIMITS })
+    await start($)
+    await $.turn.complete(turn())
+    const r = await spawn($, 'factory:reviewer')
+    expect(JSON.stringify(r)).not.toContain('quota breaker')
+  })
+
+  test('no live reading lets the builder go', async ($, on) => {
+    world(on, { level: 'merge', limits: [] })
+    await start($)
+    await $.turn.complete(turn())
+    const r = await spawn($, 'factory:builder')
+    expect(JSON.stringify(r)).not.toContain('quota breaker')
   })
 })

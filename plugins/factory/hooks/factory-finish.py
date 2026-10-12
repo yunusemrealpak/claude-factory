@@ -61,6 +61,29 @@ def run(cmd):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
+def deliver_closed(ids):
+    """A change that closed in this run is handed to the publisher, detached: it
+    waits on CI and must not hold the run's end. The pending mark is what lets a
+    later session pick it up if this one never gets to (a level that was local,
+    a sleeping laptop). The publisher itself refuses below level pr."""
+    if not ids:
+        return
+    pub = os.path.join(F, "publish")
+    try:
+        os.makedirs(pub, exist_ok=True)
+    except OSError:
+        return
+    for cid in ids:
+        try:
+            if not os.path.exists(os.path.join(pub, cid + ".json")):
+                open(os.path.join(pub, cid + ".pending"), "w").close()
+            subprocess.Popen(["python3", os.path.join(HOOK_DIR, "factory-publish.py"), cid], cwd=ROOT,
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError:
+            pass
+
+
 HELPER_SUFFIXES = ("land", "block", "recheck")
 
 
@@ -214,6 +237,7 @@ def main(argv):
 
     _, sync = run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
     acceptance = []
+    closed_now = re.findall(r"^CLOSED-NOW\s+(C[0-9]+)-", sync, re.M)
     for name in re.findall(r"^unverified\s+(\S+)", sync, re.M):
         cid = name.split("-")[0]
         _, out = run(["bash", os.path.join(HOOK_DIR, "factory-accept.sh"), cid])
@@ -221,6 +245,8 @@ def main(argv):
         acceptance.append({"change": cid, "result": verdict})
     if acceptance:
         _, sync = run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
+        closed_now += re.findall(r"^CLOSED-NOW\s+(C[0-9]+)-", sync, re.M)
+    deliver_closed(sorted(set(closed_now)))
     run(["bash", os.path.join(HOOK_DIR, "factory-dash.sh")])
 
     started = 0

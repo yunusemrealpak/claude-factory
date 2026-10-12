@@ -36,14 +36,14 @@ let root = null
 let agents = {}
 let quotaWrittenAt = 0
 let rules = null
-let band = { level: 'local', stopped: false }
+let band = { level: 'local', stopped: false, publish: '' }
 
 export function register(on) {
   root = null
   agents = {}
   quotaWrittenAt = 0
   rules = null
-  band = { level: 'local', stopped: false }
+  band = { level: 'local', stopped: false, publish: '' }
 
   on('session.start', async ($, e, next) => {
     try {
@@ -70,7 +70,16 @@ export function register(on) {
 
   // The spawn's result carries the id its turns report; keep the label the
   // caller gave so a turn can say which task it worked on.
+  // The quota breaker: above the week's even-spend line a new builder does not
+  // start while the level is merge - a run that publishes unattended must not
+  // be the thing that empties the week. Live figures only; where none exist
+  // (an API key, no subscription) the spawn goes on, and factory-plan --start
+  // has its own check on the saved file.
   on('agent.spawn', async ($, e, next) => {
+    try {
+      const why = await quotaGate($, e)
+      if (why) return { deny: why }
+    } catch {}
     const r = await next(e)
     try {
       if (r && r.agentId) agents[r.agentId] = { type: e.subagentType, label: e.description }
@@ -134,9 +143,11 @@ export function register(on) {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     try {
-      if (!root || (band.level === 'local' && !band.stopped)) return next(e)
+      if (!root || (band.level === 'local' && !band.stopped && !band.publish)) return next(e)
       const { Box, Text, Button } = $.ui.resolve(e)
-      const label = band.stopped ? 'factory: STOPPED (.factory/STOP)' : 'factory autonomy: ' + band.level
+      const label =
+        (band.stopped ? 'factory: STOPPED (.factory/STOP)' : 'factory autonomy: ' + band.level) +
+        (band.publish ? ' | delivery: ' + band.publish : '')
       return h(
         Box,
         null,
@@ -314,6 +325,46 @@ async function trip($, e, hit) {
   )
 }
 
+// --- delivery ---------------------------------------------------------------
+
+const QUOTA_MARGIN = 10
+const STEP = { new: 'starting', classified: 'push', pushed: 'PR', pr_open: 'CI', checks_green: 'merge', merged: 'sync', main_ci: 'main CI', done: 'merged', pr_only: 'PR open', reverted: 'REVERTED' }
+
+// "C2 CI, C3 held" from .factory/publish/*.json; terminal ones that are merged
+// quietly drop off, a revert and a PR waiting for a person stay.
+async function publishLine($) {
+  const dir = root + '/.factory/publish'
+  if (!(await $.fs.exists(dir))) return ''
+  const out = []
+  for (const f of await $.fs.list(dir)) {
+    if (f.kind !== 'file' || !f.name.endsWith('.json')) continue
+    try {
+      const st = JSON.parse(await $.fs.read(dir + '/' + f.name))
+      if (st.state === 'done' || st.state === 'abandoned') continue
+      out.push(st.change + ' ' + (st.held ? 'held' : STEP[st.state] || st.state))
+    } catch {}
+  }
+  return out.join(', ')
+}
+
+async function quotaGate($, e) {
+  if (e.subagentType !== 'factory:builder') return null
+  if (!root) root = await $.session.root()
+  if (band.level !== 'merge' || !(await $.fs.exists(root + '/.factory/active'))) return null
+  const usage = await $.session.usage()
+  const week = (usage.rateLimits || []).find((w) => w.kind === 'seven_day')
+  if (!week || !week.resetsAt || typeof week.percentUsed !== 'number') return null
+  const now = await $.clock.now()
+  const left = Date.parse(week.resetsAt) - now
+  const elapsed = Math.max(0, Math.min(1, 1 - left / WEEK_MS)) * 100
+  if (week.percentUsed <= elapsed + QUOTA_MARGIN) return null
+  return (
+    'Factory quota breaker: the 7-day window is at ' + Math.round(week.percentUsed) + '%, past the even-spend line ' +
+    Math.round(elapsed) + '% + ' + QUOTA_MARGIN + ' points, and the level is merge. No new builder starts; ' +
+    'finish what is running and stop. The window resets ' + week.resetsAt + '.'
+  )
+}
+
 // --- autonomy ---------------------------------------------------------------
 
 async function runConsent($, prompt, origin) {
@@ -332,8 +383,8 @@ async function refreshBand($) {
   const r = await $.process.run(['bash', $.plugin.root + '/hooks/factory-autonomy.sh'], { cwd: root, timeoutMs: 8000 })
   const level = r.stdout.trim()
   const stopped = await $.fs.exists(root + '/.factory/STOP')
-  const next = { level: ['pr', 'merge'].includes(level) ? level : 'local', stopped }
-  if (next.level !== band.level || next.stopped !== band.stopped) {
+  const next = { level: ['pr', 'merge'].includes(level) ? level : 'local', stopped, publish: await publishLine($) }
+  if (next.level !== band.level || next.stopped !== band.stopped || next.publish !== band.publish) {
     band = next
     $.ui.invalidate('ui.render')
   }

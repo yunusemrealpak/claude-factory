@@ -128,6 +128,24 @@ session model and effort, both runs finishing 6/6 with a green full check:
 
 `/factory:run` is still there and still works the way it did.
 
+## Delivery (2.8)
+
+A closed change can leave your machine, but only through one script and only as far as your consent goes. An agent still never pushes: `factory-publish` is a script outside the agent hooks, started when a run closes a change (and resumed by the next session if it was interrupted).
+
+| Level (typed `auto devam et`) | What the publisher does |
+| --- | --- |
+| `local` | nothing - `PUBLISH SKIPPED` |
+| `pr` | pushes `factory/<Cn>-<slug>` and opens the pull request, then stops (`pr_only`) |
+| `merge` | also waits for CI, merges, watches main's CI, and reverts if main goes red |
+
+- **Classes.** A: merged when green. B: touches a `risk_paths` glob, merged only when the change was reviewed before landing and no review failed. C: migrations, workflows, CODEOWNERS, CLAUDE.md, fastlane/release config, a major dependency bump - a pull request only, never merged by the factory.
+- **Config** (`.factory/config.json`): `delivery.branch` (`main` keeps one branch, `per-change` cuts `factory/<Cn>-<slug>` from `origin/<base>`), `delivery.merge_method` (`rebase`, falling back to `squash` with the trailers in the body), `delivery.base`, `delivery.quota_margin`.
+- **Merge is pinned** with `--match-head-commit` to the commit that was tested; a head that moved is held, not merged. Unacknowledged `## high` findings in `.factory/audit.md` hold the merge: `factory-publish --ack-audit <Cn>`.
+- **Breakers.** Two reverts in seven days, or two red mains in a row, write `.factory/autonomy-cap` and the level drops to `pr`. A hard-ban hit does the same. Only a new typed `auto devam et` clears it. Above the week's even-spend line plus `quota_margin`, no new builder starts at level `merge`.
+- **See it.** `factory-publish --status`, the `delivery:` part of the band, and the morning digest in `.factory/digest/<date>.md` (`factory-digest --line`).
+- **Needs** `gh` logged in on the machine (`gh auth login`); an auth error holds the change and resumes on the next call.
+- The pull request, CI and revert flow was tested against a fake `gh` and a bare origin, never a live GitHub.
+
 ## Commands
 
 | command | what it is for |

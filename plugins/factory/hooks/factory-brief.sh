@@ -131,10 +131,21 @@ if [ -f "$project_dir/.factory/lead-state.md" ]; then
   lead_state="$(cat "$project_dir/.factory/lead-state.md")"
 fi
 
+# Delivery (2.8): a change that stopped half-way - a sleeping laptop, an expired
+# gh login - is picked up again here, detached so the session never waits. The
+# digest's one line says where deliveries stand. Quiet when there is nothing.
+delivery=""
+if [ -d "$project_dir/.factory/publish" ]; then
+  if ls "$project_dir/.factory/publish"/*.pending "$project_dir/.factory/publish"/*.json >/dev/null 2>&1; then
+    ( cd "$project_dir" && FACTORY_ROOT="$project_dir" nohup python3 "${HOOK_DIR}/factory-publish.py" --resume-all >/dev/null 2>&1 & ) 2>/dev/null
+  fi
+  delivery="$(cd "$project_dir" && FACTORY_ROOT="$project_dir" python3 "${HOOK_DIR}/factory-digest.py" --line 2>/dev/null)"
+fi
+
 # An empty board with nothing open anywhere is two lines: the full briefing
 # would only spend tokens on "(none)" in every session of an idle project.
 if [ "$((backlog + in_progress + blocked + proposed))" -eq 0 ] \
-   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] \
+   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] && [ -z "$delivery" ] \
    && [ "$stalled" = "(none)" ] && [ "$changes" = "(none open)" ] \
    && { [ "$questions" = "(none)" ] || [ "$questions" = "  - (no questions)" ]; }; then
   brief="FACTORY ACTIVE in this project: the board is empty (done=${done_count}), nothing is open or waiting.
@@ -164,7 +175,8 @@ ${needs_human_list}
 Changes in flight (.factory/changes/):
 ${changes}
 
-${upgrade:+FACTORY VERSION: ${upgrade}
+${delivery:+DELIVERY: ${delivery} (.factory/digest/, factory-publish --status)
+}${upgrade:+FACTORY VERSION: ${upgrade}
 }${swept:+PREVIOUS RUN ENDED MID-FLIGHT: ${swept}
 }${stranded:+  Tasks left in tasks/in-progress by that run: ${stranded}. No agent is alive for them. Re-dispatch each one to a fresh agent, or move it back to tasks/backlog with owner cleared and stage: queued - do not assume work is still going on.
 }

@@ -14,6 +14,8 @@
 #   5  change-level acceptance, commit bisect, the version/upgrade check
 #   6  the fast lane: factory-check, plan, start/land/block, /factory:fast scheduling
 #   7  hard bans, autonomy consent, deny merge, STOP
+#   8  delivery: per-change branch, publisher state machine against a fake gh,
+#      classes, breakers, quota line
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
@@ -31,7 +33,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5 6 7; do
+for n in 1 2 3 4 5 6 7 8; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"

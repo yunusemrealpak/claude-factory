@@ -178,10 +178,11 @@ python3 "$EXTRACT" gates/verify.sh >/dev/null
 jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers:2, max_concurrent_agents:3,
   retry_limit:2, min_tests:1, gate_mode:"staged", gate_isolation:false, isolation_links:[], risk_paths:["*.sql"],
   agent_stale_after_min:45, autonomy_default:"merge",
+  delivery:{branch:"main",merge_method:"rebase",base:"main",quota_margin:10},
   fast:{workers:4,risk_review:"after",audit:true,effort_build:"medium",effort_escalate:"high",effort_review:"high",effort_audit:"high"},
   check:{claude_md_max_lines:200,untracked_guard:true},
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/STOP\n' > .gitignore
+printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/STOP\n' > .gitignore
 FACTORY_ROOT="$C" bash "$H/factory-deny.sh" --apply >/dev/null
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
