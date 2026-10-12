@@ -374,6 +374,43 @@ def task_census(listed, fm, check):
     return removed, added
 
 
+ASSERTION = re.compile(r"\b(assert\w*|expect\w*|should\w*|verify|XCTAssert\w*|Assert\.\w+)\b|\.(toBe|toEqual|toThrow|toHaveBeen\w*)\(")
+
+
+def changed_assertions(listed, check):
+    """Assertion lines a task removed or rewrote in test files that already
+    exist in HEAD: {path: count}. An added test is a new assertion; only a
+    changed existing one can make a red suite green without fixing anything."""
+    tf, _ = census_regexes(check)
+    rx = re.compile(check["assertion"]) if check.get("assertion") else ASSERTION
+    out = {}
+    for p in listed:
+        if not tf.search(p.replace(os.sep, "/")):
+            continue
+        rc, _ = git("cat-file", "-e", "HEAD:./" + p.replace(os.sep, "/"))
+        if rc != 0:
+            continue
+        rc, diff = git("diff", "HEAD", "-U0", "--", p)
+        if rc != 0:
+            continue
+        n = sum(1 for l in diff.splitlines() if l.startswith("-") and not l.startswith("---") and rx.search(l))
+        if n:
+            out[p] = n
+    return out
+
+
+def declared_modifies_tests(task_id, path):
+    """The declaration is read from the task file as committed in HEAD, so the
+    builder cannot grant itself the exemption in the edit it is about to check.
+    A task file HEAD does not have yet is read from the working tree."""
+    rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
+    for col in ("backlog", "in-progress", "done", "blocked"):
+        rc, text = git("show", "HEAD:./tasks/%s/%s.md" % (col, task_id))
+        if rc == 0:
+            return frontmatter(text).get("modifies_tests", "").lower() == "true"
+    return frontmatter(read(path)).get("modifies_tests", "").lower() == "true"
+
+
 def head_census(check):
     """Test files and suppression markers in HEAD."""
     tf, skip_re = census_regexes(check)
@@ -797,6 +834,13 @@ def check_task(task_id):
             if added:
                 run.fail("census", "this task adds %d skip marker(s)" % added,
                          "skipping the failing test is not fixing it; remove the skip")
+        if check.get("modifies_tests_guard") and listed and not declared_modifies_tests(task_id, path):
+            changed = changed_assertions(listed, check)
+            if changed:
+                run.fail("census", "this task changes existing assertions: " + ", ".join(
+                             "%s (%d)" % (p, n) for p, n in sorted(changed.items())),
+                         "a test that was green is not edited to pass. Fix the code. If the behaviour truly changed, "
+                         "declare modifies_tests: true in the task file and commit that before the build")
         limit = int(check.get("claude_md_max_lines", 200) or 0)
         for p, n in claude_md_over(listed, limit) if limit and listed else []:
             run.fail("claude_md", "%s is %d lines, the limit is %d" % (p, n, limit),

@@ -145,6 +145,10 @@ A closed change can leave your machine, but only through one script and only as 
 
 `factory-finish` writes `.factory/retro-due` when 30 new failure signatures piled up or a week with runs passed; the session brief says `RETRO DUE`. With `retro.mode: suggest` (the default) nothing else happens: run `/factory:retro` and approve. With `retro.mode: full` a run ends with the `factory:retro` agent, and `factory-retro-apply` - never the agent - applies only what cannot loosen the gate: lessons with evidence, `gate_isolation`/`isolation_links`/`risk_paths` widening/`min_tests` raised/`retry_limit` lowered/`fast.risk_review: before`/`fast.audit` on, and one CLAUDE.md protocol rule per retro. Plugin changes are only listed. Every change is a commit with a `Factory-Retro: <date>/P<n>` trailer and a line in `.factory/retro/ledger.jsonl` with the metric's baseline; `factory-retro evaluate` takes back what did not move its metric after `retro.min_sample` tasks.
 
+## Outer loop (3.0)
+
+`factory-next check` answers `NEXT GO <change>` only when the autonomy level is `merge` (typed "auto devam et"), the quota file has a fresh reading under the even-spend line, no publish is in flight, no run is active and an approved change is waiting - otherwise `NEXT WAIT <why>`. `factory-next launch` then runs `claude -p "/factory:fast" --permission-mode auto --strict-mcp-config` in a git worktree under `.factory/worktrees/` (your working tree is never touched). `factory-next launchd --hour 3` prints a LaunchAgent plist for a nightly run; nothing is installed for you. A breaker's cap, `auto dur` or `.factory/STOP` stops it. Opt-in: `check.modifies_tests_guard: true` fails a task that rewrites an assertion in an existing test unless `modifies_tests: true` was committed in its task file first.
+
 ## Commands
 
 | command | what it is for |
