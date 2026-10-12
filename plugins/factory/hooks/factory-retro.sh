@@ -2,6 +2,7 @@
 # Factory retrospective - evidence collector. NOT a hook; /factory-retro runs it.
 #
 # Usage: factory-retro [project-dir]
+#        factory-retro evaluate | ledger | due     (see factory-retro-apply.py)
 #
 # Prints a digest of everything the factory recorded about its own failures.
 # Deliberately does no interpretation: clustering failures into mechanisms and
@@ -9,6 +10,14 @@
 # reading this, with a human approving the result. The split matters - a
 # collector that also guessed would put its guesses in the evidence.
 set -uo pipefail
+
+# `factory-retro evaluate` (and ledger, due) belong to the validator: measure
+# what an applied change did, and undo what did not help.
+case "${1:-}" in
+  evaluate|ledger|due)
+    exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-retro-apply.py" "$@"
+    ;;
+esac
 
 ROOT="${1:-$PWD}"
 ROOT="$(cd "${ROOT}" 2>/dev/null && pwd)" || { echo "no such directory: ${1:-$PWD}" >&2; exit 2; }

@@ -16,6 +16,7 @@
 #   7  hard bans, autonomy consent, deny merge, STOP
 #   8  delivery: per-change branch, publisher state machine against a fake gh,
 #      classes, breakers, quota line
+#   9  the retrospective: due marker, validator, ledger, evaluate
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
@@ -33,7 +34,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5 6 7 8; do
+for n in 1 2 3 4 5 6 7 8 9; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"

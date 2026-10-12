@@ -27,8 +27,12 @@ the evidence, and the factory has been collecting it all along.
 ## Step 1 - Collect
 
 ```bash
+factory-retro evaluate
 factory-retro $ARGUMENTS
 ```
+
+`evaluate` first: it measures what an earlier retrospective applied and takes
+back what did not help (it prints nothing to act on when nothing is waiting).
 
 Read the digest. Do not read the raw logs it summarises unless a specific
 cluster needs a line you cannot get from the digest - the whole point of the
@@ -158,11 +162,36 @@ Expected: <the number that should move, and where it stands now>
 Then show me the mechanisms, proposals and lesson proposals in the terminal,
 compactly, and stop.
 
-**Apply nothing.** Not the small ones, not the obvious ones. Harness edits that
-an agent writes into its own instruction files without a human reading them make
-things worse - measured, in one study, at roughly 3% lower success for 20% more
-cost. The value here is in the diagnosis; the approval is what makes it safe. I
-will tell you which proposals to apply.
+**Apply nothing yourself.** Not the small ones, not the obvious ones. Harness
+edits that an agent writes into its own instruction files without a human
+reading them make things worse - measured, in one study, at roughly 3% lower
+success for 20% more cost. The value here is in the diagnosis; the approval is
+what makes it safe. I will tell you which proposals to apply.
+
+Two things change that only where I turned them on (`retro.mode: full` in
+`.factory/config.json`; the default is `suggest`, where this command only
+writes the report):
+
+- The retro agent (`factory:retro`) runs at the end of a fast run when
+  `.factory/retro-due` exists (30 new failure signatures, or a week with runs
+  in it), and writes a `<date>.proposals.json` next to the report.
+- `factory-retro-apply apply <file>` is the only thing that applies it, and it
+  applies only: a lesson (evidence checked on disk), a config patch that does
+  not loosen the gate (`gate_isolation` on, `isolation_links` gained,
+  `risk_paths` widened, `min_tests` raised, `retry_limit` lowered,
+  `fast.risk_review` before, `fast.audit` on), and at most one CLAUDE.md
+  protocol rule under the size guard. Anything touching the plugin itself is
+  only listed in `.factory/retro/c-class.md`. Each change is a commit of its
+  own with `Factory-Retro: <date>/P<n>` and a line in
+  `.factory/retro/ledger.jsonl`.
+- Every proposal names a metric from a fixed list: `sig_recurrence`,
+  `stage_red_rate`, `first_pass_green`, `no_progress_rate`, `cost_per_task`.
+  `factory-retro evaluate` measures it once enough tasks have run
+  (`retro.min_sample`, default 10) and takes back what did not improve it.
+
+In `suggest` mode, with me present, Step 5 below is unchanged: I name the
+proposals, you apply them, and you may use `factory-retro-apply apply` for
+the lessons and config patches I approved - it refuses what is not allowed.
 
 ## Step 5 - Only after I approve
 

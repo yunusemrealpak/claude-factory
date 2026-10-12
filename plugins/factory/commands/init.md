@@ -886,6 +886,7 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/autonomy-cap
 .factory/publish/
 .factory/digest/
+.factory/retro-due
 .factory/STOP
 ```
 

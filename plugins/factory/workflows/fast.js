@@ -103,6 +103,7 @@ const FINISH = {
     full_check: { type: 'string', enum: ['green', 'red', 'skipped'] },
     full_output: { type: 'string' },
     changes: { type: 'array', items: { type: 'string' } },
+    retro: { type: 'object', properties: { due: { type: 'boolean' }, mode: { type: 'string' } } },
     acceptance: { type: 'array', items: { type: 'object', properties: { change: { type: 'string' }, result: { type: 'string' } } } },
   },
 }
@@ -350,6 +351,16 @@ const [finish, audit] = await Promise.all([
       )
     : Promise.resolve(null),
 ])
+// A retrospective that is due runs by itself only where the project said so
+// (retro.mode: full). Everywhere else the due marker is all there is, and the
+// brief tells the developer. The agent proposes in a file; factory-retro-apply
+// decides what is allowed to change.
+const retroRun = finish && finish.retro && finish.retro.due && finish.retro.mode === 'full'
+  ? await agent(
+      'A retrospective is due. Follow your instructions: collect the evidence, write the report and the proposals file, then apply it with factory-retro-apply. Report one line.',
+      { agentType: 'factory:retro', effort: 'high', label: 'retro', phase: 'Finish' },
+    )
+  : null
 const seams = audit ? (audit.findings || []).filter(f => f.severity !== 'low') : []
 
 return {
@@ -362,6 +373,7 @@ return {
   held: plan.held || [],
   warnings: plan.warnings || [],
   report: '.factory/last-run.md',
+  retro: finish && finish.retro && finish.retro.due ? (retroRun ? 'ran' : 'due - run /factory:retro') : 'not due',
   audit: audit ? { findings: audit.findings.length, report: '.factory/audit.md' } : auditing ? 'the auditor returned nothing' : 'not run',
   agent_notes: results.map(r => ({ id: r.id, status: r.status, summary: r.summary, notes: r.notes || undefined })),
 }

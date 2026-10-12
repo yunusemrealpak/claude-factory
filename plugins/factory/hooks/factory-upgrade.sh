@@ -53,7 +53,7 @@ done
 
 # Keys one level down, in the blocks the fast lane reads. Only the ones that
 # have a default worth writing down: the rest are optional and absent on purpose.
-for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effort_escalate fast.effort_review fast.effort_audit check.claude_md_max_lines check.untracked_guard delivery.branch delivery.merge_method; do
+for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effort_escalate fast.effort_review fast.effort_audit check.claude_md_max_lines check.untracked_guard delivery.branch delivery.merge_method retro.mode; do
   block="${key%%.*}"; leaf="${key#*.}"
   jq -e --arg b "${block}" --arg k "${leaf}" '(.[$b] // {}) | has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
@@ -65,7 +65,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/STOP"; do
+  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -153,6 +153,7 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
       },
       check: { claude_md_max_lines: 200, untracked_guard: true },
       delivery: { branch: "main", merge_method: "rebase", base: "main", quota_margin: 10 },
+      retro: { mode: "suggest", min_sample: 10 },
       risk_paths: [
         "*/auth/*", "*authentication*", "*authorization*", "*identity*",
         "*permission*", "*tenant*", "*payment*", "*billing*",

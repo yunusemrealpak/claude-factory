@@ -191,6 +191,24 @@ def metrics(ids, board, started):
     return rec
 
 
+def retro_state():
+    """Is a retrospective due, and may the run start it by itself? The marker is
+    written either way (the brief shows it); `retro.mode: full` is the only
+    setting under which the workflow runs the retro agent unasked."""
+    try:
+        r = subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-retro-apply.py"), "due"],
+                           capture_output=True, text=True, cwd=ROOT, errors="replace")
+        due = r.returncode == 0
+    except OSError:
+        due = False
+    mode = "suggest"
+    try:
+        mode = (json.loads(read(os.path.join(F, "config.json")) or "{}").get("retro") or {}).get("mode") or "suggest"
+    except (ValueError, AttributeError):
+        pass
+    return {"due": due, "mode": mode}
+
+
 def main(argv):
     if not os.path.isfile(os.path.join(F, "active")):
         print(json.dumps({"error": "no .factory/active here"}))
@@ -263,6 +281,7 @@ def main(argv):
         "full_output": full["output"],
         "changes": [l for l in sync.splitlines() if l.strip()],
         "acceptance": acceptance,
+        "retro": retro_state(),
     }
 
     lines = ["# Last run", ""]

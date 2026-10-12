@@ -142,10 +142,15 @@ if [ -d "$project_dir/.factory/publish" ]; then
   delivery="$(cd "$project_dir" && FACTORY_ROOT="$project_dir" python3 "${HOOK_DIR}/factory-digest.py" --line 2>/dev/null)"
 fi
 
+# Retrospective (2.9): factory-finish writes .factory/retro-due when failure
+# evidence piled up. The brief only says so; /factory:retro or retro.mode full acts.
+retro=""
+[ -s "$project_dir/.factory/retro-due" ] && retro="$(head -1 "$project_dir/.factory/retro-due")"
+
 # An empty board with nothing open anywhere is two lines: the full briefing
 # would only spend tokens on "(none)" in every session of an idle project.
 if [ "$((backlog + in_progress + blocked + proposed))" -eq 0 ] \
-   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] && [ -z "$delivery" ] \
+   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] && [ -z "$delivery" ] && [ -z "$retro" ] \
    && [ "$stalled" = "(none)" ] && [ "$changes" = "(none open)" ] \
    && { [ "$questions" = "(none)" ] || [ "$questions" = "  - (no questions)" ]; }; then
   brief="FACTORY ACTIVE in this project: the board is empty (done=${done_count}), nothing is open or waiting.
@@ -176,6 +181,7 @@ Changes in flight (.factory/changes/):
 ${changes}
 
 ${delivery:+DELIVERY: ${delivery} (.factory/digest/, factory-publish --status)
+}${retro:+RETRO DUE: ${retro}. Run /factory:retro, or set retro.mode to full in .factory/config.json to let a run do it.
 }${upgrade:+FACTORY VERSION: ${upgrade}
 }${swept:+PREVIOUS RUN ENDED MID-FLIGHT: ${swept}
 }${stranded:+  Tasks left in tasks/in-progress by that run: ${stranded}. No agent is alive for them. Re-dispatch each one to a fresh agent, or move it back to tasks/backlog with owner cleared and stage: queued - do not assume work is still going on.

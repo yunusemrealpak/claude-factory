@@ -141,6 +141,10 @@ A closed change can leave your machine, but only through one script and only as 
 - **Needs** `gh` logged in on the machine (`gh auth login`); an auth error holds the change and resumes on the next call.
 - The pull request, CI and revert flow was tested against a fake `gh` and a bare origin, never a live GitHub.
 
+## Retrospective that learns (2.9)
+
+`factory-finish` writes `.factory/retro-due` when 30 new failure signatures piled up or a week with runs passed; the session brief says `RETRO DUE`. With `retro.mode: suggest` (the default) nothing else happens: run `/factory:retro` and approve. With `retro.mode: full` a run ends with the `factory:retro` agent, and `factory-retro-apply` - never the agent - applies only what cannot loosen the gate: lessons with evidence, `gate_isolation`/`isolation_links`/`risk_paths` widening/`min_tests` raised/`retry_limit` lowered/`fast.risk_review: before`/`fast.audit` on, and one CLAUDE.md protocol rule per retro. Plugin changes are only listed. Every change is a commit with a `Factory-Retro: <date>/P<n>` trailer and a line in `.factory/retro/ledger.jsonl` with the metric's baseline; `factory-retro evaluate` takes back what did not move its metric after `retro.min_sample` tasks.
+
 ## Commands
 
 | command | what it is for |
