@@ -53,7 +53,7 @@ done
 
 # Keys one level down, in the blocks the fast lane reads. Only the ones that
 # have a default worth writing down: the rest are optional and absent on purpose.
-for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effort_escalate fast.effort_review fast.effort_audit check.claude_md_max_lines check.untracked_guard delivery.branch delivery.merge_method retro.mode; do
+for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effort_escalate fast.effort_review fast.effort_audit check.claude_md_max_lines check.untracked_guard delivery.branch delivery.merge_method delivery.max_unpushed retro.mode; do
   block="${key%%.*}"; leaf="${key#*.}"
   jq -e --arg b "${block}" --arg k "${leaf}" '(.[$b] // {}) | has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
@@ -130,6 +130,15 @@ fi
 # --- apply -------------------------------------------------------------------
 applied=0
 
+# Whether config.json is tracked and untouched right now. The retrospective
+# refuses to change a file with uncommitted edits, so an upgrade that leaves its
+# own edit uncommitted would lock the retrospective out of the config.
+config_was_clean=no
+if git -C "${ROOT}" ls-files --error-unmatch -- ".factory/config.json" >/dev/null 2>&1 \
+   && [ -z "$(git -C "${ROOT}" status --porcelain -- ".factory/config.json" 2>/dev/null)" ]; then
+  config_was_clean=yes
+fi
+
 if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
   tmp="${CONFIG}.tmp.$$"
   # Defaults are the ones /factory-init writes. Existing values win: this is a
@@ -152,7 +161,7 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
         effort_build: "medium", effort_escalate: "high", effort_review: "high", effort_audit: "high"
       },
       check: { claude_md_max_lines: 200, untracked_guard: true },
-      delivery: { branch: "main", merge_method: "rebase", base: "main", quota_margin: 10 },
+      delivery: { branch: "main", merge_method: "rebase", base: "main", quota_margin: 10, max_unpushed: 30 },
       retro: { mode: "suggest", min_sample: 10 },
       risk_paths: [
         "*/auth/*", "*authentication*", "*authorization*", "*identity*",
@@ -200,6 +209,13 @@ fi
 if [ -z "${missing_gate}" ] && [ -f "${CONFIG}" ]; then
   tmp="${CONFIG}.tmp.$$"
   jq --arg v "${HARNESS}" '.factory_version = $v' "${CONFIG}" > "${tmp}" 2>/dev/null && mv -f "${tmp}" "${CONFIG}"
+fi
+
+if [ "${config_was_clean}" = yes ] && [ -n "$(git -C "${ROOT}" status --porcelain -- ".factory/config.json" 2>/dev/null)" ]; then
+  if git -C "${ROOT}" add -- ".factory/config.json" >/dev/null 2>&1 \
+     && git -C "${ROOT}" commit -q -m "factory: config.json brought up to ${HARNESS}" -m "Factory-Upgrade: ${HARNESS}" -- ".factory/config.json" >/dev/null 2>&1; then
+    echo "  committed .factory/config.json (so the retrospective can change it)"
+  fi
 fi
 
 echo "UPGRADE APPLIED: ${applied} area(s) brought up to factory ${HARNESS}."

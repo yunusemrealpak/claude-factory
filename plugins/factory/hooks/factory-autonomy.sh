@@ -51,7 +51,7 @@ resolve() {
     *) WHY="the recorded level is not one of local, pr, merge"; return ;;
   esac
   version="$(jq -r '.hard_blocks_version // empty' "${CONSENT}" 2>/dev/null)"
-  current="$(bash "${HOOK_DIR}/factory-hardblock.sh" version 2>/dev/null)"
+  current="$(bash "${HOOK_DIR}/factory-hardblock.sh" version "${ROOT}" 2>/dev/null)"
   if [ -z "${current}" ] || [ "${version}" != "${current}" ]; then
     WHY="the consent was given under hard-block list ${version:-?}, this is ${current:-unreadable}"
     return

@@ -518,6 +518,32 @@ def failure_signature(text):
     return "\n".join(sorted(set(norm)))
 
 
+def work_fingerprint(task_id):
+    """A hash of the content of every file the task lists under "## Files touched".
+    The signature alone cannot tell "nothing changed" from "most of it is fixed":
+    it drops line numbers and counts, so four identical errors fixed out of five
+    still read as the same failure. Empty when the task lists nothing readable."""
+    path = ""
+    for col in ("in-progress", "backlog"):
+        cand = os.path.join(ROOT, "tasks", col, task_id + ".md")
+        if os.path.isfile(cand):
+            path = cand
+            break
+    if not path:
+        return ""
+    h = hashlib.sha256()
+    seen = 0
+    for rel in sorted(set(files_touched(read(path)))):
+        full = os.path.join(ROOT, rel)
+        try:
+            with open(full, "rb") as fh:
+                h.update(rel.encode("utf-8") + b"\0" + fh.read() + b"\0")
+            seen += 1
+        except OSError:
+            h.update(rel.encode("utf-8") + b"\0missing\0")
+    return h.hexdigest()[:12] if seen else ""
+
+
 def record_failure(task_id, text):
     fail_dir = os.path.join(F, "failures")
     os.makedirs(fail_dir, exist_ok=True)
@@ -527,12 +553,23 @@ def record_failure(task_id, text):
     if not (os.path.exists(sig_file) and os.path.getsize(sig_file) > 0):
         with open(sig_file, "w", encoding="utf-8") as fh:
             fh.write(sig + "\n")
+    work = work_fingerprint(task_id)
     hist = os.path.join(fail_dir, task_id + ".log")
     past = read(hist)
-    repeat = (" %s " % sha) in past
+    # The same signature is "no progress" only when the task's own files are also
+    # unchanged since that attempt. A history line without a fingerprint (written
+    # before 3.1, or a task that lists no files) keeps the old rule.
+    repeat = False
+    for line in past.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == sha:
+            before = next((p[5:] for p in parts if p.startswith("work=")), "")
+            if not work or not before or before == work:
+                repeat = True
+                break
     attempt = len([l for l in past.splitlines() if l.strip()]) + 1
     with open(hist, "a", encoding="utf-8") as fh:
-        fh.write("%s %s attempt=%d\n" % (now_iso(), sha, attempt))
+        fh.write("%s %s attempt=%d%s\n" % (now_iso(), sha, attempt, " work=" + work if work else ""))
     if repeat:
         os.makedirs(os.path.join(F, "no-progress"), exist_ok=True)
         with open(os.path.join(F, "no-progress", task_id), "w", encoding="utf-8") as fh:

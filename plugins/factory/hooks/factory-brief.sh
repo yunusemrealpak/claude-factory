@@ -142,6 +142,17 @@ if [ -d "$project_dir/.factory/publish" ]; then
   delivery="$(cd "$project_dir" && FACTORY_ROOT="$project_dir" python3 "${HOOK_DIR}/factory-digest.py" --line 2>/dev/null)"
 fi
 
+# Unpushed commits (3.1): at autonomy level local the publisher skips every change
+# and nothing leaves the machine. Say so at the start of every session, with the
+# way out, so a pile of local commits is never a surprise.
+unpushed_n="$(cd "$project_dir" && FACTORY_ROOT="$project_dir" bash "${HOOK_DIR}/factory-unpushed.sh" count 2>/dev/null)"
+case "${unpushed_n}" in ''|*[!0-9]*) unpushed_n=0 ;; esac
+if [ "${unpushed_n}" -gt 0 ]; then
+  unpushed_lvl="$(cd "$project_dir" && FACTORY_ROOT="$project_dir" bash "${HOOK_DIR}/factory-autonomy.sh" 2>/dev/null | head -1)"
+  delivery="${delivery:+${delivery}
+}UNPUSHED: ${unpushed_n} commit(s) are only on this machine (autonomy level ${unpushed_lvl:-local}). Push them, or say 'auto devam et' so changes are delivered."
+fi
+
 # Retrospective (2.9): factory-finish writes .factory/retro-due when failure
 # evidence piled up. The brief only says so; /factory:retro or retro.mode full acts.
 retro=""

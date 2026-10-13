@@ -89,8 +89,16 @@ case "$event" in
         *"CHECK RESULT: WAITING"*)                         verdict=waiting ;;
         *"GATE RESULT: GREEN"*|*"CHECK RESULT: GREEN"*)    verdict=green ;;
         *"GATE RESULT: RED"*|*"CHECK RESULT: RED"*)        verdict=red ;;
+        *"CHECK: no task file"*|*"CHECK: "*"fix .factory/config.json"*|*"CHECK: "*"no .factory/active"*) verdict=refused ;;
       esac
-      emit gate --argjson extra "$(jq -cn --arg id "$id" --arg v "$verdict" '{task: $id, verdict: $v}')"
+      # An unclassified result keeps the end of its output, so the next reader of
+      # the log can see what it was instead of counting "unknown".
+      hint=""
+      if [ "$verdict" = unknown ]; then
+        hint="$(printf '%s' "$out" | tr '\n\r' '  ' | tail -c 160)"
+      fi
+      emit gate --argjson extra "$(jq -cn --arg id "$id" --arg v "$verdict" --arg h "$hint" \
+        'if $h == "" then {task: $id, verdict: $v} else {task: $id, verdict: $v, hint: $h} end')"
       # A gate too old to fingerprint its tree gets the fingerprint here - only
       # when the tree the run ended on is the one it started on, so the marker
       # never vouches for bytes the gate did not test.

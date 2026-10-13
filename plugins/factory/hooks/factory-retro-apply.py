@@ -205,7 +205,7 @@ def tracked_and_clean(rel):
         return False, "ignored"
     rc, out = sh(["git", "status", "--porcelain", "--", rel])
     if out.strip() and not out.startswith("??"):
-        return None, "%s has uncommitted changes" % rel
+        return None, "%s has uncommitted changes; commit or stash them and apply again (factory-retro-apply)" % rel
     return True, ""
 
 

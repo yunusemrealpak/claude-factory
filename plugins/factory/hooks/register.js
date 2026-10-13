@@ -266,9 +266,10 @@ const VERBS =
 async function loadRules($) {
   if (rules) return rules
   const text = await $.fs.read($.plugin.root + '/hooks/hard-blocks.txt')
-  const out = { bash: [], path: [] }
+  const out = { bash: [], path: [], groups: {} }
   for (const line of text.split('\n')) {
     const f = line.split(' ## ')
+    if (f[0] === 'member' && f.length === 4 && f[2] !== 'deny') (out.groups[f[1]] = out.groups[f[1]] || []).push(f[3])
     if (f[0] === 'bash' && f.length === 3) out.bash.push({ name: f[1], re: new RegExp(js(f[2])) })
     if (f[0] === 'path' && f.length === 4) {
       const [, name, anchor, x] = f
@@ -298,10 +299,27 @@ function normalise(text, dir) {
   return t
 }
 
+// The optional bans this project allows (config.json hard_blocks.allow): the
+// rule names of those groups. Read on every call, so /factory:bans takes effect
+// without a restart; a config that cannot be read lifts nothing.
+async function lifted($, r) {
+  try {
+    const cfg = JSON.parse(await $.fs.read(root + '/.factory/config.json'))
+    const allow = cfg && cfg.hard_blocks && Array.isArray(cfg.hard_blocks.allow) ? cfg.hard_blocks.allow : []
+    return new Set(allow.flatMap((g) => r.groups[g] || []))
+  } catch {
+    return new Set()
+  }
+}
+
 async function judge($, e) {
   if (!root) root = await $.session.root()
   if (!(await $.fs.exists(root + '/.factory/active'))) return null
-  const r = await loadRules($)
+  const loaded = await loadRules($)
+  const off = await lifted($, loaded)
+  const r = off.size
+    ? { ...loaded, bash: loaded.bash.filter((b) => !off.has(b.name)), path: loaded.path.filter((p) => !off.has(p.name)) }
+    : loaded
   if (e.tool === 'Bash') {
     const cmd = normalise(String(e.command || '').replace(/\\\n/g, '').replace(/\n/g, ';'), root)
     for (const b of r.bash) if (b.re.test(cmd)) return { rule: b.name }

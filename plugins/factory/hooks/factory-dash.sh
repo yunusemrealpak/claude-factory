@@ -157,6 +157,7 @@ cur_change="$(printf '%s\n' "${changes}" | awk '$1=="open" || $1=="blocked" || $
   printf 'progress=%s\n' "$(printf '%s' "${cur_change}" | awk '{print $3}' | sed 's/done=//')"
   printf 'running=%s\nquestions=%s\nblocked=%s\nbacklog=%s\nin_progress=%s\ndone=%s\nlast=%s\n' \
     "${running_agents}" "${open_questions}" "${n_blocked}" "${n_backlog}" "${n_in_progress}" "${n_done}" "${last_event_age}"
+  printf 'unpushed=%s\n' "$(FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-unpushed.sh" count 2>/dev/null || printf 0)"
   printf 'stalled=%s\n' "$([ -d "${F}/no-progress" ] && find "${F}/no-progress" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ' || printf 0)"
 } > "${F}/statusline.txt.tmp.$$" && mv -f "${F}/statusline.txt.tmp.$$" "${F}/statusline.txt"
 

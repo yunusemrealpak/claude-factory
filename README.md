@@ -167,6 +167,7 @@ A closed change can leave your machine, but only through one script and only as 
 | `/factory:bisect` | find which task's commit broke a command |
 | `/factory:retro` | what went wrong in this run, and what to change about the factory |
 | `/factory:upgrade` | bring an older project's factory files up to date |
+| `/factory:bans` | choose which optional bans (store/TestFlight tooling, git tags, GitHub releases) apply to this project |
 | `/factory:selftest` | run the factory's own test suite |
 | `/factory-board` | lane counts, what is ready and the week's quota, straight from disk: no model turn, so no tokens |
 

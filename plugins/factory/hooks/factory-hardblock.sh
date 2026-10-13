@@ -4,8 +4,14 @@
 # register.js matches the same hooks/hard-blocks.txt in JavaScript.
 #
 # Usage:
-#   factory-hardblock.sh version                      the file's hard_blocks_version
-#   factory-hardblock.sh deny-rules                   the permissions.deny lines
+#   factory-hardblock.sh version [root]               the file's hard_blocks_version; with a
+#                                                     root, "+group,..." when the project
+#                                                     allows optional bans
+#   factory-hardblock.sh deny-rules [root]            the permissions.deny lines the project
+#                                                     keeps (allowed groups left out)
+#   factory-hardblock.sh groups                       "name<TAB>question" per optional group
+#   factory-hardblock.sh allowed <root>               the groups the project allows
+#   factory-hardblock.sh lifted-deny <root>           deny lines of allowed groups
 #   factory-hardblock.sh check <root> bash  < command the command text on stdin
 #   factory-hardblock.sh check <root> path  < path    one file path on stdin
 #   factory-hardblock.sh trip <root> <rule> <tool> <agent>
@@ -26,13 +32,55 @@ fields() {  # <kind> -> one rule per line, fields tab-separated
   awk -F' ## ' -v k="$1" '$1 == k { out = $2; for (i = 3; i <= NF; i++) out = out "\t" $i; print out }' "${RULES}"
 }
 
+# The groups of optional bans a project allows: .factory/config.json,
+# hard_blocks.allow. Only names the rules file declares count; anything else in
+# the list (a typo, an old name) lifts nothing.
+allowed_groups() {  # <root>
+  local cfg="${1%/}/.factory/config.json" known g
+  [ -s "${cfg}" ] || return 0
+  known="$(awk -F' ## ' '$1 == "group" { print $2 }' "${RULES}")"
+  jq -r '(.hard_blocks.allow // []) | if type == "array" then .[] else empty end | strings' "${cfg}" 2>/dev/null \
+    | while IFS= read -r g; do printf '%s\n' "${known}" | grep -qxF -- "${g}" && printf '%s\n' "${g}"; done \
+    | sort -u
+}
+members() {  # <root> <kind> -> member values of the allowed groups
+  local g
+  for g in $(allowed_groups "$1"); do
+    awk -F' ## ' -v g="${g}" -v k="$2" '$1 == "member" && $2 == g && $3 == k { print $4 }' "${RULES}"
+  done
+}
+
 case "${1:-}" in
   version)
-    sed -n 's/^hard_blocks_version:[[:space:]]*//p' "${RULES}" | head -1
+    v="$(sed -n 's/^hard_blocks_version:[[:space:]]*//p' "${RULES}" | head -1)"
+    if [ -n "${2:-}" ]; then
+      a="$(allowed_groups "$2" | paste -sd, -)"
+      [ -n "${a}" ] && v="${v}+${a}"
+    fi
+    printf '%s\n' "${v}"
     exit 0
     ;;
   deny-rules)
-    awk -F' ## ' '$1 == "deny" { print $2 }' "${RULES}"
+    all="$(awk -F' ## ' '$1 == "deny" { print $2 }' "${RULES}"
+           awk -F' ## ' '$1 == "member" && $3 == "deny" { print $4 }' "${RULES}")"
+    all="$(printf '%s\n' "${all}" | awk 'NF && !seen[$0]++')"
+    if [ -n "${2:-}" ]; then
+      lifted="$(members "$2" deny)"
+      [ -n "${lifted}" ] && all="$(printf '%s\n' "${all}" | grep -vxF -- "${lifted}")"
+    fi
+    printf '%s\n' "${all}"
+    exit 0
+    ;;
+  groups)
+    awk -F' ## ' '$1 == "group" { print $2 "\t" $3 }' "${RULES}"
+    exit 0
+    ;;
+  allowed)
+    allowed_groups "${2:-}"
+    exit 0
+    ;;
+  lifted-deny)
+    members "${2:-}" deny
     exit 0
     ;;
   trip)
@@ -81,7 +129,11 @@ if [ -n "${ROOT}" ]; then
   text="${text//"${rootpre}"/}"
 fi
 
-hit() { printf '%s\n' "$1"; exit 3; }
+LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
+hit() {
+  if [ -n "${LIFTED}" ] && printf '%s\n' "${LIFTED}" | grep -qxF -- "$1"; then return 0; fi
+  printf '%s\n' "$1"; exit 3
+}
 matches() { printf '%s' "$2" | grep -Eq -- "$1"; }
 
 T='([[:space:];&|)"'"'"'>]|$)'

@@ -37,6 +37,13 @@ if [ -f "${F}/STOP" ]; then
   exit 1
 fi
 
+# The unpushed breaker: commits that exist only on this machine pile up silently
+# when autonomy is local, so past the limit nothing new starts.
+if ! unpushed_msg="$(FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-unpushed.sh" check 2>/dev/null)"; then
+  echo "START REFUSED for ${TASK_ID}: ${unpushed_msg} Do nothing else and return status halted."
+  exit 1
+fi
+
 src=""
 for col in in-progress backlog; do
   if [ -f "${T}/${col}/${TASK_ID}.md" ]; then src="${col}"; break; fi

@@ -18,6 +18,14 @@
 #                                  "root" is relative to the project root,
 #                                  "any" matches at any depth
 #   deny ## rule                   a Claude Code permissions.deny rule
+#   group ## name ## question      an optional ban: the developer may allow it per
+#                                  project (.factory/config.json,
+#                                  hard_blocks.allow: ["name", ...]), asked once by
+#                                  /factory:init and changed with /factory:bans
+#   member ## group ## bash|path|deny ## X
+#                                  what a group lifts: the name of a bash or path
+#                                  rule, or a deny rule line. An allowed group is
+#                                  dropped from all three layers at once.
 
 hard_blocks_version: 1
 
@@ -36,6 +44,9 @@ bash ## gh-api-write ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?ap
 # --- store and deploy tooling, at the start of a command ---------------------
 bash ## store-deploy ## (^|[;&|(`"']|\$\()[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*((sudo|xcrun|env|time|nohup|command|exec|bundle[[:space:]]+exec|bundler[[:space:]]+exec)[[:space:]]+)*([^[:space:];&|]*/)?(fastlane|altool|notarytool|codemagic[A-Za-z_-]*)([[:space:];&|)"']|$)
 
+# --- the choice of optional bans is the developer's, never an agent's --------
+bash ## bans-change ## (^|[^[:alnum:]_.-])factory-bans(\.sh)?[[:space:]]+(allow|forbid|set)([[:space:];&|)]|$)
+
 # --- writes ------------------------------------------------------------------
 path ## env-file ## any ## \.env(\.[^/[:space:]]*)?
 path ## apple-key ## any ## [^/[:space:]]*\.p8
@@ -53,13 +64,10 @@ path ## stop-switch ## root ## \.factory/STOP
 # agent. The first layer and the guard hold them against agents.
 deny ## Bash(git push)
 deny ## Bash(git push *)
-deny ## Bash(git tag)
-deny ## Bash(git tag *)
 deny ## Bash(git * --force*)
 deny ## Bash(git * --no-verify*)
 deny ## Bash(git remote set-url *)
 deny ## Bash(gh pr merge *)
-deny ## Bash(gh release *)
 deny ## Bash(gh api * --method *)
 deny ## Bash(gh api * -X *)
 deny ## Bash(gh api * -f *)
@@ -67,12 +75,27 @@ deny ## Bash(gh api * -F *)
 deny ## Bash(gh api * --field *)
 deny ## Bash(gh api * --raw-field *)
 deny ## Bash(gh api * --input *)
-deny ## Bash(fastlane *)
-deny ## Bash(*altool *)
-deny ## Bash(*notarytool *)
-deny ## Bash(codemagic*)
 deny ## Edit(**/.env*)
 deny ## Edit(**/*.p8)
 deny ## Edit(**/*.jks)
 deny ## Edit(/.factory/autonomy*)
 deny ## Edit(/.factory/STOP)
+
+# --- optional bans: the developer decides per project ------------------------
+# Everything above is a ban nobody may lift. These are bans a developer may not
+# want: release work they would rather the factory (or their own session) did.
+# Allowing one is written by the developer's own session into config.json, which
+# no agent may write, and it voids an autonomy consent given before it.
+group ## store-deploy ## Store and TestFlight uploads (fastlane, altool, notarytool, codemagic): may agents and this session run them?
+member ## store-deploy ## bash ## store-deploy
+member ## store-deploy ## deny ## Bash(fastlane *)
+member ## store-deploy ## deny ## Bash(*altool *)
+member ## store-deploy ## deny ## Bash(*notarytool *)
+member ## store-deploy ## deny ## Bash(codemagic*)
+group ## git-tag ## Creating git tags (version tags): may agents and this session run git tag?
+member ## git-tag ## bash ## git-tag
+member ## git-tag ## deny ## Bash(git tag)
+member ## git-tag ## deny ## Bash(git tag *)
+group ## gh-release ## GitHub releases (gh release create/upload/delete): may agents and this session run gh release?
+member ## gh-release ## bash ## gh-release
+member ## gh-release ## deny ## Bash(gh release *)

@@ -286,6 +286,24 @@ release, store tooling, no writes to `.env*`, `*.p8`, `*.jks`) with
 changes nothing. These rules are the second layer of `hooks/hard-blocks.txt`;
 the hooks enforce the same list against agents.
 
+Three of those bans are optional, because some developers want the factory (or
+their own session) to do that work: store and TestFlight tooling (fastlane,
+altool, notarytool, codemagic), git tags, and GitHub releases. **Ask about them
+one by one, before the `factory-deny --apply` above**, in my language, with
+AskUserQuestion (default: banned). Get the groups and their questions from
+`factory-bans questions`. Say what allowing one means: agents of a run and this
+session may then do it without a stop, and an autonomy consent given earlier no
+longer holds. Then record the answer:
+
+```bash
+factory-bans set <the groups I allowed, none if I allowed none>
+```
+
+`factory-bans set` writes `hard_blocks.allow` into `.factory/config.json`,
+which is why it runs from my session and is banned for agents, and it runs
+`factory-deny --apply` itself. On a re-run of init on an existing project, do
+not ask again: point to `/factory:bans`.
+
 A long run outlives its context, and the lead carries the run across a
 compaction (see "After a compaction" in the lead agent), so auto-compact must
 stay on. Do not write `autoCompactWindow`: when to compact is the developer's

@@ -146,6 +146,11 @@ check "a red check leaves no marker" '[ ! -f .factory/verified/T-01 ]'
 check "the full output goes to a log, not the caller" 'printf "%s" "$out" | grep -q "full log: .factory/logs/T-01."' "$out"
 out="$(factory-check T-01)"; rc=$?
 check "the identical failure twice is NO PROGRESS" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "NO PROGRESS" && [ -f .factory/no-progress/T-01 ]' "$out"
+printf 'value edited\n' >> core/src/main.src
+out="$(factory-check T-01)"; rc=$?
+check "the same failure after the task's own files changed is RED, not NO PROGRESS" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "CHECK RESULT: RED for T-01 (signature" && ! printf "%s" "$out" | grep -q "NO PROGRESS"' "$out"
+out="$(factory-check T-01)"; rc=$?
+check "and unchanged again it is NO PROGRESS" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "NO PROGRESS"' "$out"
 printf 'exit 0\n' > core/tests/main.t
 out="$(factory-check T-01)"; rc=$?
 check "green again clears the no-progress flag" '[ $rc -eq 0 ] && [ ! -f .factory/no-progress/T-01 ] && [ -f .factory/failures/resolved/T-01.log ]' "$out"

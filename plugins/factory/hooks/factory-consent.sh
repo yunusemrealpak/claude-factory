@@ -71,7 +71,7 @@ case "${level}" in pr|merge|local) ;; *) level=merge ;; esac
 if [ -z "${transcript}" ] && [ -n "${sid}" ]; then
   transcript="${HOME}/.claude/projects/$(printf '%s' "${cwd}" | sed 's/[^A-Za-z0-9]/-/g')/${sid}.jsonl"
 fi
-version="$(bash "${HOOK_DIR}/factory-hardblock.sh" version 2>/dev/null)"
+version="$(bash "${HOOK_DIR}/factory-hardblock.sh" version "${cwd}" 2>/dev/null)"
 email="$(git -C "${cwd}" config user.email 2>/dev/null)"
 
 # The typed phrase answers a breaker even when the consent itself is unchanged.
