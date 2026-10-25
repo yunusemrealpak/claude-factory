@@ -49,6 +49,9 @@ case "$1 $2" in
     br="$(cat "$S/branch")"
     actual="$(git --git-dir="$GH_ORIGIN" rev-parse "refs/heads/$br")"
     [ "$m" = "$actual" ] || { echo "Head branch was modified. Review and try the merge again." >&2; exit 1; }
+    # --auto: into the merge queue. With queue_hold it stays there; without, the
+    # queue merges it at once.
+    if [[ "$a" == *--auto* ]] && [ -f "$S/queue_hold" ]; then touch "$S/in_queue"; exit 0; fi
     t="$(mktemp -d)"; git clone -q "$GH_ORIGIN" "$t"; cd "$t" || exit 1
     git config user.email f@example.invalid; git config user.name fake
     git checkout -q main
@@ -65,7 +68,9 @@ case "$1 $2" in
       none)  echo '[]' ;;
     esac; exit 0 ;;
   "run watch") [ "$(cat "$S/main_ci" 2>/dev/null)" = red ] && exit 1; exit 0 ;;
-  "api graphql") echo '{"data":{"revertPullRequest":{"revertPullRequest":{"number":9,"url":"https://github.com/o/r/pull/9"}}}}'; exit 0 ;;
+  "api graphql")
+    case "$a" in *isInMergeQueue*) if [ -f "$S/in_queue" ]; then echo true; else echo false; fi; exit 0 ;; esac
+    echo '{"data":{"revertPullRequest":{"revertPullRequest":{"number":9,"url":"https://github.com/o/r/pull/9"}}}}'; exit 0 ;;
 esac
 echo "fake gh: unhandled $a" >&2; exit 9
 SH
@@ -167,6 +172,7 @@ check "the branch was pushed"                   'git --git-dir="$O" rev-parse -q
 check "a pull request was opened against main"  'grep -q "^pr create --base main --head factory/C2-add-thing" "$GHLOG"'
 check "CI was watched, failing fast"            'grep -q "^pr checks 7 --watch --fail-fast" "$GHLOG"'
 check "the merge is pinned to the tested head"  'grep -q "^pr merge 7 --rebase --match-head-commit $sha" "$GHLOG"'
+check "merge_queue off: merged directly, no --auto" '! grep -q -- "--auto" "$GHLOG"'
 check "main CI was looked at"                   'grep -q "^run list --branch main --commit" "$GHLOG"'
 rsha="$(git --git-dir="$O" log main --grep='^Factory-Change: C2' --format=%H | head -1)"
 check "the rebased commit is on origin/main"    '[ -n "$rsha" ] && [ "$rsha" != "$sha" ]'
@@ -299,6 +305,59 @@ echo "=== a hard-ban hit caps the level"
 bash "$H/factory-hardblock.sh" trip "$P" git-push Bash agent-9 >/dev/null
 check "the trip writes the cap"                 '[ "$(head -1 .factory/autonomy-cap)" = pr ] && [ "$(bash "$H/factory-autonomy.sh")" = pr ]'
 rm -f .factory/STOP .factory/autonomy-cap
+
+echo "=== delivery: the merge queue (delivery.merge_queue)"
+queue_on() { jq '.delivery.merge_queue = true' .factory/config.json > .factory/c.tmp && mv .factory/c.tmp .factory/config.json; }
+workflow_on_main() {  # <on: line>: a CI workflow lands on main before the change branches
+  mkdir -p .github/workflows; printf 'name: ci\n%s\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n' "$1" > .github/workflows/ci.yml
+  git add -A; git commit -qm "ci"; git push -q origin main 2>/dev/null
+}
+newproj mq-none per-change merge
+queue_on; workflow_on_main "on: [pull_request]  # merge_group: not yet"
+bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
+out="$(pub C2)"
+check "queue on, no merge_group workflow: held"   '[ "$(state state C2)" = checks_green ] && state held C2 | grep -q "no workflow runs on merge_group"' "$out"
+check "...nothing merged or queued"               '! grep -q "^pr merge" "$GHLOG"'
+check "...a merge_group in a comment does not count" 'state held C2 | grep -q "would merge untested"'
+check "...and the event says held"                'grep "\"kind\":\"merge_queue\"" .factory/events.jsonl | grep -q "\"outcome\":\"held\""'
+newproj mq per-change merge
+queue_on; workflow_on_main "on: [pull_request, merge_group]"
+bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
+sha="$(git rev-parse HEAD)"
+out="$(pub C2)"
+check "queue on: handed to the queue, pinned to the head" 'grep -q "^pr merge 7 --auto --rebase --match-head-commit $sha" "$GHLOG"' "$out"
+check "...the queue merged it and it is delivered" '[ "$(state state C2)" = done ] && [ -n "$(git --git-dir="$O" log main --grep="^Factory-Change: C2" --format=%H)" ]' "$out"
+check "...events: queued, then merged"            'grep "\"kind\":\"merge_queue\"" .factory/events.jsonl | grep -q "\"outcome\":\"queued\"" && grep "\"kind\":\"merge_queue\"" .factory/events.jsonl | grep -q "\"outcome\":\"merged\""'
+newproj mq-wait per-change merge
+queue_on; workflow_on_main "on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]"
+bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
+sha="$(git rev-parse HEAD)"
+touch "$S/queue_hold"
+out="$(pub C2)"; rc=$?
+check "a queue that has not merged yet: waiting, exit 0" '[ $rc -eq 0 ] && [ "$(state state C2)" = queued ] && printf "%s" "$out" | grep -q "PUBLISH WAITING C2"' "$out"
+check "...it was queued once"                      '[ "$(grep -c "^pr merge 7 --auto" "$GHLOG")" -eq 1 ]'
+rm -f "$S/queue_hold"
+"$FG/gh" pr merge 7 --rebase --match-head-commit "$sha" >/dev/null 2>&1
+out="$(pub C2)"
+check "...the next call sees the queue's merge and finishes" '[ "$(state state C2)" = done ] && [ "$(grep -c "^pr merge 7 --auto" "$GHLOG")" -eq 1 ]' "$out"
+out="$(python3 "$H/factory-publish.py" --resume-all 2>&1)"
+check "...and --resume-all leaves it alone"        '[ "$(state state C2)" = done ]' "$out"
+newproj mq-drop per-change merge
+queue_on; workflow_on_main "on: [merge_group, pull_request]"
+bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
+touch "$S/queue_hold"
+pub C2 >/dev/null
+rm -f "$S/in_queue"
+out="$(pub C2)"; rc=$?
+check "dropped by the queue: held for a person"    '[ $rc -eq 1 ] && [ "$(state state C2)" = queued ] && state held C2 | grep -q "left the merge queue"' "$out"
+check "...one dropped event, however often it is resumed" 'pub C2 >/dev/null; [ "$(grep -c "\"outcome\":\"dropped\"" .factory/events.jsonl)" -eq 1 ]'
+touch "$S/in_queue"
+out="$(pub C2)"
+check "...queued again on GitHub: waiting again"   '[ "$(state state C2)" = queued ] && [ -z "$(state held C2)" ] && printf "%s" "$out" | grep -q "PUBLISH WAITING"' "$out"
+rm -f "$S/queue_hold" "$S/in_queue"
 
 echo "=== pending marks resume"
 newproj pending per-change merge

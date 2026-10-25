@@ -20,6 +20,14 @@ while a run is active.
 Levels (factory-autonomy): local - nothing happens; pr - the branch is pushed
 and the pull request opened, then it stops; merge - the rest.
 
+With "delivery": {"merge_queue": true} a green pull request is not merged by
+the publisher: it is handed to the base branch's merge queue (gh pr merge
+--auto, pinned to the tested head), and the publisher waits for GitHub to merge
+it (delivery.queue_wait_min, 60; past that, --resume-all carries on). The
+queue tests the pull request on top of everything queued ahead of it, but only
+with a workflow that runs on merge_group: without one the queue would merge
+untested, so the publisher holds instead.
+
 Risk classes decide what merging needs:
     C  migrations, workflows, release config, CODEOWNERS, CLAUDE.md, a major
        dependency bump          -> the pull request only, a person merges it
@@ -467,6 +475,8 @@ def step_merge(st):
     deliv = config().get("delivery") or {}
     method = "--squash" if deliv.get("merge_method") == "squash" else "--rebase"
     trailers = "\n".join(["Factory-Change: " + st["change"]] + ["Factory-Task: " + t for t in st.get("tasks", [])])
+    if deliv.get("merge_queue") is True:
+        return enqueue(st, method, trailers)
     for attempt in (method, "--squash" if method == "--rebase" else None):
         if attempt is None:
             break
@@ -491,6 +501,122 @@ def step_merge(st):
     st["held"] = None
     say(st, "PUBLISH %s #%s merged (%s)" % (st["change"], st["pr"], st.get("method")))
     return None
+
+
+def queue_workflows(st):
+    """The workflow files that run on merge_group, at the tested commit or at
+    the base: the queue's merge commit is the one on top of the other."""
+    hits = []
+    for ref in (st["sha"], "origin/" + st["base"]):
+        rc, out, _ = git("ls-tree", "-r", "--name-only", ref, "--", ".github/workflows")
+        for path in out.splitlines() if rc == 0 else []:
+            if path in hits or not path.lower().endswith((".yml", ".yaml")):
+                continue
+            rc, text, _ = git("show", "%s:%s" % (ref, path))
+            body = "\n".join(l.split("#", 1)[0] for l in text.splitlines()) if rc == 0 else ""
+            if re.search(r"(^|[^A-Za-z0-9_-])merge_group([^A-Za-z0-9_-]|$)", body):
+                hits.append(path)
+    return hits
+
+
+def enqueue(st, method, trailers):
+    """delivery.merge_queue: hand the green, gate-passed pull request to GitHub's
+    merge queue instead of merging it. --auto queues it once its required
+    checks pass (at once when they have); --match-head-commit keeps the queue
+    to the commit the factory tested."""
+    hits = queue_workflows(st)
+    if not hits:
+        event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="held", reason="no merge_group workflow")
+        if not st.get("queue_held_notified"):
+            st["queue_held_notified"] = now_iso()
+            notify("%s: PR #%s not queued - no workflow runs on merge_group" % (st["change"], st["pr"]))
+        return hold(st, "merge_queue is on but no workflow runs on merge_group - the queue would merge untested "
+                        "(add merge_group to the on: of the workflow that checks pull requests)")
+    for attempt in (method, "--squash" if method == "--rebase" else None):
+        if attempt is None:
+            return hold(st, "merge refused by the repository settings")
+        args = [GH, "pr", "merge", str(st["pr"]), "--auto", attempt, "--match-head-commit", st["sha"]]
+        if attempt == "--squash":
+            args += ["--body", trailers]
+        rc, out, err = run(args)
+        text = out + "\n" + err
+        if rc == 0:
+            st["method"] = attempt.lstrip("-")
+            break
+        if "not allowed" in text.lower() and attempt == "--rebase":
+            continue
+        if is_auth_error(text):
+            return hold(st, "gh is not authenticated at the merge queue: " + text.strip()[-160:])
+        event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="refused", reason=text.strip()[-200:])
+        return hold(st, "the merge queue refused #%s: %s" % (st["pr"], text.strip()[-220:]))
+    st["state"] = "queued"
+    st["queued_at"] = now_iso()
+    st["held"] = None
+    st.pop("queue_dropped", None)
+    st.pop("queue_held_notified", None)
+    event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="queued", workflows=hits[:5])
+    say(st, "PUBLISH %s #%s handed to the merge queue (%s; merge_group runs in %s)" % (
+        st["change"], st["pr"], st["method"], ", ".join(hits[:3])))
+    return None
+
+
+def in_queue(st):
+    """GitHub's isInMergeQueue for the pull request: True, False, or None when
+    gh cannot say."""
+    rc, out, _ = run([GH, "pr", "view", str(st["pr"]), "--json", "id", "-q", ".id"])
+    node = out.strip()
+    if rc != 0 or not node:
+        return None
+    q = "query($id:ID!){node(id:$id){... on PullRequest{isInMergeQueue}}}"
+    rc, out, _ = run([GH, "api", "graphql", "-f", "query=" + q, "-f", "id=" + node, "-q", ".data.node.isInMergeQueue"])
+    v = out.strip().lower() if rc == 0 else ""
+    return True if v == "true" else False if v == "false" else None
+
+
+def step_queued(st):
+    """Waits for the merge queue to merge the pull request. A merged pull request
+    went through the queue's merge_group checks; one that is open, out of the
+    queue and without auto-merge was dropped by it - red checks on the merge
+    group, a push, or a person - and waits for a person."""
+    try:
+        wait_s = 60 * float((config().get("delivery") or {}).get("queue_wait_min") or 60)
+    except (TypeError, ValueError):
+        wait_s = 3600.0
+    polls = max(1, int(wait_s / POLL_S)) if POLL_S > 0 else max(1, CI_WAIT_POLLS)
+    for i in range(polls):
+        if i:
+            time.sleep(POLL_S)
+        rc, out, err = run([GH, "pr", "view", str(st["pr"]), "--json", "state,headRefOid,mergeCommit,autoMergeRequest"])
+        try:
+            view = json.loads(out)
+        except ValueError:
+            view = None
+        if not isinstance(view, dict):
+            if is_auth_error(out + err):
+                return hold(st, "gh is not authenticated while waiting on the merge queue: " + (out + err).strip()[-160:])
+            continue
+        if view.get("state") == "MERGED":
+            st["merge_sha"] = (view.get("mergeCommit") or {}).get("oid")
+            st["state"] = "merged"
+            st["held"] = None
+            st.pop("queue_dropped", None)
+            event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="merged")
+            say(st, "PUBLISH %s #%s merged by the merge queue" % (st["change"], st["pr"]))
+            return None
+        if view.get("state") == "CLOSED":
+            st["state"] = "abandoned"
+            return hold(st, "pull request #%s was closed while in the merge queue" % st["pr"])
+        if not view.get("autoMergeRequest") and in_queue(st) is False:
+            if not st.get("queue_dropped"):
+                st["queue_dropped"] = now_iso()
+                event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="dropped")
+                notify("%s: PR #%s left the merge queue without being merged" % (st["change"], st["pr"]))
+            return hold(st, "pull request #%s left the merge queue without being merged - its merge_group checks "
+                            "failed, its head moved, or someone took it out. Queue it again on GitHub and run "
+                            "factory-publish %s, or close it" % (st["pr"], st["change"]))
+    say(st, "PUBLISH WAITING %s: #%s is still in the merge queue; factory-publish --resume-all carries on" % (
+        st["change"], st["pr"]))
+    return 0
 
 
 def sync_local(st):
@@ -704,6 +830,8 @@ def deliver(cid):
                     r = 0
                 else:
                     r = step_merge(st)
+            elif s == "queued":
+                r = step_queued(st)
             elif s == "merged":
                 r = step_after_merge(st)
             elif s == "main_ci":
