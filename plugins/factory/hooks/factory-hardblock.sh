@@ -14,12 +14,15 @@
 #   factory-hardblock.sh lifted-deny <root>           deny lines of allowed groups
 #   factory-hardblock.sh check <root> bash  < command the command text on stdin
 #   factory-hardblock.sh check <root> path  < path    one file path on stdin
+#   factory-hardblock.sh tests <root> <kind> < text   only the read-only tests
 #   factory-hardblock.sh trip <root> <rule> <tool> <agent>
 #                                                     the breaker: .factory/STOP,
 #                                                     an event, a notification
 #
 # check: prints the rule's name and exits 3 on a hit (refuse, halt the run) or
-# 5 on a soft one (refuse this call only); exits 0 on a clean call. A rules
+# 5 on a soft one (refuse this call only), or prints "head-tests <path>" and
+# exits 6 for a write to a test HEAD has that no task in progress may change
+# (refuse this call only); exits 0 on a clean call. A rules
 # file that cannot be read exits 4 - callers treat that as a hit (fail closed):
 # a missing rule list is not permission.
 set -uo pipefail
@@ -109,7 +112,7 @@ case "${1:-}" in
     fi
     exit 0
     ;;
-  check) ;;
+  check|tests) ;;
   *)
     echo "usage: factory-hardblock.sh version|deny-rules|check <root> bash|path|trip ..." >&2
     exit 2
@@ -126,5 +129,8 @@ command -v python3 >/dev/null 2>&1 || { echo "python3 not found: the hard blocks
 # like a path is rewritten on its way to a Windows program, and the root has to
 # arrive in the spelling the command uses.
 HB_LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
-export HB_LIFTED
-{ printf '%s\n' "${ROOT}"; cat; } | python3 -I "${HERE}/factory-hardblock.py" "${RULES}" "${KIND}"
+HB_NATIVE_ROOT="$(factory_native_path "${ROOT}")"
+export HB_LIFTED HB_NATIVE_ROOT
+ONLY=""
+[ "$1" = tests ] && ONLY=tests
+{ printf '%s\n' "${ROOT}"; cat; } | python3 -I "${HERE}/factory-hardblock.py" "${RULES}" "${KIND}" ${ONLY}

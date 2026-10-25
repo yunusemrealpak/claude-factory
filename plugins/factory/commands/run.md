@@ -12,7 +12,9 @@ Run the factory loop in this project. Argument (optional): $ARGUMENTS
 1. `.factory/active` exists. If not: stop and tell me to run `/factory:init`.
 2. `tasks/backlog` is non-empty and I approved the task list in `/factory:init`.
    If I have not approved it, stop and ask.
-3. `gates/verify.sh` exists and is executable.
+3. `gates/verify.sh` exists and is executable. `factory-upgrade` (report mode)
+   says whether it is the shim that runs the factory's gate engine; an older
+   generated template still works, but `factory-upgrade --apply` replaces it.
 4. Task ids are consistent: `factory-ids check` exits 0.
    A non-zero exit lists the collisions - show them to me and stop. Every record
    the factory keeps is keyed by id, so dispatching over a collision corrupts the

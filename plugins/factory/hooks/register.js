@@ -124,6 +124,14 @@ export function register(on) {
     if (hit.rule === 'unjudged-tool') {
       return { deny: 'Factory: ' + hit.why + '. Use Read, Grep, Glob, Bash, Write or Edit instead.' }
     }
+    // A test HEAD has: read-only for this task, and not a ban broken.
+    if (hit.level === READONLY) {
+      return {
+        deny:
+          'Factory: ' + hit.path + ' is a test the project already has, and existing tests are read-only for this task - a test that was green is the evidence the code works. ' +
+          'Write a new test file for what the task adds. If the task truly has to change this test, do not get around it: say so in your result; the developer approves it with modifies_tests in the task file. The run goes on.',
+      }
+    }
     // Inline code that writes and names a protected path: a guess, so only
     // this call is refused.
     if (hit.level === 'soft') {
@@ -286,6 +294,12 @@ const rx = (re) => new RegExp(js(re), 'i')
 const TERM = '([\\s;&|)"\'>]|$)'
 const HARD = 'hard'
 const SOFT = 'soft'
+const READONLY = 'readonly'
+// A call that may write a test file or test infrastructure. Which of those HEAD
+// has and no task in progress may change is factory-hardblock.py's to say
+// (factory-check's readonly_tests): this only spares the process for the calls
+// that name nothing of the kind.
+const TEST_HINT = /test|spec|conftest|pytest|jest|vitest|karma|mocharc|playwright|cypress|phpunit|workflows/i
 // What writes, moves or removes a file. The short PowerShell and cmd aliases
 // count only where one of those shells runs: in bash they are words of prose
 // ("copy the key into .env").
@@ -785,12 +799,34 @@ async function judge($, e) {
     if (a && a.type && !/(^|:)runner$/.test(a.type) && PLAN_START.test(String(e.command || ''))) {
       return { rule: 'plan-start', level: HARD, why: 'only the run itself records where it starts (factory-plan --start)' }
     }
-    return judgeText(e.tool === 'PowerShell' ? 'powershell' : 'bash', String(e.command || ''), root, r)
+    const kind = e.tool === 'PowerShell' ? 'powershell' : 'bash'
+    return judgeText(kind, String(e.command || ''), root, r) || (await headTests($, kind, String(e.command || '')))
   }
-  if (FILE_TOOLS.has(e.tool)) return judgeText('path', e.file_path || e.notebook_path || '', root, r)
+  if (FILE_TOOLS.has(e.tool)) {
+    const file = String(e.file_path || e.notebook_path || '')
+    return judgeText('path', file, root, r) || (await headTests($, 'path', file))
+  }
   return {
     rule: 'unjudged-tool',
     why: 'a subagent of a factory run may only use tools the factory can judge, and ' + String(e.tool) + ' is not one of them',
+  }
+}
+
+// A write to a test HEAD has that no task in progress may change. This guard
+// refuses one call and never halts the run, so a failure to decide lets the
+// call through: the PreToolUse hook asks the same question again.
+async function headTests($, kind, text) {
+  if (!text || !TEST_HINT.test(text)) return null
+  try {
+    const res = await $.process.run([await bashPath($), $.plugin.root + '/hooks/factory-hardblock.sh', 'tests', root, kind], {
+      cwd: root,
+      stdin: text,
+      timeoutMs: 15000,
+    })
+    if (res.exitCode !== 6) return null
+    return { rule: 'head-tests', level: READONLY, path: String(res.stdout || '').trim().replace(/^head-tests /, '') }
+  } catch {
+    return null
   }
 }
 

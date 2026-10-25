@@ -31,7 +31,7 @@ const P = (p) => String(p).replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
-function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' } } = {}) {
+function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' }, readonly = '' } = {}) {
   const runs = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: rootPath }))
@@ -52,6 +52,7 @@ function world(on, { active = true, runFails = false, files = {}, level = '', li
     runs.push(e)
     if (runFails) return { deny: 'no processes in this test' }
     if (level && JSON.stringify(e).includes('factory-autonomy.sh')) return { value: { exitCode: 0, stdout: level + '\n', stderr: '' } }
+    if (readonly && JSON.stringify(e).includes('factory-hardblock.sh","tests')) return { value: { exitCode: 6, stdout: 'head-tests ' + readonly + '\n', stderr: '' } }
     return { value: { exitCode: 0, stdout: 'READY T1 api Add login\n', stderr: '' } }
   })
   return runs
@@ -314,6 +315,32 @@ describe('hard blocks', () => {
     await $.agent.spawn({ subagentType: 'factory:runner', description: 'plan', prompt: 'go' })
     const r = await call($, 'Bash', { command: 'factory-plan --json --start' }, 'a1')
     expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+
+  test('an edit of a test HEAD has is refused without halting the run', async ($, on) => {
+    const runs = world(on, { readonly: 'tests/test_a.py' })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Edit', { file_path: '/proj/tests/test_a.py' }, 'a1')
+    expect(JSON.stringify(r)).toContain('tests/test_a.py is a test the project already has')
+    expect(runs.some((x) => JSON.stringify(x).includes('trip'))).toBe(false)
+  })
+
+  test('a call that names no test asks nothing about tests', async ($, on) => {
+    const runs = world(on, { readonly: 'tests/test_a.py' })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Write', { file_path: '/proj/src/app.py' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('deny')
+    expect(runs.some((x) => JSON.stringify(x).includes('factory-hardblock.sh","tests'))).toBe(false)
+  })
+
+  test('a read-only check that cannot run lets the call through', async ($, on) => {
+    world(on, { runFails: true })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Edit', { file_path: '/proj/tests/test_a.py' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('read-only')
   })
 
   test('a read-only tool goes through', async ($, on) => {

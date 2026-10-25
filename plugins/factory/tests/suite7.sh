@@ -282,6 +282,55 @@ bash "$H/factory-deny.sh" >/dev/null; check "report is clean afterwards" '[ $? -
 rm -f .claude/settings.json; bash "$H/factory-deny.sh" --apply >/dev/null
 check "apply creates settings.json when absent" '[ -s .claude/settings.json ]'
 
+echo "=== 3.3: the tests HEAD has are read-only"
+T="$WORK/s7-tests"; rm -rf "$T"; mkdir -p "$T/.factory" "$T/tests/api" "$T/src" "$T/tasks/in-progress" "$T/.github/workflows"
+cd "$T" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '.factory/\n' > .gitignore
+printf 'def test_a(): assert 1\n' > tests/test_old.py; printf 'x\n' > tests/api/test_api.py
+printf 'x\n' > conftest.py; printf 'on: push\n' > .github/workflows/ci.yml; printf 'x\n' > src/app.py
+printf -- '---\nid: R1\nmodifies_tests: false\n---\n' > tasks/in-progress/R1.md
+git add -A; git commit -qm base
+ro() { printf '%s' "$2" | HB_CWD="${3:-}" bash "$H/factory-hardblock.sh" check "$T" "$1"; }
+out="$(ro path "$T/tests/test_old.py")"; rc=$?
+check "an edit of a test HEAD has is refused, and only refused" '[ $rc -eq 6 ] && [ "$out" = "head-tests tests/test_old.py" ]' "$rc $out"
+out="$(ro path "$T/tests/test_new.py")"; rc=$?
+check "a new test file is the agent's to write" '[ $rc -eq 0 ]' "$rc $out"
+out="$(ro bash "echo 'def test_b(): pass' >> tests/test_old.py")"; rc=$?
+check "a redirect into a test HEAD has is refused" '[ $rc -eq 6 ]' "$rc $out"
+out="$(ro bash "sed -i s/1/0/ test_old.py" "$T/tests")"; rc=$?
+check "...from the directory the agent moved to, too" '[ $rc -eq 6 ] && [ "$out" = "head-tests tests/test_old.py" ]' "$rc $out"
+out="$(ro bash "cd tests && rm test_old.py")"; rc=$?
+check "...and after a cd in the same command" '[ $rc -eq 6 ]' "$rc $out"
+out="$(ro bash "python3 -m pytest tests/test_old.py && sed -n 1p tests/test_old.py && cp tests/test_old.py tests/test_new.py")"; rc=$?
+check "running, reading and copying a test is not writing it" '[ $rc -eq 0 ]' "$rc $out"
+out="$(ro path "$T/conftest.py")"; rc=$?
+check "test infrastructure HEAD has is read-only" '[ $rc -eq 6 ] && [ "$out" = "head-tests conftest.py" ]' "$rc $out"
+out="$(ro path "$T/.github/workflows/ci.yml")"; rc=$?
+check "...a CI workflow too" '[ $rc -eq 6 ]' "$rc $out"
+out="$(ro path "$T/tests/api/conftest.py")"; rc=$?
+check "...but new infrastructure is not" '[ $rc -eq 0 ]' "$rc $out"
+out="$(ro path "$T/src/app.py")"; rc=$?
+check "product code is not a test" '[ $rc -eq 0 ]' "$rc $out"
+printf -- '---\nid: R1\nmodifies_tests: false\n---\n' > tasks/in-progress/R1.md
+sed -i.bak 's/^modifies_tests: .*/modifies_tests: [tests\/api\/*]/' tasks/in-progress/R1.md && rm -f tasks/in-progress/R1.md.bak
+out="$(ro path "$T/tests/api/test_api.py")"; rc=$?
+check "an exemption a builder writes into its own task file grants nothing" '[ $rc -eq 6 ]' "$rc $out"
+git commit -qam "approve R1 for the api tests"
+out="$(ro path "$T/tests/api/test_api.py")"; rc=$?
+check "an approved modifies_tests list frees exactly its paths" '[ $rc -eq 0 ]' "$rc $out"
+out="$(ro path "$T/tests/test_old.py")"; rc=$?
+check "...and nothing else" '[ $rc -eq 6 ]' "$rc $out"
+out="$(printf '%s' "$T/tests/test_old.py" | bash "$H/factory-hardblock.sh" tests "$T" path)"; rc=$?
+check "the tests-only question register.js asks gets the same answer" '[ $rc -eq 6 ]' "$rc $out"
+rm -f .factory/STOP
+out="$(jq -cn --arg cwd "$T" --arg c "$T/tests/test_old.py" '{cwd:$cwd, tool_name:"Edit", tool_input:{file_path:$c}, agent_id:"a1"}' | bash "$H/factory-done-guard.sh")"
+check "the PreToolUse hook refuses the edit and the run goes on" 'printf "%s" "$out" | grep -q "read-only for this task" && [ ! -f .factory/STOP ]' "$out"
+out="$(jq -cn --arg cwd "$T" --arg c "$T/tests/test_old.py" '{cwd:$cwd, tool_name:"Edit", tool_input:{file_path:$c}}' | bash "$H/factory-done-guard.sh")"
+check "the developer's own session is not judged" '! printf "%s" "$out" | grep -q "read-only"' "$out"
+check "the default test-file pattern is factory-check's own" 'grep -q "census_regexes" "$H/factory-check.py" && grep -q "readonly_tests" "$H/factory-hardblock.py"'
+cd "$P" || exit 1
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

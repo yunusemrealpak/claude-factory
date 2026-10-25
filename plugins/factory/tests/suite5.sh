@@ -175,7 +175,7 @@ check "the version stamp does not move while the gate is behind" '[ "$(jq -r ".f
 C="$WORK/current"; rm -rf "$C"; mkdir -p "$C/gates" "$C/tasks/backlog"; cd "$C" || exit 1
 mkdir -p .factory/verified .factory/failures .factory/no-progress .factory/changes .factory/lessons .factory/questions .factory/inflight
 : > .factory/active
-python3 "$EXTRACT" gates/verify.sh >/dev/null
+cp "$H/gate-shim.sh" gates/verify.sh
 jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers:2, max_concurrent_agents:3,
   retry_limit:2, min_tests:1, gate_mode:"staged", gate_isolation:false, isolation_links:[], risk_paths:["*.sql"],
   agent_stale_after_min:45, autonomy_default:"merge",
@@ -184,13 +184,43 @@ jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers
   fast:{workers:4,risk_review:"after",audit:true,effort_build:"medium",effort_escalate:"high",effort_review:"high",effort_audit:"high"},
   check:{claude_md_max_lines:200,untracked_guard:true},
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/lead-state.read.md\n.factory/claude-md-protocol.old.md\n' > .gitignore
+printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/lead-state.read.md\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n' > .gitignore
 FACTORY_ROOT="$C" bash "$H/factory-deny.sh" --apply >/dev/null
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
 check "a current project reports nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"
 check "and says nothing in the session brief" '[ -z "$(bash "$H/factory-upgrade.sh" --brief)" ]'
-check "the current gate template carries every guard" '! printf "%s" "$out" | grep -q "gates/verify.sh is missing"' "$out"
+check "a project whose gate is the shim reports no gate gap" '! printf "%s" "$out" | grep -q "gates/verify.sh"' "$out"
+
+echo "=== 3.3: the gate becomes the shim"
+M="$WORK/migrate"; rm -rf "$M"; cp -R "$C" "$M"; cd "$M" || exit 1
+python3 "$EXTRACT" gates/verify.sh > "$WORK/extract.out"
+check "the old template is still there for the projects that run it" 'grep -q "^lines: 514$" "$WORK/extract.out" && grep -q "guard_test_census" gates/verify.sh' "$(cat "$WORK/extract.out")"
+cp gates/verify.sh "$WORK/template.sh"
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+git add -A; git commit -qm base
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
+check "a gate that is the template an older factory wrote is a gap" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "the template factory 2.5-3.2 wrote" && printf "%s" "$out" | grep -q "apply makes gates/verify.sh the shim"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "apply puts the shim in its place" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "GATE REPLACED 2.5-3.2" && cmp -s gates/verify.sh "$H/gate-shim.sh" && [ -x gates/verify.sh ]' "$out"
+check "...keeps the old file" 'cmp -s .factory/gate-legacy/verify.sh "$WORK/template.sh"' "$out"
+check "...and commits the gate, so the next run does not read it as changed" '[ -z "$(git status --porcelain -- gates)" ] && git log -1 --format=%B | grep -q "^Factory-Upgrade: "' "$(git log -1 --format=%B; git status --porcelain)"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "a second apply has nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"
+out="$(bash gates/verify.sh 2>&1)"; rc=$?
+check "the shim hands over to factory-check" '[ $rc -eq 2 ] && printf "%s" "$out" | grep -q "Factory fast check"' "$out"
+{ cat "$WORK/template.sh"; printf '# our own tweak
+'; } > gates/verify.sh; git add gates; git commit -qm "our gate"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "a gate with one line of the project's own is kept" 'cmp -s gates/verify.sh <({ cat "$WORK/template.sh"; printf "# our own tweak\n"; }) && printf "%s" "$out" | grep -q "is the project.s own and stays as it is" && printf "%s" "$out" | grep -q "gates/extra.sh"' "$out"
+rm -f gates/verify.sh
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"; rc=$?
+check "init writes the shim where there is no gate" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^GATE WRITTEN" && cmp -s gates/verify.sh "$H/gate-shim.sh"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"
+check "...and says so when it is already there" 'printf "%s" "$out" | grep -q "^GATE CURRENT"' "$out"
+printf 'echo mine\r\n' > gates/verify.sh; cat "$WORK/template.sh" | sed 's/$/\r/' > gates/verify.sh
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"
+check "a template checked out with CRLF line ends is still recognised" 'printf "%s" "$out" | grep -q "^GATE REPLACED"' "$out"
 
 echo "=== the old CLAUDE.md protocol becomes a pointer"
 PR="$WORK/protocol"; rm -rf "$PR"; cp -R "$C" "$PR"; cd "$PR" || exit 1

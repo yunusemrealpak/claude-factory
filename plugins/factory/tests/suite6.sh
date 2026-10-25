@@ -429,7 +429,11 @@ check "start also prints what earlier tasks of the same module decided" 'printf 
 mv tasks/in-progress/C2-09.md tasks/backlog/C2-09.md; rm -f tasks/backlog/C2-09.md tasks/done/C1-09.md
 out="$(factory-land C2-01)"; rc=$?
 check "land refuses without a green check" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "LAND REFUSED" && [ -f tasks/in-progress/C2-01.md ]' "$out"
-printf 'y\n' > src/x.txt; touch .factory/verified/C2-01
+printf 'y\n' > src/x.txt; printf 'files=%s\n' "$(factory-check fingerprint C2-01)" > .factory/verified/C2-01
+printf 'z\n' > src/x.txt
+out="$(factory-land C2-01)"; rc=$?
+check "land refuses a task whose file changed after its green check" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changed after the green check" && [ -f tasks/in-progress/C2-01.md ]' "$out"
+printf 'y\n' > src/x.txt
 out="$(factory-land C2-01)"; rc=$?
 check "land moves to done and commits exactly the task" '[ $rc -eq 0 ] && [ -f tasks/done/C2-01.md ] && printf "%s" "$out" | grep -q "^LANDED C2-01 [0-9a-f]" && git log -1 --format=%B | grep -q "Factory-Task: C2-01"' "$out"
 out="$(factory-land C2-01)"
@@ -784,6 +788,195 @@ jq -n '{gate_mode:"full", min_tests:1, commands:{build:"true", test:"echo suite 
 printf -- '---\nid: K-3\nacceptance: bash gates/verify.sh K-3\n---\n' > .factory/K-3.md
 out="$(bash gates/verify.sh K-3 2>&1)"
 check "an old gate counts any runner's tests through check.count" 'printf "%s" "$out" | grep -q "GATE test: PASS (5 test(s) ran)"' "$out"
+
+echo "=== 3.3: one gate engine - staged and full"
+G="$WORK/engine"; rm -rf "$G"; mkdir -p "$G/.factory" "$G/src"; cd "$G" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '.factory/\n' > .gitignore; printf 'a\n' > src/a.txt
+git add -A; git commit -qm base
+P="$G"
+mktask in-progress E-01 "" "true" src/a.txt
+setfm tasks/in-progress/E-01.md untested_ok true
+git add -f tasks; git commit -qm "approve E-01"
+gcfg() { jq -n --arg m "$1" --argjson c "$2" '{gate_mode:$m, min_tests:1, commands:$c}' > .factory/config.json; }
+gcfg staged '{"build":"echo built"}'
+out="$(factory-check E-01)"; rc=$?
+check "staged: a board with only a build command is green when the build is" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "skipped (no test command yet, gate_mode=staged)"' "$out"
+sed -i.bak 's/^acceptance: .*/acceptance: bash gates\/verify.sh E-01/' tasks/in-progress/E-01.md && rm -f tasks/in-progress/E-01.md.bak
+git add -f tasks; git commit -qm "E-01 acceptance"
+gcfg staged '{}'
+out="$(factory-check E-01)"; rc=$?
+check "staged: nothing configured and nothing run is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "staged mode needs at least one green stage"' "$out"
+gcfg staged '{"build":"echo built", "test":"echo no tests ran"}'
+setfm tasks/in-progress/E-01.md x y
+sed -i.bak '/^untested_ok: true$/d; /^x: y$/d' tasks/in-progress/E-01.md && rm -f tasks/in-progress/E-01.md.bak
+git add -f tasks; git commit -qm "E-01 needs a test"
+out="$(factory-check E-01)"; rc=$?
+check "staged: once a test command is set, min_tests holds" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "no test exercised this change"' "$out"
+gcfg full '{"build":"echo built"}'
+out="$(factory-check E-01)"; rc=$?
+check "full: no test command is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "MISSING - gate_mode=full requires commands.test"' "$out"
+gcfg full '{"build":"echo built", "test":"echo 3 passed"}'
+out="$(factory-check E-01)"; rc=$?
+check "full: build and test configured, lint not, is green" '[ $rc -eq 0 ]' "$out"
+gcfg staged '{}'
+out="$(factory-check --full)"; rc=$?
+check "staged: a full check that ran nothing is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "staged mode needs at least one green stage"' "$out"
+
+echo "=== 3.3: what only the old gate template did"
+printf '00:01 +1: loads\n00:02 +11: parses\n00:03 +12: All tests passed!\n' > "$WORK/flutter.out"
+check "a flutter run counts its last tally, not the sum of its lines" '[ "$(factory-check count "$WORK/flutter.out")" = 12 ]' "$(factory-check count "$WORK/flutter.out")"
+printf '00:04 +7 ~1 -2: Some tests failed.\n' > "$WORK/flutter.out"
+check "...with skipped and failed counts beside it" '[ "$(factory-check count "$WORK/flutter.out")" = 7 ]'
+mktask in-progress E-02 "" "true" src/a.txt
+setfm tasks/in-progress/E-02.md untested_ok true
+git add -f tasks; git commit -qm "approve E-02"
+gcfg full '{"build":"echo built", "test":"echo 3 passed"}'
+mkdir -p gates; printf 'echo "extra got $1"; exit 1\n' > gates/extra.sh
+out="$(factory-check E-02)"; rc=$?
+check "gates/extra.sh is the last stage of a task check, and its failure is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "extra    FAIL (gates/extra.sh exit 1)" && printf "%s" "$out" | grep -q "extra got E-02"' "$out"
+printf 'echo "extra got $1"\n' > gates/extra.sh
+out="$(factory-check E-02)"; rc=$?
+check "...and its pass is a stage like the others" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "extra    PASS"' "$out"
+jq '.commands.lint = "true"' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check --full)"; rc=$?
+check "the full check runs it with --full" '[ $rc -eq 0 ] && grep -q "extra got --full" "$(sed -n "s/^log=//p" .factory/full-check)"' "$out"
+rm -rf gates
+printf 'ok\n' > src/a.txt; mkdir -p deps; printf 'lib\n' > deps/lib.txt; printf 'deps/\n' >> .gitignore
+git add -A; git commit -qm "a is ok"
+printf 'bad\n' > src/a.txt
+jq -n '{gate_mode:"full", min_tests:1, gate_isolation:true, isolation_links:["deps"],
+  commands:{build:"grep -q ok src/a.txt && grep -q lib deps/lib.txt", test:"echo 3 passed", lint:"true"}}' > .factory/config.json
+out="$(factory-check --full)"; rc=$?
+check "an isolated full check builds HEAD, not what is uncommitted, and says so" '[ $rc -eq 0 ] && grep -q "^isolated=yes" .factory/full-check' "$out"
+check "...and the tree it linked in is still there afterwards" '[ -f deps/lib.txt ] && [ "$(git worktree list | wc -l | tr -d " ")" = 1 ]' "$(git worktree list)"
+jq '.gate_isolation = false' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check --full)"; rc=$?
+check "...the same check in the shared tree sees the break" '[ $rc -eq 1 ] && grep -q "^isolated=no" .factory/full-check' "$out"
+jq '.gate_isolation = true | .commands.build = "grep -q ok src/a.txt && ! grep -q broken src/b.txt"' .factory/config.json > c && mv c .factory/config.json
+printf 'ok\n' > src/a.txt; printf 'broken\n' > src/b.txt
+out="$(factory-check E-02)"; rc=$?
+check "an isolated task check holds HEAD plus the task's files: a neighbour's file is not there" '[ $rc -eq 0 ] && grep -q "^isolated=yes" .factory/verified/E-02' "$out"
+rm -f src/b.txt; git checkout -q src/a.txt
+
+echo "=== 3.3: what makes the suite green is not the task's"
+cd "$G" || exit 1
+jq -n '{gate_mode:"full", min_tests:1, commands:{build:"echo built", test:"echo 3 passed", lint:"true"}}' > .factory/config.json
+printf '{"name":"e","scripts":{"test":"jest","build":"tsc"}}\n' > package.json
+printf '[project]\nname = "e"\n\n[tool.pytest.ini_options]\naddopts = "-q"\n' > pyproject.toml
+git add -A; git commit -qm "manifests"
+mktask in-progress E-03 "" "true" src/a.txt package.json pyproject.toml
+setfm tasks/in-progress/E-03.md untested_ok true
+setfm tasks/in-progress/E-03.md dependencies '[*]'
+git add -f tasks; git commit -qm "approve E-03"
+printf '{"name":"e","scripts":{"test":"jest --passWithNoTests","build":"tsc"}}\n' > package.json
+out="$(factory-check E-03)"; rc=$?
+check "a task that changes scripts.test is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "this task changes how the tests run: package.json scripts.test"' "$out"
+printf '{"name":"e","scripts":{"test":"jest","build":"tsc -b"}}\n' > package.json
+printf '[project]\nname = "e2"\n\n[tool.pytest.ini_options]\naddopts = "-q"\n' > pyproject.toml
+out="$(factory-check E-03)"; rc=$?
+check "...the rest of package.json and pyproject.toml is not the tests" '! printf "%s" "$out" | grep -q "how the tests run"' "$out"
+printf '[project]\nname = "e"\n\n[tool.pytest.ini_options]\naddopts = "-q -k not_slow"\n' > pyproject.toml
+out="$(factory-check E-03)"; rc=$?
+check "a change to [tool.pytest.ini_options] is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "pyproject.toml \[tool.pytest.ini_options\]"' "$out"
+setfm tasks/in-progress/E-03.md modifies_tests '[pyproject.toml]'
+git add -f tasks; git commit -qm "E-03 may change pyproject.toml's tests"
+out="$(factory-check E-03)"; rc=$?
+check "an approved modifies_tests list covers it" '! printf "%s" "$out" | grep -q "how the tests run"' "$out"
+git checkout -q package.json pyproject.toml
+
+echo "=== 3.3: cheat signatures in what a task adds"
+C="$WORK/cheat"; rm -rf "$C"; mkdir -p "$C/.factory" "$C/src" "$C/tests"; cd "$C" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '.factory/\n' > .gitignore
+printf 'import sys\nsys.exit(0)\n' > src/legacy.py
+git add -A; git commit -qm base
+P="$C"
+jq -n '{min_tests:1, commands:{build:"echo built", test:"echo 3 passed", lint:"true"}}' > .factory/config.json
+mktask in-progress C-01 "" "true" src/app.py src/app.js src/tool.py src/legacy.py conftest.py
+git add -f tasks; git commit -qm "approve C-01"
+put() { mkdir -p "$(dirname "$1")"; printf '%b' "$2" > "$1"; }
+cx() { out="$(factory-check C-01)"; rc=$?; }
+clean() { rm -f src/app.py src/app.js src/tool.py conftest.py; git checkout -q src/legacy.py; }
+setcheck() { jq --argjson c "$1" '.check = $c' .factory/config.json > c.tmp && mv c.tmp .factory/config.json; }
+put src/app.py 'import sys\n\ndef run():\n    sys.exit(0)\n'; cx
+check "sys.exit(0) in product code is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "src/app.py:4 exit-zero"' "$out"
+clean; put src/tool.py 'import sys\n\ndef main():\n    sys.exit(0)\n\nif __name__ == "__main__":\n    main()\n'; cx
+check "...but not in an entry point" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.js 'function done() {\n  process.exit(0)\n}\n'; cx
+check "process.exit(0) is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "src/app.js:2 exit-zero"' "$out"
+clean; put src/app.js 'function fail() {\n  process.exit(1)\n}\n'; cx
+check "...process.exit(1) is not" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py 'import unittest\n\ndef load():\n    raise unittest.SkipTest("later")\n'; cx
+check "SkipTest outside the tests is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "skip-outside-tests"' "$out"
+clean; put src/app.py 'def skip_header(rows):\n    return rows[1:]\n'; cx
+check "...a function named skip is not" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py 'import inspect\n\ndef answer():\n    caller = inspect.stack()[1]\n    return 42\n'; cx
+check "inspect.stack() in product code is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "frame-read"' "$out"
+clean; put src/app.py 'import inspect\n\ndef params(f):\n    return inspect.signature(f)\n'; cx
+check "...inspect.signature is not" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py 'import json\n\ndef answer():\n    return json.load(open("tests/fixtures/expected.json"))\n'; cx
+check "product code that opens a test file is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "reads-tests"' "$out"
+clean; put src/app.py 'import json\n\ndef answer():\n    log("see tests/ for examples")\n    return json.load(open("data/answer.json"))\n'; cx
+check "...opening a data file, or naming tests/ in a message, is not" '[ $rc -eq 0 ]' "$out"
+clean; put conftest.py 'import pytest\n\n@pytest.hookimpl(hookwrapper=True)\ndef pytest_runtest_makereport(item, call):\n    outcome = yield\n    outcome.get_result().outcome = "passed"\n'; cx
+check "a report hook in a new conftest.py is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "report-patch"' "$out"
+clean; put conftest.py 'import pytest\n\n@pytest.fixture\ndef client():\n    return object()\n'; cx
+check "...a fixture is not" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py '# never sys.exit(0) here: the caller decides\ndef run():\n    return 0\n'; cx
+check "a comment that names a signature is not one" '[ $rc -eq 0 ]' "$out"
+clean; printf '\ndef extra():\n    return 1\n' >> src/legacy.py; cx
+check "what HEAD already had is not this task's" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py 'import sys\n\ndef run():\n    sys.exit(0)\n'; setcheck '{"entry_points":["src/app.py"]}'; cx
+check "check.entry_points makes a file an entry point" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.py 'import inspect\n\ndef where():\n    return inspect.stack()[1].filename\n'; setcheck '{"cheat_allow":["frame-read:src/*"]}'; cx
+check "check.cheat_allow lets the developer allow one" '[ $rc -eq 0 ]' "$out"
+setcheck '{"cheat_guard":false}'; clean; put src/app.py 'import sys\nsys.exit(0)\n'; cx
+check "check.cheat_guard false turns the stage off" '[ $rc -eq 0 ]' "$out"
+setcheck '{}'
+clean; put src/app.py 'class Money:\n    def __eq__(self, other):\n        return True\n'; cx
+check "an __eq__ that is always true is green..." '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "reason(s) for a reviewer"' "$out"
+check "...with the reason in the marker" 'grep -q "^review=cheat signature eq-always-true at src/app.py:2" .factory/verified/C-01'
+check "the marker holds a digest of the task's files, for factory-land" 'grep -qx "files=$(factory-check fingerprint C-01)" .factory/verified/C-01'
+out="$(factory-risk C-01)"; rc=$?
+check "...and factory-risk sends it to a reviewer" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "RISK C-01: cheat signature eq-always-true"' "$out"
+clean; put src/app.py 'class Money:\n    def __eq__(self, other):\n        """Same amount, same currency."""\n        return (self.amount, self.currency) == (other.amount, other.currency)\n'; cx
+check "an honest __eq__ is no reason" '[ $rc -eq 0 ] && ! grep -q "^review=" .factory/verified/C-01' "$out"
+out="$(factory-risk C-01)"; rc=$?
+check "...and factory-risk finds nothing" '[ $rc -eq 0 ]' "$out"
+clean; put src/app.js 'Object.defineProperty(expect, "toBe", { value: () => true })\n'; cx
+check "patching the test framework goes to a reviewer" '[ $rc -eq 0 ] && grep -q "^review=cheat signature framework-patch" .factory/verified/C-01' "$out"
+clean
+
+echo "=== 3.3: HEAD's version of a changed test, run on the new code"
+Z="$WORK/frozen"; rm -rf "$Z"; mkdir -p "$Z/.factory" "$Z/src" "$Z/tests"; cd "$Z" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; printf '.factory/\n' > .gitignore
+printf '1\n' > src/value.txt; printf '1\n' > tests/test_value.py
+git add -A; git commit -qm base
+P="$Z"
+jq -n '{min_tests:1, commands:{build:"true", lint:"true", test:"grep -qxF \"$(cat src/value.txt)\" tests/test_value.py && echo \"1 passed\""}}' > .factory/config.json
+mktask in-progress F-01 "" "true" src/value.txt tests/test_value.py
+setfm tasks/in-progress/F-01.md modifies_tests true
+git add -f tasks; git commit -qm "approve F-01"
+printf '2\n' > src/value.txt; printf '2\n' > tests/test_value.py
+out="$(factory-check F-01)"; rc=$?
+check "a task that rewrote a test to match new code is green..." '[ $rc -eq 0 ]' "$out"
+check "...but HEAD's test, run on that code, fails and a reviewer is asked" 'printf "%s" "$out" | grep -q "HEAD.s version of tests/test_value.py fails" && grep -q "^review=frozen suite: " .factory/verified/F-01' "$out"
+out="$(factory-risk F-01)"; rc=$?
+check "...factory-risk names it" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "RISK F-01: frozen suite"' "$out"
+check "...and the main tree is as the task left it" 'grep -qx "isolated=no" .factory/verified/F-01 && [ "$(cat tests/test_value.py)" = 2 ] && [ -z "$(git worktree list | sed 1d)" ]'
+printf '1\n' > src/value.txt; printf '1\n2\n' > tests/test_value.py
+out="$(factory-check F-01)"; rc=$?
+check "a test that only gained a case still passes in HEAD's form: no reason" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "still passes against the new code" && ! grep -q "^review=" .factory/verified/F-01' "$out"
+git checkout -q tests/test_value.py
+out="$(factory-check F-01)"; rc=$?
+check "no test changed: nothing extra runs" '[ $rc -eq 0 ] && ! printf "%s" "$out" | grep -q "frozen"' "$out"
+printf '2\n' > src/value.txt; printf '2\n' > tests/test_value.py
+jq '.check = {frozen_suite:false}' .factory/config.json > c.tmp && mv c.tmp .factory/config.json
+out="$(factory-check F-01)"; rc=$?
+check "check.frozen_suite false turns it off" '[ $rc -eq 0 ] && ! printf "%s" "$out" | grep -q "frozen"' "$out"
+git checkout -q src/value.txt tests/test_value.py
 
 echo
 echo "passed=$pass failed=$fail"

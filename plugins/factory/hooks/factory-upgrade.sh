@@ -5,6 +5,8 @@
 #   factory-upgrade          report what is missing
 #   factory-upgrade --apply  add the safe parts
 #   factory-upgrade --brief  one line, or nothing
+#   factory-upgrade --gate   only the gate: write the shim when there is none,
+#                            replace a known template (what /factory:init runs)
 #
 # The hooks, commands and agents live in ~/.claude and are shared by every
 # project, so those upgrade themselves the moment they are edited. What does
@@ -16,13 +18,16 @@
 #
 # --apply only ever adds: config keys that are missing, directories that are
 # missing, gitignore lines that are missing, task sections that are missing. It
-# never rewrites a value, a gate, or a task body. The one replacement it makes is
-# the old 64-line "## Factory Protokolü" section of CLAUDE.md, which every agent
-# read on every turn and which contradicted the agents' own instructions: it
-# becomes the short pointer /factory:init now writes, and the old text is kept
-# in .factory/claude-md-protocol.old.md. The gate is reported and left
-# alone: it is the one file that is legitimately project-specific, and merging
-# into it is /factory-init's job, with the developer watching.
+# never rewrites a value or a task body. It replaces two things, each only when
+# it is exactly what an older factory wrote:
+#   - the old 64-line "## Factory Protokolü" section of CLAUDE.md, which every
+#     agent read on every turn and which contradicted the agents' own
+#     instructions: it becomes the short pointer /factory:init now writes, and
+#     the old text is kept in .factory/claude-md-protocol.old.md;
+#   - a gates/verify.sh that is, byte for byte, a template /factory:init wrote
+#     (hooks/legacy/templates.sha256): it becomes the shim that runs the gate
+#     engine, factory-check, and the old file is kept in .factory/gate-legacy/.
+# A gate somebody changed is theirs: it is reported and left alone.
 set -uo pipefail
 
 # Where this script lives. Siblings are called through it, so the whole
@@ -41,11 +46,17 @@ mode=report
 case "${1:-}" in
   --apply) mode=apply ;;
   --brief) mode=brief ;;
+  --gate)  mode=gate ;;
 esac
 
 [ -f "${F}/active" ] || { [ "${mode}" = "brief" ] && exit 0; echo "factory-upgrade: no .factory/active here - this is not a factory project."; exit 2; }
 
 project_version="$(jq -r '.factory_version // "unknown"' "${CONFIG}" 2>/dev/null || echo unknown)"
+
+if [ "${mode}" = "gate" ]; then
+  python3 "${HOOK_DIR}/factory-gate.py" install
+  exit $?
+fi
 
 # --- what is missing ---------------------------------------------------------
 gaps=0
@@ -70,7 +81,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/lead-state.read.md" ".factory/claude-md-protocol.old.md"; do
+  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/lead-state.read.md" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -82,8 +93,17 @@ if ! FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" >/dev/null 2>&1; 
   missing_deny=" permissions.deny"
 fi
 
+# The gate: the shim (current), a template an older factory wrote (--apply
+# makes it the shim), or the project's own (its protections are reported).
 missing_gate=""
-if [ -f "${GATE}" ]; then
+gate_replace=""
+gate_kind="$(python3 "${HOOK_DIR}/factory-gate.py" classify 2>/dev/null || echo custom)"
+case "${gate_kind}" in
+  shim) ;;
+  absent) missing_gate=" (no gates/verify.sh at all)"; gate_replace=yes ;;
+  template*) missing_gate=" the gate engine - it is the template factory ${gate_kind#template } wrote"; gate_replace=yes ;;
+esac
+if [ -z "${gate_replace}" ] && [ "${gate_kind}" != shim ]; then
   grep -q 'count_tests'        "${GATE}" || missing_gate="${missing_gate} count_tests"
   grep -q 'guard_test_census'  "${GATE}" || missing_gate="${missing_gate} guard_test_census"
   grep -q 'guard_acceptance'   "${GATE}" || missing_gate="${missing_gate} guard_acceptance"
@@ -91,8 +111,6 @@ if [ -f "${GATE}" ]; then
   grep -q 'rm -f "${ROOT}/.factory/verified' "${GATE}" || missing_gate="${missing_gate} marker-invalidation"
   grep -q 'tree=' "${GATE}"            || missing_gate="${missing_gate} tree-fingerprint"
   grep -q 'isolate()' "${GATE}"        || missing_gate="${missing_gate} isolate(optional)"
-else
-  missing_gate=" (no gates/verify.sh at all)"
 fi
 
 old_protocol=""
@@ -126,6 +144,12 @@ if [ "${mode}" = "brief" ]; then
   exit 0
 fi
 
+# A gate of the project's own that carries every protection is not a gap - it
+# is a choice - but the way over to the engine is worth one line.
+if [ "${gate_kind}" = custom ] && [ -z "${missing_gate}" ]; then
+  echo "  (gates/verify.sh is the project's own and stays as it is. The gate engine is factory-check: making gates/verify.sh the shim and moving what it does of its own into gates/extra.sh lets the gate upgrade with the plugin.)"
+fi
+
 if [ "${gaps}" -eq 0 ]; then
   echo "UPGRADE NONE: this project is current with factory ${HARNESS}."
   exit 0
@@ -134,7 +158,11 @@ fi
 if [ "${mode}" = "report" ]; then
   echo
   echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections, and replaces the old CLAUDE.md protocol with its pointer."
-  [ -n "${missing_gate}" ] && echo "The gate is never touched by --apply: run /factory:init in this project and it will offer to merge the missing parts into gates/verify.sh, keeping everything the file already does."
+  if [ -n "${gate_replace}" ]; then
+    echo "--apply makes gates/verify.sh the shim that runs factory-check, the plugin's gate engine; a template it replaces is kept in .factory/gate-legacy/verify.sh."
+  elif [ -n "${missing_gate}" ]; then
+    echo "gates/verify.sh is the project's own and --apply leaves it alone. The gate engine is factory-check: make gates/verify.sh the shim (exec factory-check \"\$@\") and move what it does of its own into gates/extra.sh, which every check runs last."
+  fi
   exit 1
 fi
 
@@ -249,6 +277,26 @@ POINTER
   fi
 fi
 
+if [ -n "${gate_replace}" ]; then
+  gate_was_clean=no
+  if git -C "${ROOT}" ls-files --error-unmatch -- gates/verify.sh >/dev/null 2>&1 \
+     && [ -z "$(git -C "${ROOT}" status --porcelain -- gates/verify.sh 2>/dev/null)" ]; then
+    gate_was_clean=yes
+  fi
+  if line="$(python3 "${HOOK_DIR}/factory-gate.py" install)"; then
+    echo "  ${line}"
+    applied=$((applied + 1))
+    missing_gate=""
+    # gates/ is what a run is judged by: an upgrade that left it uncommitted
+    # would read as a changed gate at the next run's first check.
+    if [ "${gate_was_clean}" = yes ] \
+       && git -C "${ROOT}" add -- gates/verify.sh >/dev/null 2>&1 \
+       && git -C "${ROOT}" commit -q -m "factory: gates/verify.sh runs the plugin's gate engine" -m "Factory-Upgrade: ${HARNESS}" -- gates/verify.sh >/dev/null 2>&1; then
+      echo "  committed gates/verify.sh"
+    fi
+  fi
+fi
+
 # Stamp the version even when nothing else was missing, so the next check is
 # quiet - except when the gate is behind, which --apply cannot fix.
 if [ -z "${missing_gate}" ] && [ -f "${CONFIG}" ]; then
@@ -266,7 +314,7 @@ fi
 echo "UPGRADE APPLIED: ${applied} area(s) brought up to factory ${HARNESS}."
 if [ -n "${missing_gate}" ]; then
   echo "STILL BEHIND - gates/verify.sh is missing:${missing_gate}"
-  echo "The gate is the project's own file and is never rewritten by this script. Run /factory:init here: it reads the existing gate, reports exactly which protections it lacks and what each one would have caught, and merges in only the missing parts once you approve. Until then the config still says ${project_version}."
+  echo "gates/verify.sh is the project's own file and is never rewritten by this script. The gate engine is factory-check: make gates/verify.sh the shim (exec factory-check \"\$@\") and move what it does of its own into gates/extra.sh, which every check runs last - or run /factory:init here, which reads the gate and says what it lacks. Until then the config still says ${project_version}."
   exit 1
 fi
 exit 0

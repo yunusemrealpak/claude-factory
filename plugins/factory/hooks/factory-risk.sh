@@ -28,6 +28,11 @@
 # A file marked linguist-generated in .gitattributes, or matching a glob in
 # "risk_exclude", is never a reason for review.
 #
+# What the check found for a reviewer is a reason too, whatever the paths: the
+# "review=" lines factory-check writes into the task's marker (an ambiguous
+# cheat signature, HEAD's version of a changed test failing on the new code).
+# The marker is the factory's own record, which no agent may write.
+#
 # Exit: 0 nothing risky touched; 1 review needed (the output says why);
 #       2 usage error.
 set -uo pipefail
@@ -40,6 +45,28 @@ if [ -z "${TASK_ID}" ]; then
 fi
 ROOT="$PWD"
 
+checked=""
+MARKER="${ROOT}/.factory/verified/${TASK_ID}"
+if [ -f "${MARKER}" ]; then
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    case "${line}" in
+      review=?*) checked="${checked}RISK ${TASK_ID}: ${line#review=}
+" ;;
+    esac
+  done < "${MARKER}"
+fi
+# Nothing on a risk path: still a review when the check asked for one.
+none() {  # <the "RISK none" line>
+  if [ -n "${checked}" ]; then
+    printf '%s' "${checked}"
+    echo "RISK ${TASK_ID}: review before commit - the check found what it cannot judge."
+    exit 1
+  fi
+  echo "$1"
+  exit 0
+}
+
 TASK_FILE="$(ls "${ROOT}"/tasks/*/"${TASK_ID}".md 2>/dev/null | head -1)"
 if [ -z "${TASK_FILE}" ]; then
   echo "RISK: no task file for ${TASK_ID} under tasks/" >&2
@@ -50,8 +77,7 @@ patterns="$(jq -r '.risk_paths // [] | .[]' "${ROOT}/.factory/config.json" 2>/de
 builtin=1
 [ "$(jq -r '.risk_builtin' "${ROOT}/.factory/config.json" 2>/dev/null)" = "false" ] && builtin=0
 if [ -z "${patterns}" ] && [ "${builtin}" = 0 ]; then
-  echo "RISK none for ${TASK_ID}: .factory/config.json has no risk_paths, so nothing is checked."
-  exit 0
+  none "RISK none for ${TASK_ID}: .factory/config.json has no risk_paths, so nothing is checked."
 fi
 # Matched against the file name alone, at any depth.
 MANIFESTS='package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml pnpm-workspace.yaml bun.lock bun.lockb deno.json deno.lock
@@ -92,10 +118,10 @@ listed="$(awk '
   }' "${TASK_FILE}" | sed 's#^\./##' | sort -u)"
 
 if [ -z "${listed}" ] && [ -z "${patterns}" ]; then
-  echo "RISK none for ${TASK_ID}: the task lists no files and .factory/config.json has no risk_paths."
-  exit 0
+  none "RISK none for ${TASK_ID}: the task lists no files and .factory/config.json has no risk_paths."
 fi
 if [ -z "${listed}" ]; then
+  printf '%s' "${checked}"
   echo "RISK ${TASK_ID}: the task lists no files under \"## Files touched\", so what it changed cannot be checked. Review it."
   exit 1
 fi
@@ -145,12 +171,12 @@ while IFS= read -r p; do
   done <<< "${patterns}"
 done <<< "${listed}"
 shopt -u nocasematch
+hits="${checked}${hits}"
 
 [ -n "${generated}" ] && echo "RISK skipped for ${TASK_ID}: generated or excluded:${generated}"
 if [ -n "${hits}" ]; then
   printf '%s' "${hits}"
-  echo "RISK ${TASK_ID}: review before commit - the gate cannot judge these files."
+  echo "RISK ${TASK_ID}: review before commit - the gate cannot judge what is listed above."
   exit 1
 fi
-echo "RISK none for ${TASK_ID}: $(printf '%s\n' "${listed}" | grep -c .) file(s), none on a risk path."
-exit 0
+none "RISK none for ${TASK_ID}: $(printf '%s\n' "${listed}" | grep -c .) file(s), none on a risk path."

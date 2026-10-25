@@ -43,8 +43,8 @@ That law is enforced by a `PreToolUse` hook, not by asking an agent nicely: a mo
 without the marker is denied.
 
 **A gate that is hard to fool.** The gate runs build, tests, architecture rules and
-lint, and it also counts: a suite that ran zero tests is not green, a run with
-fewer test files or more skip markers than the last green one is not green, and an
+lint, and it also counts: a suite that ran zero tests is not green, a task that
+deleted a test file or added a skip marker (compared with HEAD) is not green, and an
 acceptance criterion whose only evidence is a sentence in a markdown file is
 rejected outright. It fingerprints failures, so a task that fails twice on the
 identical error is stopped rather than retried until its budget runs out.
@@ -206,6 +206,51 @@ A closed change can leave your machine, but only through one script and only as 
 - **Windows.** The suites and the hooks module run on Windows under Git Bash, and CI
   runs them on macOS, Linux and Windows.
 
+## One gate (3.3)
+
+- **One engine.** `factory-check` is the gate. A project's `gates/verify.sh` is a
+  five-line shim that runs it (`exec factory-check "$@"`), and the project's own
+  stages - a migration dry-run, a bundle-size budget - go in `gates/extra.sh`, which
+  every check runs last with the task id (or `--full`). Both are under `gates/`, so
+  no agent changes them. `factory-upgrade --apply` replaces a gate that is one of
+  the templates `/factory:init` used to generate (backed up to
+  `.factory/gate-legacy/`); a gate you wrote yourself is kept, and the upgrade says
+  how to move its stages into `gates/extra.sh`. What only the template did now
+  lives in the engine: `gate_mode: staged` (a stage without a command is skipped,
+  one green stage is enough), a full check that refuses a missing build, test or
+  lint command in full mode, test counts for Flutter's `+N` lines, and isolation
+  that keeps `isolation_links` linked.
+- **The tests the project has are read-only.** A subagent writes new tests, never
+  an existing one: a write to a test file or to test infrastructure HEAD has
+  (`conftest.py`, `jest.config.*`, `pytest.ini`, a CI workflow, ...) is refused
+  without halting the run - by the PreToolUse hook and by the hooks module, in a
+  file tool, a redirect, `sed -i`, `cp`, `rm`, `cd tests && ...` or inline code. An
+  approved `modifies_tests` in the task file frees it: `true` for any test, or a
+  list (`modifies_tests: [tests/api/*, conftest.py]`) for exactly those. A change to
+  how the tests run (`scripts.test` in `package.json`, the pytest section of
+  `pyproject.toml`, `setup.cfg` or `tox.ini`) is red unless that list covers it.
+- **Cheat signatures.** The check reads the lines a task added for what makes a
+  suite pass without the code working: an exit with success outside an entry point
+  (`sys.exit(0)`, `os._exit`, `process.exit(0)`), a skip outside the tests, product
+  code that reads the call stack or opens a test file, a patched test report
+  (`pytest_runtest_makereport`, `TestReport`). These are red. Ambiguous ones - an
+  `__eq__` that is always true, a patched test framework - are not: they go into
+  the task's marker as `review=` lines, and `factory-risk` sends the task to a
+  reviewer. `check.entry_points` (globs) and `check.cheat_allow` (`"rule"` or
+  `"rule:glob"`) take a false hit out; `check.cheat_guard: false` turns the stage
+  off.
+- **HEAD's test, on the new code.** When a task was allowed to change a test HEAD
+  has, the check also runs HEAD's version of that test against the task's code, in
+  a throwaway worktree. If the old test fails, the task goes to review: whether the
+  behaviour was meant to change is your call. `check.frozen_suite: false` turns it
+  off.
+- **What was checked is what lands.** The marker holds a digest of the task's listed
+  files; `factory-land` computes it again and refuses a task whose files changed
+  after its green check.
+- **Shadow mode.** `tests/suite12.sh` runs the old template and the engine on the
+  same fixtures and compares their verdicts. Every difference is listed with the
+  reason the engine is right; one that is not listed fails the suite.
+
 ## Commands
 
 | command | what it is for |
@@ -297,10 +342,11 @@ claude plugin update factory
 ```
 
 The hooks, commands and agents update with the plugin. What does **not** update is
-what `/factory:init` wrote into a project — `gates/verify.sh`, `.factory/config.json`,
-the task layout. Every session tells you when a project is behind, and
-`/factory:upgrade` brings the safe parts up to date; the gate itself is never
-rewritten without you watching.
+what `/factory:init` wrote into a project — `.factory/config.json`, the task layout,
+and before 3.3 a full copy of the gate in `gates/verify.sh`. Every session tells you
+when a project is behind, and `/factory:upgrade` brings the safe parts up to date. A
+gate that is one of the old generated templates becomes the shim (the old file is
+kept in `.factory/gate-legacy/`); a gate you edited is never rewritten.
 
 ## Safety
 

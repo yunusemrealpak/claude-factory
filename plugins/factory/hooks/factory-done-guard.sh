@@ -84,8 +84,13 @@ if [ -n "$agent_id" ]; then
     NotebookEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // empty' 2>/dev/null)" ;;
   esac
   if [ -n "$hb_kind" ] && [ -n "$hb_text" ]; then
-    hb_rule="$(printf '%s' "$hb_text" | bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
+    hb_cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+    hb_rule="$(printf '%s' "$hb_text" | HB_CWD="$hb_cwd" bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
     hb_rc=$?
+    # 6: a test HEAD has, which no task in progress was approved to change.
+    if [ "$hb_rc" -eq 6 ]; then
+      deny "Factory: ${hb_rule#head-tests } is a test the project already has, and existing tests are read-only for this task - a test that was green is the evidence the code works. Write a new test file for what the task adds. If the task truly has to change this test, do not get around it: say so in your result; the developer approves it with modifies_tests in the task file. The run goes on."
+    fi
     # 5: inline code that writes and names a protected path - a guess, so only
     # this call is refused and the run goes on.
     if [ "$hb_rc" -eq 5 ]; then

@@ -97,7 +97,7 @@ post "bash ~/.claude/hooks/factory-commit.sh C2-01" "COMMIT 9f3ab12 C2-01 (C2): 
 check "commit records the sha" 'jq -e "select(.kind==\"commit\" and .task==\"C2-01\" and .sha==\"9f3ab12\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-commit.sh C2-09" "COMMIT SKIPPED for C2-09: none of its files differ from HEAD - nothing to commit."
 check "a skipped commit records sha=none" 'jq -e "select(.kind==\"commit\" and .task==\"C2-09\" and .sha==\"none\")" "$LOG" >/dev/null'
-post "bash ~/.claude/hooks/factory-risk.sh C2-03" "RISK C2-03: review before commit - the gate cannot judge these files."
+post "bash ~/.claude/hooks/factory-risk.sh C2-03" "RISK C2-03: review before commit - the gate cannot judge what is listed above."
 check "risk hit is recorded" 'jq -e "select(.kind==\"risk\" and .task==\"C2-03\" and .review_needed==\"yes\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-risk.sh C2-04" "RISK none for C2-04: 2 file(s), none on a risk path."
 check "clean risk check is recorded too" 'jq -e "select(.kind==\"risk\" and .task==\"C2-04\" and .review_needed==\"no\")" "$LOG" >/dev/null'

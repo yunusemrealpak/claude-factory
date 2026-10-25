@@ -46,8 +46,12 @@ You implement exactly one task, the one whose file path the lead gave you.
    yours commits someone else's work under this task's name. When the project
    runs its gate isolated, the gate checks exactly these files, and it goes red
    if the list is empty or incomplete.
-6. Run the project gate: `bash gates/verify.sh <task-id>`. It writes
-   `.factory/verified/<task-id>` only when everything passes.
+6. Run the project gate: `bash gates/verify.sh <task-id>`. It runs the
+   factory's gate engine (`factory-check`) and writes
+   `.factory/verified/<task-id>` only when everything passes. Its last line is
+   `CHECK RESULT: GREEN`, `RED` or `WAITING`. `WAITING` means every error is in
+   another task's unfinished work, not in yours: change nothing, do not run the
+   gate again, and report the task to the lead as waiting.
 7. Append exactly ONE line to `decisions.md`:
    `- <task-id>: <decision taken> - <one-clause reason>`
 8. Record the attempt in the task file's `## Attempts` section:
@@ -105,8 +109,15 @@ the tree as another edit.
 
 ## What the gate checks besides your stages
 
-Three of the gate's checks exist because a run can pass while proving nothing.
-Each of them fails loudly and tells you which one tripped.
+Several of the gate's checks exist because a run can pass while proving
+nothing. Each of them fails loudly and tells you which one tripped.
+
+**The tests the project already has are read-only.** A test file or test
+infrastructure (`conftest.py`, `jest.config.*`, a CI workflow) that is in HEAD
+is the evidence the code worked. Write a new test file for what the task adds. A
+write to an existing one is refused, and the run goes on. Only an approved
+`modifies_tests` in the task file (`true`, or a list of paths) frees it; if the
+task needs it, report that to the lead. Never add it yourself.
 
 **A suite that ran nothing.** The gate counts the tests your runner reported. A
 run that executes zero tests exits 0 and looks identical to a passing run. If
@@ -114,10 +125,10 @@ you see `the suite reported 0 test(s)`, do not chase the runner: either the
 tests you were supposed to write are missing, or a filter, scope or path setting
 excluded them. Fix the cause, never the count.
 
-**A suite that got smaller.** The gate counts test files and suppression markers
-(`[Fact(Skip=...)]`, `.skip(`, `@Ignore`, `t.Skip(`, `#[ignore]` and friends) and
-compares them against the last green run. Fewer test files, or more skips, turns
-the gate red. Deleting the failing test and skipping the failing test both make
+**A suite that got smaller.** The gate compares the test files your task lists
+with HEAD: a test file it deleted, or a suppression marker it added
+(`[Fact(Skip=...)]`, `.skip(`, `@Ignore`, `t.Skip(`, `#[ignore]` and friends),
+turns the gate red. Deleting the failing test and skipping the failing test both make
 a gate pass, and neither one does the work. If removing tests is genuinely part
 of your task, that is a decision the task file has to carry - report it to the
 lead and let them add `allow_test_removal: true`. Never add that flag yourself.
@@ -126,6 +137,13 @@ lead and let them add `allow_test_removal: true`. Never add that flag yourself.
 command whose only evidence is `decisions.md` or a task file proves nothing,
 because you write both. If the gate rejects your task's acceptance for this,
 that is a defect in the task, not in your work: report it to the lead and stop.
+
+**A cheat signature** in the lines you added: an exit with success outside an
+entry point, a skip outside the tests, product code that reads the call stack
+or opens a test file, a patched test report, a changed test configuration. Each
+makes a suite pass without the code working. Take it out; if it truly belongs
+there, report it to the lead. An ambiguous one (an `__eq__` that is always true)
+is not red - the gate names it and the task goes to a reviewer.
 
 ## The same failure twice is not a second attempt
 

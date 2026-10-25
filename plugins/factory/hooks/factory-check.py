@@ -8,6 +8,12 @@ Usage (from the project root):
   factory-check units <path>...    which units a change to these paths reaches
   factory-check census [--json]    the test census of HEAD
   factory-check count <file>       the number of tests a runner's output reports
+  factory-check selfcert <command> exit 0 when an acceptance command is
+                                   self-certifying (for factory-lint)
+  factory-check readonly <path>... the tests among these paths that HEAD has
+                                   and no task in progress may change
+  factory-check fingerprint <id>   the digest of the task's listed files now
+                                   (factory-land compares it with the marker's)
 
 Nothing in here knows a language, a framework or a build tool. What a project is
 made of and how it is built and tested is data the project supplies:
@@ -66,14 +72,17 @@ seconds, default 120), then runs again. Still blocked at the end: WAITING.
 Exit: 0 green, 1 red, 2 usage or setup error, 3 waiting on another task's
 work in flight.
 """
+import contextlib
 import fnmatch
 import hashlib
 import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 sys.dont_write_bytecode = True
@@ -90,6 +99,11 @@ TEST_FILES = (r"(Tests?\.cs|_test\.go|(^|/)test_[^/]*\.py|_test\.py|_test\.dart|
 SKIP = (r"\[Ignore\(|\(Skip\s*=|\.skip\(|(^|[^a-zA-Z])xit\(|(^|[^a-zA-Z])xdescribe\(|@Ignore([^a-zA-Z]|$)|"
         r"@Disabled|@pytest\.mark\.skip|@unittest\.skip|(^|[^a-zA-Z])t\.Skip\(|#\[ignore\]|skip:\s*true|"
         r"Assert\.Inconclusive|markTestSkipped")
+# What decides how the tests run without being a test itself. A file of these
+# that HEAD has is read-only for an agent, like the tests (readonly_tests).
+TEST_INFRA = (r"(^|/)(conftest\.py|pytest\.ini|jest\.config\.[^/]+|vitest\.config\.[^/]+|karma\.conf\.[^/]+|"
+              r"\.mocharc[^/]*|playwright\.config\.[^/]+|cypress\.config\.[^/]+|phpunit\.xml[^/]*)$|"
+              r"^\.github/workflows/")
 ZERO_TESTS = re.compile(r"no test files|no tests ran|no tests found|no tests were found|found 0 tests|ran 0 tests|"
                         r"Tests:\s+0 total|Total tests:\s*0\b|total:\s*0\b", re.I)
 # Plain-English summary phrasings many runners share. A runner that says it
@@ -326,6 +340,12 @@ def reach(files, units, ignore):
 # ---------------------------------------------------------------------------
 
 
+# flutter test / dart test: every line is a running tally, "00:03 +12 ~1 -2: name"
+# (passed, skipped, failed). The last tally is the largest; summing them counts
+# each test many times. The compact reporter rewrites one line with \r.
+DART_TALLY = re.compile(r"^\s*\d+:\d\d \+(\d+)(?: ~\d+)?(?: -\d+)?: ", re.M)
+
+
 def count_tests(out, check):
     """Tests a run reported, or None when the output is not recognised."""
     if check.get("count"):
@@ -333,6 +353,9 @@ def count_tests(out, check):
         return sum(nums) if nums else None
     if ZERO_TESTS.search(out):
         return 0
+    tally = [int(n) for n in DART_TALLY.findall(out.replace("\r", "\n"))]
+    if tally:
+        return max(tally)
     for pat in COUNTS:
         found = re.findall(pat, out, re.M)
         if not found:
@@ -401,6 +424,132 @@ def changed_assertions(listed, check):
     return out
 
 
+# --- cheat signatures ---------------------------------------------------------
+# What makes a suite pass without the code working, in the shapes the reward-
+# hacking studies caught (OpenAI's exit(0) and SkipTest, METR's patched graders
+# and stack reads): looked for in the lines this task added, never in what HEAD
+# already had. A systemic one is red. An ambiguous one - an __eq__ that is always
+# true has honest uses - sends the task to a reviewer, never to red.
+CODE_FILE = re.compile(r"\.(py|pyw|js|mjs|cjs|jsx|ts|tsx|mts|cts|rb|go|rs|java|kt|kts|cs|php|dart|swift|scala|ex|exs|lua)$",
+                       re.I)
+ENTRY_POINT = re.compile(r"(^|/)(__main__\.py|main\.[a-z]+|cli\.[a-z]+|[^/]*_cli\.py|manage\.py|setup\.py|"
+                         r"noxfile\.py|fabfile\.py|tasks\.py)$|(^|/)(bin|scripts|cli|cmd|tools)/")
+MAIN_GUARD = re.compile(r"""^if\s+__name__\s*==\s*['"]__main__['"]\s*:""", re.M)
+READ_CALL = re.compile(r"\b(open|read_text|read_bytes|readFile|readFileSync|readdir|readdirSync|listdir|scandir|"
+                       r"walk|i?glob|rglob|readlines|createReadStream|ReadAllText|ReadAllLines|ReadFile)\s*\(")
+TEST_PATH = re.compile(r"""["'`][^"'`\n]*(?<![\w-])(tests?|__tests__|specs?)([/\\][^"'`\n]*)?["'`]|"""
+                       r"""["'`][^"'`\n]*(test_\w+\.py|\w+_test\.(py|go)|\.(test|spec)\.[cm]?[jt]sx?|conftest\.py)["'`]""")
+# name, verdict, where (product: not a test or test infrastructure; any: every
+# file), the pattern, what it does.
+CHEATS = [
+    ("exit-zero", "red", "product",
+     r"\bsys\.exit\(\s*(0|None|False)?\s*\)|\bos\._exit\s*\(|\bprocess\.exit\(\s*0?\s*\)|"
+     r"(?<![\w.])(exit|quit)\(\s*0?\s*\)",
+     "exits with success outside an entry point - a test run that reaches it passes without running"),
+    ("skip-outside-tests", "red", "product",
+     r"\b(unittest\.)?SkipTest\b|\bpytest\.(skip|xfail)\s*\(|\bpytest\.mark\.(skip|skipif|xfail)\b",
+     "skips tests from product code"),
+    ("frame-read", "red", "product",
+     r"\binspect\.(stack|currentframe|getouterframes|getinnerframes|trace)\s*\(|\bsys\._(getframe|current_frames)\s*\(",
+     "reads the call stack - product code that looks at who is calling can tell a test from a user"),
+    ("reads-tests", "red", "product", None,
+     "product code opens a test file - an answer read from the test is not an answer"),
+    ("report-patch", "red", "any",
+     r"\bpytest_runtest_makereport\b|\bpytest_report_teststatus\b|\bTestReport\b|\b_pytest\.(reports|runner)\b|"
+     r"\.outcome\s*=\s*['\"]passed|\bTestResult\.(addFailure|addError|wasSuccessful)\s*=[^=]",
+     "rewrites how a test result is reported"),
+    ("eq-always-true", "review", "any",
+     r"\b__eq__\s*=\s*lambda[^:\n]*:\s*True\b|\bequals\s*\([^)]*\)\s*(:\s*\w+\s*)?\{\s*return\s+true\b",
+     "an equality that is always true makes every assertion of equality pass"),
+    ("framework-patch", "review", "any",
+     r"\bObject\.defineProperty\(\s*(expect|jest|vi|assert|chai|it|test|describe|global|globalThis)\b|"
+     r"(?<![\w.])(expect|assert|chai|jest|vi)\.\w+\s*=[^=]|\bunittest\.TestCase\.\w+\s*=[^=]|"
+     r"\b(builtins\.)?__import__\s*=[^=]",
+     "replaces part of the test framework"),
+]
+EQ_DEF = re.compile(r"^[ \t]*def[ \t]+__(eq|ne)__[ \t]*\([^)]*\)[^:\n]*:[ \t]*(?:#[^\n]*)?"
+                    r"(?:\n(?:[ \t]*(?:#[^\n]*)?|[ \t]*(?:\"\"\"[\s\S]*?\"\"\"|'\'\'[\s\S]*?'\'\'))[ \t]*)*"
+                    r"(?:\n[ \t]*|[ \t]*)return[ \t]+(True|False)[ \t]*(?:#[^\n]*)?$", re.M)
+COMMENT = re.compile(r"^\s*(#|//|/\*|\*|--)")
+
+
+def added_lines(p):
+    """{line number: text} of what this task added to p, judged against HEAD
+    (every line of a file HEAD does not have), and the file's text."""
+    full = os.path.join(ROOT, p)
+    try:
+        if not os.path.isfile(full) or os.path.getsize(full) > 2000000:
+            return {}, ""
+    except OSError:
+        return {}, ""
+    text = read(full)
+    if "\0" in text[:8192]:
+        return {}, ""
+    rc, _ = git("cat-file", "-e", "HEAD:./" + p)
+    if rc != 0:
+        return {i + 1: l for i, l in enumerate(text.splitlines())}, text
+    rc, diff = git("diff", "HEAD", "-U0", "--no-color", "--no-ext-diff", "--", p)
+    out, n, hunk = {}, 0, False
+    for l in diff.splitlines():
+        m = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", l)
+        if m:
+            n, hunk = int(m.group(1)), True
+        elif hunk and l.startswith("+"):
+            out[n] = l[1:].rstrip("\r")
+            n += 1
+    return out, text
+
+
+def cheat_allowed(allow, name, path):
+    for a in allow:
+        rule, _, glob = str(a).partition(":")
+        if rule in (name, "*") and (not glob or covers([glob], path)):
+            return True
+    return False
+
+
+def cheat_signatures(listed, check):
+    """The cheat signatures in this task's added lines: (red, review), each a list
+    of (path, line, name, why, text). check.cheat_allow ("rule" or "rule:glob")
+    and check.entry_points (globs) are the developer's way out of a false hit."""
+    test_re, _ = census_regexes(check)
+    infra = re.compile(TEST_INFRA)
+    allow = check.get("cheat_allow") or []
+    entries = [str(g) for g in check.get("entry_points") or []]
+    red, review = [], []
+    for p in listed:
+        if not CODE_FILE.search(p):
+            continue
+        added, text = added_lines(p)
+        if not added:
+            continue
+        product = not (test_re.search(p) or infra.search(p))
+        entry = bool(ENTRY_POINT.search(p) or covers(entries, p) or text.startswith("#!") or MAIN_GUARD.search(text))
+        hits = []
+        for no, line in sorted(added.items()):
+            if COMMENT.match(line):
+                continue
+            for name, verdict, where, pattern, why in CHEATS:
+                if where == "product" and not product or name == "exit-zero" and entry:
+                    continue
+                if pattern is None:
+                    found = READ_CALL.search(line) and TEST_PATH.search(line)
+                else:
+                    found = re.search(pattern, line)
+                if found:
+                    hits.append((no, name, verdict, why, line.strip()))
+        if p.endswith((".py", ".pyw")):
+            for m in EQ_DEF.finditer(text):
+                no = text.count("\n", 0, m.start()) + 1
+                if no in added and (m.group(1), m.group(2)) in (("eq", "True"), ("ne", "False")):
+                    hits.append((no, "eq-always-true", "review", CHEATS[5][4], added[no].strip()))
+        for no, name, verdict, why, line in hits:
+            if cheat_allowed(allow, name, p):
+                continue
+            (red if verdict == "red" else review).append((p, no, name, why, line[:160]))
+    return red, review
+
+
 def run_base():
     """The commit this run started from (run-start.json "head"), when git has
     it; else None."""
@@ -461,7 +610,11 @@ def approval_changes(fm, approved):
     turning an exemption off only makes its own check stricter."""
     out = []
     for key in EXEMPTIONS:
-        if is_true(fm, key) and not is_true(approved, key):
+        if key == "modifies_tests":
+            granted = modifies_tests_globs(approved)
+            if "*" not in granted and set(modifies_tests_globs(fm)) - set(granted):
+                out.append(key)
+        elif is_true(fm, key) and not is_true(approved, key):
             out.append(key)
     granted = set(declared_dependencies(approved))
     if "*" not in granted and set(declared_dependencies(fm)) - granted:
@@ -471,10 +624,99 @@ def approval_changes(fm, approved):
     return out
 
 
-def declared_modifies_tests(task_id, path):
-    """The declaration as approved (approved_frontmatter), so the builder cannot
-    grant itself the exemption in the edit it is about to check."""
-    return is_true(approved_frontmatter(task_id), "modifies_tests")
+def modifies_tests_globs(fm):
+    """Which of the tests HEAD has the task was approved to change:
+    "modifies_tests: true" - any; "modifies_tests: [tests/api/*, conftest.py]" -
+    those; anything else - none."""
+    v = str(fm.get("modifies_tests", "")).strip()
+    if v.lower() == "true":
+        return ["*"]
+    if v.startswith("[") and v.endswith("]"):
+        return [g.strip().strip("'\"") for g in v[1:-1].split(",") if g.strip().strip("'\"")]
+    return []
+
+
+def covers(globs, path):
+    """A glob covers a path it matches, or a directory the path is under."""
+    p = npath(path)
+    return any(g == "*" or fnmatch.fnmatchcase(p, g) or p.startswith(npath(g).rstrip("/") + "/") for g in globs)
+
+
+def readonly_tests(paths):
+    """Of these root-relative paths, the ones no agent may write now: a test
+    file (check.test_files) or test infrastructure (TEST_INFRA) that HEAD has,
+    which no task in progress was approved to change (modifies_tests, as
+    approved). New tests and new infrastructure are always the agent's to
+    write."""
+    test_re, _ = census_regexes(load_config().get("check") or {})
+    infra = re.compile(TEST_INFRA)
+    cands = sorted({npath(p) for p in paths if p})
+    cands = [p for p in cands if not p.startswith("../") and p != ".." and not os.path.isabs(p)
+             and not re.match(r"^[A-Za-z]:", p) and (test_re.search(p) or infra.search(p))]
+    if not cands:
+        return []
+    rc, out = git("ls-tree", "-r", "-z", "--name-only", "HEAD", "--", *cands)
+    if rc != 0:
+        return []
+    in_head = set(x for x in out.split("\0") if x)
+    hits = [p for p in cands if p in in_head]
+    if not hits:
+        return []
+    globs = []
+    lane = os.path.join(ROOT, "tasks", "in-progress")
+    for name in sorted(os.listdir(lane)) if os.path.isdir(lane) else []:
+        if name.endswith(".md"):
+            globs += modifies_tests_globs(approved_frontmatter(name[:-3]))
+    return [p for p in hits if not covers(globs, p)]
+
+
+# How the tests run, where a project keeps it beside other things: a change to
+# it changes what "green" means without touching a test.
+TEST_CONFIG_SECTIONS = {"pyproject.toml": "tool.pytest.ini_options", "setup.cfg": "tool:pytest", "tox.ini": "pytest"}
+
+
+def test_config_of(path, text):
+    """The part of a package.json, pyproject.toml, setup.cfg or tox.ini that says
+    how the tests run; None for any other file."""
+    base = os.path.basename(path)
+    if base == "package.json":
+        try:
+            d = json.loads(text or "{}")
+        except ValueError:
+            return text
+        d = d if isinstance(d, dict) else {}
+        scripts = d.get("scripts") if isinstance(d.get("scripts"), dict) else {}
+        return json.dumps({"scripts.test": scripts.get("test"), "jest": d.get("jest"), "mocha": d.get("mocha"),
+                           "vitest": d.get("vitest")}, sort_keys=True)
+    section = TEST_CONFIG_SECTIONS.get(base)
+    if not section:
+        return None
+    out, inside = [], False
+    for line in (text or "").splitlines():
+        st = line.strip()
+        if st.startswith("[") and st.endswith("]"):
+            inside = st[1:-1].strip() == section
+            continue
+        if inside and st and not st.startswith(("#", ";")):
+            out.append(st)
+    return "\n".join(out)
+
+
+def test_config_changes(listed):
+    """Listed files whose test configuration differs from HEAD's."""
+    out = []
+    for p in listed:
+        if test_config_of(p, "") is None:
+            continue
+        rc, before = git("show", "HEAD:./" + p)
+        if rc != 0:
+            continue  # new: it changes nothing that was there
+        now = read(os.path.join(ROOT, p))
+        if test_config_of(p, before) != test_config_of(p, now):
+            what = "scripts.test" if os.path.basename(p) == "package.json" else \
+                "[%s]" % TEST_CONFIG_SECTIONS[os.path.basename(p)]
+            out.append("%s %s" % (p, what))
+    return out
 
 
 # What the run is judged by: the gate and the factory's config. No task changes
@@ -715,13 +957,14 @@ class Run:
         self.log_rel = ".factory/logs/%s.%d.log" % (label, n)
         self.log = open(os.path.join(ROOT, self.log_rel), "w", encoding="utf-8")
         self.lines, self.failed, self.sig_text, self.raw = [], [], [], []
+        self.cwd, self.isolated = ROOT, False  # see isolated()
 
     def step(self, name, cmd):
         self.log.write("### %s: %s\n" % (name, cmd))
         self.log.flush()
         started = time.time()
         try:
-            r = subprocess.run([bash(), "-c", cmd], cwd=ROOT, capture_output=True, text=True, errors="replace")
+            r = subprocess.run([bash(), "-c", cmd], cwd=self.cwd, capture_output=True, text=True, errors="replace")
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
         except OSError as err:
             out, rc = str(err), 127
@@ -849,6 +1092,26 @@ def record_failure(task_id, text):
     return sha, attempt, repeat
 
 
+def files_fingerprint(listed):
+    """One digest of the task's listed files as they are now - each path with its
+    bytes, or as gone. The marker keeps it; factory-land computes it again, so a
+    file changed after the green check is not committed as checked."""
+    import hashlib
+    h = hashlib.sha256()
+    for p in sorted(set(listed)):
+        full = os.path.join(ROOT, p)
+        h.update(p.encode("utf-8") + b"\0")
+        if os.path.isfile(full):
+            with open(full, "rb") as fh:
+                h.update(hashlib.sha256(fh.read()).hexdigest().encode())
+        elif os.path.isdir(full):
+            h.update(b"dir")
+        else:
+            h.update(b"gone")
+        h.update(b"\n")
+    return h.hexdigest()
+
+
 def tree_hash():
     try:
         r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-gate-skip.sh"), "hash", ROOT],
@@ -864,10 +1127,11 @@ TEXT_READERS = {"grep", "egrep", "fgrep", "rg", "cat", "test", "[", "head", "tai
 
 def self_certifying(acc):
     """An acceptance command whose only evidence is a file the agent writes
-    itself: it names decisions.md or a task file, and every command in it only
-    reads text. Nothing about any language - a command that runs anything else
-    is taken as running the code."""
-    if not acc or not re.search(r"decisions\.md|tasks/[^ ]*\.md", acc):
+    itself: it names a markdown file (decisions.md, a task file, notes.md), and
+    every command in it only reads text. Nothing about any language - a command
+    that runs anything else is taken as running the code. factory-lint asks the
+    same question through "factory-check selfcert"."""
+    if not acc or not re.search(r"\.(md|markdown)\b", acc, re.I):
         return False
     for part in re.split(r"&&|\|\||;|\|", acc):
         words = part.strip().split()
@@ -1017,13 +1281,187 @@ def wait_for(files, deadline):
     return False
 
 
+def _link(src, dst):
+    """dst points at src: a symlink, or on Windows without the right to make one,
+    a directory junction. False when neither can be made."""
+    try:
+        os.symlink(src, dst, target_is_directory=os.path.isdir(src))
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt" and os.path.isdir(src):
+        try:
+            import _winapi
+            _winapi.CreateJunction(src, dst)
+            return True
+        except (ImportError, OSError, AttributeError):
+            pass
+    return False
+
+
+@contextlib.contextmanager
+def isolated(run, cfg, listed=None, force=False, keep=(), label="isolate"):
+    """"gate_isolation": true. HEAD checked out into a throwaway worktree with the
+    project's git hooks off, the paths in "isolation_links" linked in from the
+    main tree (what the build reads and nobody writes: node_modules, a venv), and
+    for a task check the task's own files copied over it - exactly what the
+    task's commit will hold. A neighbour's half-written file is not there to break
+    the check, and a file the task leaves off its list is not there to save it.
+    The stages of the run go there (run.cwd); off, nothing happens. force: on
+    whatever the config says; keep: listed files that stay as HEAD has them."""
+    if not force and cfg.get("gate_isolation") is not True:
+        yield
+        return
+    rc, _ = git("rev-parse", "--verify", "-q", "HEAD")
+    if rc != 0:
+        run.note(label, "skipped - there is no commit to build a clean tree from yet")
+        yield
+        return
+    parent = tempfile.mkdtemp(prefix="factory-wt-")
+    tree = os.path.join(parent, "tree")
+    links = []
+    try:
+        rc, _ = git("-c", "core.hooksPath=/dev/null", "worktree", "add", "--detach", "--quiet", tree, "HEAD")
+        if rc != 0:
+            run.fail(label, "could not check HEAD out into a worktree")
+            yield
+            return
+        _, prefix = git("rev-parse", "--show-prefix")
+        work = os.path.join(tree, prefix.strip())
+        copied = 0
+        for p in listed or []:
+            if p in keep or os.path.isabs(p) or p == ".." or p.startswith(("../", ".factory/", ".git/")):
+                continue
+            src, dst = os.path.join(ROOT, p), os.path.join(work, p)
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True)
+            elif os.path.exists(src):
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+            elif os.path.isdir(dst):
+                shutil.rmtree(dst, ignore_errors=True)  # listed but gone: the task deleted it
+            elif os.path.lexists(dst):
+                os.remove(dst)
+            copied += 1
+        extra = os.path.join("gates", "extra.sh")
+        if os.path.isfile(os.path.join(ROOT, extra)) and not os.path.exists(os.path.join(work, extra)):
+            os.makedirs(os.path.join(work, "gates"), exist_ok=True)
+            shutil.copy2(os.path.join(ROOT, extra), os.path.join(work, extra))
+        for link in cfg.get("isolation_links") or []:
+            src, dst = os.path.join(ROOT, str(link)), os.path.join(work, str(link))
+            if not os.path.exists(src) or os.path.lexists(dst):
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            if _link(src, dst):
+                links.append(dst)
+            else:
+                run.note(label, "could not link %s into the clean tree" % link)
+        run.cwd = work
+        if label == "isolate":  # the marker's isolated= is about the check's own stages
+            run.isolated = True
+            run.note(label, "HEAD%s, in a clean worktree" % (" + %d listed file(s)" % copied if listed is not None else ""))
+        yield
+    finally:
+        run.cwd = ROOT
+        # The links go first, by themselves: removing the tree must never reach
+        # through one into the main tree.
+        for dst in links:
+            try:
+                if os.path.isdir(dst) and not os.path.islink(dst):
+                    os.rmdir(dst)  # a junction: rmdir drops the link, not what it points at
+                else:
+                    os.unlink(dst)
+            except OSError:
+                pass
+        git("worktree", "remove", "--force", tree)
+        shutil.rmtree(parent, ignore_errors=True)
+        git("worktree", "prune")
+
+
+def extra_stage(run, arg):
+    """gates/extra.sh, the project's own stages: the last stage of every check,
+    given the task id or --full. It is under gates/, so no task can change it."""
+    if not os.path.isfile(os.path.join(ROOT, "gates", "extra.sh")):
+        return None
+    rc, out = run.step("extra", "bash gates/extra.sh " + shlex.quote(arg))
+    if rc == 0:
+        run.ok("extra")
+    else:
+        run.fail("extra", "gates/extra.sh exit %d" % rc, excerpt(out), raw=out)
+    return rc == 0
+
+
+def gate_mode(cfg):
+    """full (the default): commands.test is required. staged (a greenfield board
+    before its toolchain exists): a stage without a command is skipped, at least
+    one stage has to run green, and min_tests holds once a test command is set."""
+    return "staged" if (cfg.get("gate_mode") or "full") == "staged" else "full"
+
+
+def tests_configured(commands, units):
+    return bool(commands.get("test")) or bool(units and any(u.get("test") for u in units))
+
+
+def changed_head_tests(listed, check):
+    """The test files HEAD has that this task changed and kept: the ones an
+    approved modifies_tests let it change."""
+    test_re, _ = census_regexes(check)
+    out = []
+    for p in listed:
+        if not test_re.search(p) or not os.path.isfile(os.path.join(ROOT, p)):
+            continue
+        rc, _ = git("cat-file", "-e", "HEAD:./" + p)
+        if rc == 0 and git("diff", "--quiet", "HEAD", "--", p)[0] == 1:
+            out.append(p)
+    return out
+
+
+def frozen_suite(run, ctx):
+    """A task that changed a test HEAD has (modifies_tests approved it): HEAD's
+    version of that test, run against the task's code in a clean worktree. The
+    test was the evidence the old behaviour was right; if the old test fails now,
+    the change of behaviour is a reviewer's call, not the builder's - a review
+    reason, never red."""
+    check, commands, units = ctx["check"], ctx["commands"], ctx["units"]
+    if check.get("frozen_suite", True) is False or not tests_configured(commands, units):
+        return
+    changed = changed_head_tests(ctx["listed"], check)
+    if not changed:
+        return
+    reached, _ = (reach(changed, units, check.get("ignore") or DEFAULT_IGNORE) if units is not None
+                  else (None, ""))
+    targets = ([("suite", commands["test"])] if reached is None or not any(u["test"] for u in reached)
+               else [(u["name"], u["test"]) for u in reached if u["test"]])
+    targets = [t for t in targets if t[1]]
+    if not targets:
+        return
+    failed = []
+    with isolated(run, ctx["cfg"], ctx["listed"], force=True, keep=set(changed), label="frozen"):
+        if run.cwd == ROOT:
+            run.note("frozen", "skipped - no clean tree to run HEAD's tests in")
+            return
+        for name, cmd in targets:
+            rc, _ = run.step("frozen %s" % name, cmd)
+            if rc != 0:
+                failed.append("%s exit %d" % (name, rc))
+    if failed:
+        why = ("HEAD's version of %s fails against this task's code (%s) - the task changed a test the old code "
+               "passed" % (", ".join(changed[:5]), ", ".join(failed)))
+        run.note("frozen", why)
+        ctx["review"].append("frozen suite: " + why)
+    else:
+        run.note("frozen", "HEAD's version of %s still passes against the new code" % ", ".join(changed[:5]))
+
+
 def run_stages(run, ctx):
-    """format, build, lint, arch, the reached tests and the acceptance command.
+    """format, then - in the clean tree when gate_isolation is on - build, lint,
+    arch, the reached tests, the acceptance command and gates/extra.sh.
     Returns (tests_ran, counted)."""
     cfg, check, commands = ctx["cfg"], ctx["check"], ctx["commands"]
     existing, listed, acc = ctx["existing"], ctx["listed"], ctx["acc"]
     units = ctx["units"]
-    tests_ran, counted, commands_run = 0, False, []
+    tests_ran, counted = 0, False
+    staged = gate_mode(cfg) == "staged"
     reached, why = (reach(listed, units, check.get("ignore") or DEFAULT_IGNORE) if units is not None
                     else (None, "no units declared"))
     paths = ["."] if reached is None else sorted({p for u in reached for p in u["paths"]}) or ["."]
@@ -1034,68 +1472,94 @@ def run_stages(run, ctx):
             changed = sum(1 for p in existing if read(os.path.join(ROOT, p)) != before[p])
             if ok and changed:
                 run.lines[-1] = "  %-8s PASS (%d file(s) reformatted)" % ("format", changed)
-        for stage in ("build", "lint", "arch"):
-            if run.failed:
-                break
-            cmd = check.get(stage) if stage in check else commands.get(stage)
-            if cmd and "{files}" in cmd and not existing:
-                run.note(stage, "skipped (no touched file left to give it)")
-            elif cmd:
-                run_stage(run, stage, cmd, files=existing, paths=paths)
-                commands_run.append(fill(cmd, files=existing, paths=paths))
-
+        with isolated(run, cfg, listed):
+            tests_ran, counted, _ = _task_stages(run, ctx, existing, listed, acc, units, reached, why, paths, staged)
         if not run.failed:
-            if reached is None and not commands.get("test"):
-                targets = []
-                if (cfg.get("gate_mode") or "full") == "full":
-                    run.fail("tests", "MISSING - gate_mode=full requires commands.test")
-            elif reached is None:
-                targets = [("suite", commands["test"])]
-                run.note("reach", why + " - the whole suite runs")
+            frozen_suite(run, ctx)
+    return tests_ran, counted
+
+
+def _task_stages(run, ctx, existing, listed, acc, units, reached, why, paths, staged):
+    """Everything after format, where the run's steps run (run.cwd). Returns
+    (tests_ran, counted, green stages)."""
+    cfg, check, commands = ctx["cfg"], ctx["check"], ctx["commands"]
+    tests_ran, counted, commands_run, green = 0, False, [], 0
+    for stage in ("build", "lint", "arch"):
+        if run.failed:
+            break
+        cmd = check.get(stage) if stage in check else commands.get(stage)
+        if cmd and "{files}" in cmd and not existing:
+            run.note(stage, "skipped (no touched file left to give it)")
+        elif cmd:
+            passed, _ = run_stage(run, stage, cmd, files=existing, paths=paths)
+            green += 1 if passed else 0
+            commands_run.append(fill(cmd, files=existing, paths=paths))
+
+    if not run.failed:
+        if not tests_configured(commands, units):
+            targets = []
+            if staged:
+                run.note("tests", "skipped (no test command yet, gate_mode=staged)")
             else:
-                targets = [(u["name"], u["test"]) for u in reached if u["test"]]
-                limit = int(check.get("max_units") or 10)
-                if len(targets) > limit and commands.get("test"):
-                    # One suite run beats many runs that each pay the runner's start-up.
-                    run.note("reach", "%s - %d units with tests, more than %d: the whole suite runs"
-                             % (why, len(targets), limit))
-                    targets = [("suite", commands["test"])]
-                else:
-                    run.note("reach", "%s: %s" % (why, ", ".join(u["name"] for u in reached) or "none"))
-            for name, cmd in targets:
-                if not cmd:
-                    continue
-                rc, out = run.step("test %s" % name, cmd)
-                commands_run.append(cmd)
-                n = count_tests(out, check)
+                run.fail("tests", "MISSING - gate_mode=full requires commands.test",
+                         "the developer sets commands.test in .factory/config.json")
+        elif reached is None and not commands.get("test"):
+            targets = []
+        elif reached is None:
+            targets = [("suite", commands["test"])]
+            run.note("reach", why + " - the whole suite runs")
+        else:
+            targets = [(u["name"], u["test"]) for u in reached if u["test"]]
+            limit = int(check.get("max_units") or 10)
+            if len(targets) > limit and commands.get("test"):
+                # One suite run beats many runs that each pay the runner's start-up.
+                run.note("reach", "%s - %d units with tests, more than %d: the whole suite runs"
+                         % (why, len(targets), limit))
+                targets = [("suite", commands["test"])]
+            else:
+                run.note("reach", "%s: %s" % (why, ", ".join(u["name"] for u in reached) or "none"))
+        for name, cmd in targets:
+            if not cmd:
+                continue
+            rc, out = run.step("test %s" % name, cmd)
+            commands_run.append(cmd)
+            n = count_tests(out, check)
+            if n is not None:
+                tests_ran += n
+                counted = True
+            if rc != 0:
+                run.fail("tests", "%s: exit %d" % (name, rc), excerpt(out), raw=out)
+                break
+        if not targets:
+            counted = True  # nothing the change reaches has tests: zero ran, and that is known
+        elif not run.failed:
+            green += 1
+            run.ok("tests", ("%d test(s)" % tests_ran if counted else "count not recognised")
+                   + " in %d target(s)" % len([t for t in targets if t[1]]))
+
+    if not run.failed and acc:
+        if re.search(r"verify\.sh|factory-check", acc):
+            run.note("accept", "skipped (it names the gate itself)")
+        elif acceptance_covered(acc, commands_run):
+            run.ok("accept", "already ran above")
+        else:
+            rc, out = run.step("accept", acc)
+            n = count_tests(out, check)
+            if rc == 0:
+                green += 1
                 if n is not None:
                     tests_ran += n
                     counted = True
-                if rc != 0:
-                    run.fail("tests", "%s: exit %d" % (name, rc), excerpt(out), raw=out)
-                    break
-            if not targets:
-                counted = True  # nothing the change reaches has tests: zero ran, and that is known
-            elif not run.failed:
-                run.ok("tests", ("%d test(s)" % tests_ran if counted else "count not recognised")
-                       + " in %d target(s)" % len([t for t in targets if t[1]]))
-
-        if not run.failed and acc:
-            if re.search(r"verify\.sh|factory-check", acc):
-                run.note("accept", "skipped (it names the gate itself)")
-            elif acceptance_covered(acc, commands_run):
-                run.ok("accept", "already ran above")
+                run.ok("accept", "%d test(s)" % n if n else "")
             else:
-                rc, out = run.step("accept", acc)
-                n = count_tests(out, check)
-                if rc == 0:
-                    if n is not None:
-                        tests_ran += n
-                        counted = True
-                    run.ok("accept", "%d test(s)" % n if n else "")
-                else:
-                    run.fail("accept", "exit %d" % rc, excerpt(out), raw=out)
-    return tests_ran, counted
+                run.fail("accept", "exit %d" % rc, excerpt(out), raw=out)
+    if not run.failed and extra_stage(run, ctx["task_id"]):
+        green += 1
+    if staged and not run.failed and not green:
+        run.fail("staged", "nothing ran: staged mode needs at least one green stage",
+                 "configure commands.build (or test, lint, arch) in .factory/config.json, or give the task an "
+                 "acceptance command that runs something")
+    return tests_ran, counted, green
 
 
 def check_task(task_id):
@@ -1131,7 +1595,7 @@ def check_task(task_id):
         elif key in EXEMPTIONS or key in DECLARED:
             fm[key] = ""
     listed = files_touched(text)
-    ctx = {"cfg": cfg, "check": check, "commands": commands, "units": units, "listed": listed,
+    ctx = {"cfg": cfg, "check": check, "commands": commands, "units": units, "listed": listed, "task_id": task_id,
            "existing": [p for p in listed if os.path.exists(os.path.join(ROOT, p))], "acc": fm.get("acceptance", "")}
     print("CHECK %s: %d file(s) touched" % (task_id, len(listed)))
     sys.stdout.flush()
@@ -1140,6 +1604,7 @@ def check_task(task_id):
     waits = 0
     while True:
         run = Run(task_id)
+        ctx["review"] = []
         # --- guards that cost nothing: always this task's own ----------------
         if tampered:
             run.fail("approval", "the task file changes what was approved: " + ", ".join(tampered),
@@ -1171,8 +1636,16 @@ def check_task(task_id):
             if added:
                 run.fail("census", "this task adds %d skip marker(s)" % added,
                          "skipping the failing test is not fixing it; remove the skip")
-        if check.get("modifies_tests_guard") and listed and not declared_modifies_tests(task_id, path):
-            changed = changed_assertions(listed, check)
+        test_globs = modifies_tests_globs(fm)
+        if listed:
+            how = [c for c in test_config_changes(listed) if not covers(test_globs, c.split(" ")[0])]
+            if how:
+                run.fail("census", "this task changes how the tests run: " + ", ".join(how),
+                         "what makes the suite green is not the task's to change. Put it back as it is in HEAD; if "
+                         "the task needs it, block it and say why - the developer approves it with modifies_tests "
+                         "in the task file")
+        if check.get("modifies_tests_guard") and listed:
+            changed = {p: n for p, n in changed_assertions(listed, check).items() if not covers(test_globs, p)}
             if changed:
                 run.fail("census", "this task changes existing assertions: " + ", ".join(
                              "%s (%d)" % (p, n) for p, n in sorted(changed.items())),
@@ -1200,6 +1673,21 @@ def check_task(task_id):
             run.fail("deps", "%s shadows a package: %s" % (p, why),
                      "give the module a name no package or standard-library module has, and import the real "
                      "package where the task needs it")
+        if listed and check.get("cheat_guard", True) is not False:
+            red, review = cheat_signatures(listed, check)
+            if red:
+                run.fail("cheat", "a cheat signature in the change: " + ", ".join(
+                             "%s:%d %s" % (p, no, name) for p, no, name, _, _ in red[:8]),
+                         "\n".join("  %s:%d %s - %s\n      %s" % (p, no, name, why, line)
+                                   for p, no, name, why, line in red[:8]) +
+                         "\nThese make a suite pass without the code working. Take it out. If it is right here (a "
+                         "command's own exit, a pytest plugin), do not work around it: block the task and say why - "
+                         "the developer allows it with check.cheat_allow or check.entry_points in .factory/config.json")
+            for p, no, name, why, line in review:
+                ctx["review"].append("cheat signature %s at %s:%d - %s" % (name, p, no, why))
+            if review:
+                run.note("cheat", "%d for a reviewer: %s" % (len(review), ", ".join(
+                    "%s:%d %s" % (p, no, name) for p, no, name, _, _ in review[:5])))
         limit = int(check.get("claude_md_max_lines", 200) or 0)
         for p, n in claude_md_over(listed, limit) if limit and listed else []:
             run.fail("claude_md", "%s is %d lines, the limit is %d" % (p, n, limit),
@@ -1219,7 +1707,7 @@ def check_task(task_id):
 
         tests_ran, counted = (0, False) if guarded else run_stages(run, ctx)
         min_tests = int(cfg.get("min_tests", 1) or 1)
-        if not run.failed and counted and tests_ran < min_tests:
+        if not run.failed and counted and tests_ran < min_tests and tests_configured(commands, units):
             if fm.get("untested_ok", "").lower() == "true":
                 run.note("tests", "no test exercised this change - waived by untested_ok")
             else:
@@ -1271,8 +1759,12 @@ def check_task(task_id):
     os.makedirs(os.path.join(F, "verified"), exist_ok=True)
     _, head = git("rev-parse", "--short", "HEAD")
     with open(marker, "w", encoding="utf-8") as fh:
-        fh.write("%s\n%sisolated=no\ncheck=fast\ncommit=%s\ntree=%s\n"
-                 % (now_iso(), "tests=%d\n" % tests_ran if counted else "", head.strip() or "unknown", tree_hash()))
+        # review=: what a reviewer has to see before this lands (factory-risk
+        # reads it). In the marker, which no agent may write.
+        fh.write("%s\n%sisolated=%s\ncheck=fast\ncommit=%s\ntree=%s\nfiles=%s\n%s"
+                 % (now_iso(), "tests=%d\n" % tests_ran if counted else "", "yes" if run.isolated else "no",
+                    head.strip() or "unknown", tree_hash(), files_fingerprint(listed),
+                    "".join("review=%s\n" % r.replace("\n", " ") for r in ctx["review"])))
     hist = os.path.join(F, "failures", task_id + ".log")
     if os.path.exists(hist):
         os.makedirs(os.path.join(F, "failures", "resolved"), exist_ok=True)
@@ -1280,6 +1772,10 @@ def check_task(task_id):
     np = os.path.join(F, "no-progress", task_id)
     if os.path.exists(np):
         os.remove(np)
+    if ctx["review"]:
+        print("CHECK RESULT: GREEN for %s (marker written) - and %d reason(s) for a reviewer: factory-risk %s "
+              "names them" % (task_id, len(ctx["review"]), task_id))
+        return 0
     print("CHECK RESULT: GREEN for %s (marker written)" % task_id)
     return 0
 
@@ -1293,10 +1789,11 @@ def check_full():
     cfg = load_config()
     check = cfg.get("check") or {}
     commands = cfg.get("commands") or {}
-    full_mode = (cfg.get("gate_mode") or "full") == "full"
+    full_mode = gate_mode(cfg) == "full"
     run = Run("full")
     tests_ran = None
-    with Lock("check"):
+    green = 0
+    with Lock("check"), isolated(run, cfg):
         for stage in ("build", "test", "arch", "lint"):
             cmd = commands.get(stage)
             if not cmd:
@@ -1307,6 +1804,7 @@ def check_full():
             if rc != 0:
                 run.fail(stage, "exit %d" % rc, excerpt(out))
                 continue
+            green += 1
             if stage != "test":
                 run.ok(stage)
                 continue
@@ -1319,6 +1817,12 @@ def check_full():
                          "a suite that runs nothing exits 0 and proves nothing")
             else:
                 run.ok("test", "%d test(s)" % tests_ran)
+        if extra_stage(run, "--full"):
+            green += 1
+        full_isolated = run.isolated
+        if not full_mode and not green and not run.failed:
+            run.fail("staged", "nothing ran: staged mode needs at least one green stage",
+                     "configure commands.build (or test, lint, arch) in .factory/config.json")
 
     # The run as a whole may not have lost tests either: HEAD now against HEAD
     # when the run was planned.
@@ -1373,8 +1877,9 @@ def check_full():
         print(line)
     verdict = "red" if run.failed else "green"
     with open(os.path.join(F, "full-check"), "w", encoding="utf-8") as fh:
-        fh.write("verdict=%s\nat=%s\ntests=%s\ntree=%s\nlog=%s\n"
-                 % (verdict, now_iso(), tests_ran if tests_ran is not None else "unknown", tree_hash(), run.log_rel))
+        fh.write("verdict=%s\nat=%s\ntests=%s\nisolated=%s\ntree=%s\nlog=%s\n"
+                 % (verdict, now_iso(), tests_ran if tests_ran is not None else "unknown",
+                    "yes" if full_isolated else "no", tree_hash(), run.log_rel))
     if run.failed:
         for name, text_ in run.failed:
             if text_:
@@ -1388,6 +1893,9 @@ def check_full():
 
 
 def main(argv):
+    if argv and argv[0] == "selfcert":
+        # For factory-lint: exit 0 when the acceptance command is self-certifying.
+        return 0 if self_certifying(" ".join(argv[1:])) else 1
     if not os.path.isfile(os.path.join(F, "active")):
         print("CHECK: %s has no .factory/active - not a factory project, or not its root." % ROOT)
         return 2
@@ -1411,6 +1919,21 @@ def main(argv):
         else:
             for u in reached:
                 print("%s %s" % (u["name"], u["path"]))
+        return 0
+    if argv[0] == "readonly":
+        # The test files and test infrastructure among these paths that HEAD has
+        # and no task in progress may change: one per line, exit 1 when any.
+        hits = readonly_tests(argv[1:])
+        for p in hits:
+            print(p)
+        return 1 if hits else 0
+    if argv[0] == "fingerprint" and len(argv) == 2:
+        # For factory-land: the task's listed files as they are now.
+        path, _ = task_file(argv[1])
+        if not path:
+            print("CHECK: no task file for %s under tasks/" % argv[1])
+            return 2
+        print(files_fingerprint(files_touched(read(path))))
         return 0
     if argv[0] == "count":
         # For gates/verify.sh: the number of tests a run reported, by check.count

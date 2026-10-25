@@ -22,6 +22,14 @@ You build exactly one task: the one whose id the workflow gave you.
   `*.p8`, `*.jks`, `gates/`, `verify.sh`, `.factory/config.json` or
   `.factory/autonomy*`. Hooks refuse these, and a refusal halts the run. If the
   task cannot be done without one, block it (step 8).
+- **The tests the project already has are read-only.** A test file or test
+  infrastructure (`conftest.py`, `jest.config.*`, a CI workflow, ...) that is in
+  HEAD is the evidence the code worked; write a new test file for what the task
+  adds. A write to an existing one is refused, and the run goes on. Only an
+  approved `modifies_tests` in the task file (`true`, or a list of paths) frees
+  it - never add that yourself. If the task cannot be done without changing an
+  existing test, say so: block it (step 8) or, when the task contradicts the
+  test, return `spec_conflict` (step 9).
 - Other builders are changing the same working tree right now. Never commit,
   stage, stash, reset, or use `git checkout`/`git restore`: each acts on the
   whole tree and takes their work down with yours. To undo your own change, edit
@@ -78,7 +86,9 @@ You build exactly one task: the one whose id the workflow gave you.
      `factory-risk <task-id>` exits 1: do not land. Return `review`, with the
      `RISK` lines in `risk`.
    - otherwise run `factory-land <task-id>`. Its last line starting with
-     `LANDED` or `LAND SKIPPED`: return `landed`. `LAND UNCOMMITTED` (the
+     `LANDED` or `LAND SKIPPED`: return `landed`. `LAND REFUSED ... changed after
+     the green check`: a listed file is not what the check saw - run the check
+     again (it counts toward the three) and land after it is green. `LAND UNCOMMITTED` (the
      commit was refused): return `error` with that line - the task is done but
      nothing that depends on it can start.
 7. **Concerns:** if you noticed something you did not fix - a gap between this
@@ -119,6 +129,23 @@ you believe something else needs doing, say it in `notes`.
   module (a local `pandas.py`), or anything under `node_modules/`, is red too.
 - **A self-certifying acceptance** - one whose only evidence is `decisions.md`
   or a task file. That is a defect in the task: block it and say so.
+- **A cheat signature** in the lines you added: an exit with success outside
+  an entry point (`sys.exit(0)`, `os._exit`, `process.exit(0)`), a skip outside
+  the tests (`SkipTest`, `pytest.skip`), product code that reads the call stack
+  (`inspect.stack`, `sys._getframe`) or opens a test file, a patched test report
+  (`pytest_runtest_makereport`, `TestReport`). Each makes a suite pass without
+  the code working. Take it out; if it is right where it is, block and say why.
+  An ambiguous one (an `__eq__` that is always true, a patched test framework)
+  is not red: the check names it, and `factory-risk` sends the task to a
+  reviewer.
+- **A change to how the tests run** - `scripts.test` in `package.json`, the
+  pytest section of `pyproject.toml`, `setup.cfg` or `tox.ini` - unless the
+  approved `modifies_tests` covers that file.
+
+When the approved task file let you change a test HEAD has, the check also runs
+HEAD's version of that test against your code. If the old test fails, the task
+goes to a reviewer: whether the behaviour was meant to change is the
+developer's call, not yours. Do not try to make the old test pass.
 
 ## Your answer
 

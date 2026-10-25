@@ -54,6 +54,16 @@ if [ ! -f "${F}/verified/${TASK_ID}" ]; then
   echo "LAND REFUSED for ${TASK_ID}: no green check. Run factory-check ${TASK_ID} and land only after it prints CHECK RESULT: GREEN."
   exit 1
 fi
+# The marker holds a digest of the task's files as the check saw them. A file
+# edited after the green check would be committed as checked: it is not.
+want="$(sed -n 's/^files=//p' "${F}/verified/${TASK_ID}" 2>/dev/null | tr -d '\r' | head -1)"
+if [ -n "${want}" ]; then
+  now="$(python3 "${HOOK_DIR}/factory-check.py" fingerprint "${TASK_ID}" 2>/dev/null | tr -d '\r')"
+  if [ "${now}" != "${want}" ]; then
+    echo "LAND REFUSED for ${TASK_ID}: its files changed after the green check (or its list did). Run factory-check ${TASK_ID} again and land only after it is green."
+    exit 1
+  fi
+fi
 
 lock="${F}/locks/land"
 mkdir -p "${F}/locks"

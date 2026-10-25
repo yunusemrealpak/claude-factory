@@ -3,19 +3,24 @@
 it; register.js holds the same algorithm in JavaScript, and both are held to one
 list of cases (tests/hardblock-cases.txt).
 
-Usage: factory-hardblock.py <rules file> <kind> < the root on one line, then the text
+Usage: factory-hardblock.py <rules file> <kind> [tests] < the root on one line, then the text
   kind: bash | powershell (the command) or path (one file path)
+  tests: only the read-only tests, not the rules (register.js asks this way)
   HB_LIFTED: the rule names the project's allowed groups lift, one per line.
+  HB_CWD: the directory the call runs in, when the caller knows it.
 
 Prints the rule's name on a hit. Exit 0 clean; 3 a hard hit (refuse the call and
 halt the run); 5 a soft hit (refuse this call only: a guess, not a ban broken);
-4 the rules could not be read. Anything else is a failure, and the caller
-refuses the call (fail closed).
+6 a write to a test HEAD has that no task in progress may change (refuse this
+call only; prints "head-tests <path>"); 4 the rules could not be read. Anything
+else is a failure, and the caller refuses the call (fail closed).
 """
+import os
 import re
+import shlex
 import sys
 
-HARD, SOFT = 3, 5
+HARD, SOFT, READONLY = 3, 5, 6
 
 # What writes, moves or removes a file. The short PowerShell and cmd aliases
 # count only where one of those shells runs: in bash they are words of prose
@@ -482,10 +487,132 @@ def judge(kind, text, root, bash, paths, lifted):
     raise ValueError("unknown kind: " + kind)
 
 
+# --- tests that are in HEAD -------------------------------------------------------
+# A test that HEAD has is the developer's evidence that the code works, and the
+# agent's easiest way to green is to change it. So an agent writes new tests,
+# never an existing one, unless the task's approved file says modifies_tests.
+# Which files those are, and which task may, is factory-check's to say
+# (readonly_tests); this part only finds the files a call writes.
+
+WRAPPERS = ("sudo", "env", "command", "exec", "nohup", "time", "builtin", "nice")
+ALL_ARGS = {"tee", "touch", "truncate", "rm", "unlink", "shred", "rmdir", "chmod", "chown", "mv", "sed", "perl",
+            "set-content", "add-content", "out-file", "new-item", "clear-content", "remove-item", "move-item",
+            "rename-item"}
+LAST_ARG = {"cp", "install", "ln", "rsync", "copy-item"}
+PS_ALL = {"sc", "ac", "ni", "ri", "del", "erase", "rd", "mi", "rni", "move", "ren"}
+PS_LAST = {"cpi", "copy"}
+REDIRECT = re.compile(r">>?\|?\s*[\"']?([^\s;&|<>()\"']+)")
+TOKEN = re.compile(r"[^\s;&|\"'<>()=,`]+")
+
+
+def native(root):
+    """The root as this Python reads it: HB_NATIVE_ROOT when the shell gave it
+    (cygpath's answer: Git Bash's /tmp is no path Windows knows), else /c/x and
+    /cygdrive/c/x as C:/x on Windows."""
+    p = os.environ.get("HB_NATIVE_ROOT") or root
+    if os.name != "nt":
+        return p
+    m = re.match(r"^/(?:cygdrive/)?([A-Za-z])(/.*)?$", p or "")
+    return (m.group(1) + ":" + (m.group(2) or "/")) if m else p
+
+
+def words_of(seg):
+    try:
+        return shlex.split(seg, posix=True)
+    except ValueError:
+        return seg.split()
+
+
+def write_targets(kind, text, root):
+    """The files a call writes, as the command names them: redirect targets, the
+    operands of what writes, moves or removes a file, and for inline code that
+    writes, every file it names. Each with the directory a "cd" in the same
+    command moved to."""
+    if kind == "path":
+        return [("", normalise(text, root))]
+    t = text.replace("\\\n", "")
+    vs = variants(t) if kind == "bash" else [t]
+    vs = [normalise(v, root).replace("\n", ";") for v in vs]
+    winsh = kind == "powershell" or any(WINSHELL.search(v) for v in vs)
+    out = []
+    for v in vs:
+        inline = (kind == "powershell" or INTERP.search(v)) and WRITEISH.search(v)
+        here = ""
+        for seg in re.split(r"\|\||&&|[;|&]", v):
+            for m in REDIRECT.finditer(seg):
+                out.append((here, m.group(1)))
+            ws = [w for w in words_of(seg) if w]
+            while ws and (ws[0].lower() in WRAPPERS or re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", ws[0])):
+                ws = ws[1:]
+            if not ws:
+                continue
+            verb = ws[0].replace("\\", "/").rsplit("/", 1)[-1].lower()
+            args = [w for w in ws[1:] if not w.startswith("-") and not re.match(r"^[0-9]*>", w)]
+            if verb in ("cd", "pushd", "set-location", "sl", "chdir") and args:
+                here = args[0] if not here or args[0].startswith("/") else here + "/" + args[0]
+                continue
+            if verb in ("sed", "perl") and not any(re.match(r"^(-[A-Za-z]*i|--in-place)", w) for w in ws[1:]):
+                continue
+            if verb == "dd":
+                out += [(here, w[3:]) for w in ws[1:] if w.startswith("of=")]
+            elif verb in ALL_ARGS or (winsh and verb in PS_ALL):
+                out += [(here, a) for a in args]
+            elif (verb in LAST_ARG or (winsh and verb in PS_LAST)) and args:
+                out.append((here, args[-1]))
+        if inline:
+            out += [("", w) for w in TOKEN.findall(v)]
+    return out
+
+
+def resolve(here, target, cwd):
+    """target as a path relative to the root, or "" when it is outside it."""
+    target = target.strip("\"'")
+    if not target or target.startswith("/") or re.match(r"^[A-Za-z]:", target):
+        return ""
+    base = cwd
+    if here:
+        base = here if here.startswith("/") else (base + "/" + here if base else here)
+        if base.startswith("/"):
+            return ""
+    import posixpath
+    p = posixpath.normpath((base + "/" if base else "") + target)
+    return "" if p == ".." or p.startswith("../") else p
+
+
+def load_check(root):
+    """factory-check.py as a module, run from the project root."""
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(native(root))
+    sys.dont_write_bytecode = True  # no __pycache__ in the plugin's own directory
+    spec = importlib.util.spec_from_file_location("factory_check", os.path.join(here, "factory-check.py"))
+    mod = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, here)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def head_tests(kind, text, root, cwd=""):
+    """The first test HEAD has that this call writes and no task in progress
+    may change, or None."""
+    rel = ""
+    if cwd and kind != "path":  # a tool's file path is absolute; a command's are the shell's
+        # Under Git Bash the variable arrives rewritten into the Windows spelling.
+        for r in (root, native(root)):
+            c = normalise(cwd.replace("\\", "/").rstrip("/") + "/", r).rstrip("/")
+            if not (c.startswith("/") or re.match(r"^[A-Za-z]:", c)):
+                rel = c
+                break
+    paths = [p for p in (resolve(h, t, rel) for h, t in write_targets(kind, text, root)) if p]
+    if not paths or not os.path.isdir(native(root)):
+        return None
+    hits = load_check(root).readonly_tests(paths)
+    return hits[0] if hits else None
+
+
 def main(argv):
-    import os
-    if len(argv) != 3:
-        sys.stderr.write("usage: factory-hardblock.py <rules> <kind> < root line, then the text\n")
+    if len(argv) not in (3, 4):
+        sys.stderr.write("usage: factory-hardblock.py <rules> <kind> [tests] < root line, then the text\n")
         return 2
     try:
         bash, paths = load(argv[1])
@@ -496,9 +623,20 @@ def main(argv):
     kind = argv[2]
     if kind == "path":
         text = text.rstrip("\r\n")
+    root = root.rstrip("\r")
     lifted = {x.strip() for x in os.environ.get("HB_LIFTED", "").splitlines() if x.strip()}
-    hit = judge(kind, text, root.rstrip("\r"), bash, paths, lifted)
+    hit = None if len(argv) == 4 else judge(kind, text, root, bash, paths, lifted)
     if not hit:
+        # The rules fail closed; this guard does not. A crash here would read as
+        # a hard hit and halt the run over what is at most one refused edit.
+        try:
+            test = head_tests(kind, text, root, os.environ.get("HB_CWD", ""))
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write("head-tests: %s\n" % e)
+            test = None
+        if test:
+            sys.stdout.buffer.write(("head-tests %s\n" % test).encode("utf-8"))
+            return READONLY
         return 0
     sys.stdout.buffer.write((hit[0] + "\n").encode("utf-8"))
     return hit[1]

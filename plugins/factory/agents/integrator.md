@@ -44,7 +44,10 @@ everything that landed since, still pass the gate?
      first run, or the tree changed since that green.
    The fingerprint covers the code only. A task file, `decisions.md` or anything
    under `.factory/` changing is not the tree changing.
-2. Run the full gate: `bash gates/verify.sh <task-id>`. Quote its output.
+2. Run the full gate: `bash gates/verify.sh <task-id>` (the shim that runs
+   `factory-check`). Quote its output. A last line of `CHECK RESULT: WAITING`
+   is not red: the failure is in another task's unfinished work. Leave the task
+   where it is and tell the lead it is waiting.
 3. If it is red: append the failing output to the task file, increment
    `retries` in its frontmatter, `rm -f .factory/verified/<task-id>`, move the
    file back to `tasks/backlog`, and tell the lead. Stop here.
