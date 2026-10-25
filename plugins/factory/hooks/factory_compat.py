@@ -10,6 +10,7 @@ argv() runs it through bash, as Git Bash would.
 """
 import os
 import posixpath
+import re
 import shutil
 import sys
 
@@ -30,7 +31,14 @@ def rel(path, root):
 def _spellings(root):
     """The ways a tool may print this root: C:\\p, C:/p, /c/p (drive in either case)."""
     r = str(root).replace("\\", "/").rstrip("/")
+    r = r[:1] + re.sub(r"/{2,}", "/", r[1:])  # a/b//c is a/b/c (a leading // stays: UNC)
     out = {r}
+    # macOS: /var, /tmp and /etc are links into /private; a tool may print either.
+    p = re.match(r"^/private(/(?:var|tmp|etc)(?:/.*)?)$", r)
+    if p:
+        out.add(p.group(1))
+    elif re.match(r"^/(?:var|tmp|etc)(?:/|$)", r):
+        out.add("/private" + r)
     if len(r) >= 2 and r[1] == ":":
         drive, rest = r[0], r[2:]
         for d in (drive.lower(), drive.upper()):
@@ -42,6 +50,7 @@ def _spellings(root):
 def strip_root(tok, roots):
     """tok relative to the first root it starts with (any spelling), else None."""
     t = str(tok).replace("\\", "/")
+    t = t[:1] + re.sub(r"/{2,}", "/", t[1:])
     for root in roots:
         for r in _spellings(root):
             if t.startswith(r + "/"):

@@ -75,12 +75,9 @@ ev() { printf '%s\n' "${EV}" | grep -v '^$' | jq -c "$1" 2>/dev/null; }
 # An agent that died with its session never reports a stop. Two things say a
 # start is finished even without one: a sweep line written after it (a session
 # started, a run was claimed, a run ended - nothing from before is alive), and
-# plain age, as a backstop for a machine that was shut down mid-run.
-last_sweep=0
-if [ -f "${LOG}" ]; then
-  last_sweep="$(grep '"kind":"sweep"' "${LOG}" 2>/dev/null | tail -1 | jq -r '.epoch // 0' 2>/dev/null)"
-  case "${last_sweep}" in ''|*[!0-9]*) last_sweep=0 ;; esac
-fi
+# plain age, as a backstop for a machine that was shut down mid-run. "After" is
+# the line's place in the log, which only grows - not its second, which a start
+# in the sweep's own second would share.
 stale_after="$(jq -r '.agent_stale_after_min // 45' "${F}/config.json" 2>/dev/null)"
 case "${stale_after}" in ''|*[!0-9]*) stale_after=45 ;; esac
 
@@ -89,12 +86,12 @@ agent_lines=""
 if [ -n "${EV}" ]; then
   # An agent is running when its start has no stop. Ids are unique per dispatch.
   agent_lines="$(printf '%s\n' "${EV}" | grep -v '^$' | jq -r '
-      select(.kind=="agent_start" or .kind=="agent_stop")
+      select(.kind=="agent_start" or .kind=="agent_stop" or .kind=="sweep")
       | "\(.kind) \(.agent_id // "?") \(.agent // "agent") \(.epoch)"' 2>/dev/null \
-    | awk -v sweep="${last_sweep}" -v now="${NOW}" -v maxage="$(( stale_after * 60 ))" '
+    | awk -v now="${NOW}" -v maxage="$(( stale_after * 60 ))" '
+           $1=="sweep" { for (id in start) delete start[id]; next }
            { if ($1=="agent_start") { start[$2]=$4; type[$2]=$3 } else { delete start[$2] } }
            END { for (id in start) {
-                   if (start[id] + 0 < sweep + 0) continue
                    if (now - start[id] > maxage) continue
                    printf "%s %s %s\n", id, type[id], start[id]
                  } }')"

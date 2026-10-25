@@ -897,10 +897,18 @@ async function loadRules($) {
 // The ways Windows and its shells write one root: C:\p, C:/p, /c/p,
 // /cygdrive/c/p. Matched without letter case.
 function spellings(dir) {
-  const r = String(dir || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  let r = String(dir || '').replace(/\\/g, '/').replace(/\/+$/, '')
+  r = r.slice(0, 1) + r.slice(1).replace(/\/{2,}/g, '/') // a/b//c is a/b/c (a leading // stays: UNC)
   if (!r) return []
   const m = r.match(/^([A-Za-z]):(\/.*)?$/) || r.match(/^\/cygdrive\/([A-Za-z])(\/.*)?$/) || r.match(/^\/([A-Za-z])(\/.*)?$/)
-  if (!m) return [r]
+  if (!m) {
+    // macOS: /var, /tmp and /etc are links into /private. The longer spelling
+    // first, as in factory-hardblock.py.
+    const p = r.match(/^\/private(\/(?:var|tmp|etc)(?:\/.*)?)$/)
+    if (p) return [r, p[1]]
+    if (/^\/(?:var|tmp|etc)(?:\/|$)/.test(r)) return ['/private' + r, r]
+    return [r]
+  }
   const rest = m[2] || ''
   return [r, m[1] + ':' + rest, '/' + m[1] + rest, '/cygdrive/' + m[1] + rest]
 }

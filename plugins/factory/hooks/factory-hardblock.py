@@ -150,11 +150,21 @@ def spellings(root):
     """The ways Windows and its shells write one root: C:\\p, C:/p, /c/p,
     /cygdrive/c/p."""
     r = str(root or "").replace("\\", "/").rstrip("/")
+    r = r[:1] + re.sub(r"/{2,}", "/", r[1:])  # a/b//c is a/b/c (a leading // stays: UNC)
     if not r:
         return []
     m = re.match(r"^([A-Za-z]):(/.*)?$", r) or re.match(r"^/cygdrive/([A-Za-z])(/.*)?$", r) or \
         re.match(r"^/([A-Za-z])(/.*)?$", r)
     if not m:
+        # macOS: /var, /tmp and /etc are links into /private, and a tool may
+        # print either. The longer spelling first: the root is cut out of the
+        # text wherever it appears, and /var/x inside /private/var/x would leave
+        # /private behind.
+        p = re.match(r"^/private(/(?:var|tmp|etc)(?:/.*)?)$", r)
+        if p:
+            return [r, p.group(1)]
+        if re.match(r"^/(?:var|tmp|etc)(?:/|$)", r):
+            return ["/private" + r, r]
         return [r]
     rest = m.group(2) or ""
     return [r, m.group(1) + ":" + rest, "/" + m.group(1) + rest, "/cygdrive/" + m.group(1) + rest]
@@ -643,4 +653,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv))

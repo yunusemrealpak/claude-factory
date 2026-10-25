@@ -90,7 +90,11 @@ tasks_of() {  # <change-id>: one "<id> <column>" line per task, sorted by id
 # the verdict says nothing about it, so the signature has to match for the
 # verdict to count.
 tasks_sig() {  # <change-id>
-  tasks_of "$1" | awk '{print $1}' | sort | shasum | awk '{print $1}'
+  # SHA-1 of the sorted ids, the digest shasum printed - from python3, which the
+  # factory needs anyway: Git for Windows may have no shasum, and an empty
+  # signature let an old verdict cover tasks added after it.
+  tasks_of "$1" | awk '{print $1}' | sort \
+    | python3 -c 'import hashlib, sys; print(hashlib.sha1(sys.stdin.buffer.read()).hexdigest())'
 }
 
 change_dir() {  # <change-id> -> its directory, or nothing

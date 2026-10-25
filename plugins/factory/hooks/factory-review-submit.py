@@ -70,12 +70,12 @@ def now_iso():
 
 
 def git(*args):
-    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, errors="replace")
+    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, r.stdout
 
 
 def sh(script, *args):
-    r = subprocess.run([bash(), os.path.join(HOOK_DIR, script)] + list(args), capture_output=True, text=True,
+    r = subprocess.run([bash(), os.path.join(HOOK_DIR, script)] + list(args), capture_output=True, text=True, encoding="utf-8",
                        cwd=ROOT, errors="replace", env=dict(os.environ, FACTORY_ROOT=ROOT))
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
 
@@ -306,4 +306,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

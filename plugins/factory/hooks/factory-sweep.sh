@@ -37,13 +37,14 @@ open_agents=0
 if [ -f "${LOG}" ]; then
   # Starts already covered by an earlier sweep are not counted again: they were
   # written off then, and counting them would make every sweep look eventful.
-  last_sweep="$(grep '"kind":"sweep"' "${LOG}" 2>/dev/null | tail -1 | jq -r '.epoch // 0' 2>/dev/null)"
-  case "${last_sweep}" in ''|*[!0-9]*) last_sweep=0 ;; esac
-  open_agents="$(grep -E '"kind":"agent_(start|stop)"' "${LOG}" 2>/dev/null \
-    | jq -r '"\(.kind) \(.agent_id // "?") \(.epoch // 0)"' 2>/dev/null \
-    | awk -v sweep="${last_sweep}" '
-           { if ($1=="agent_start") open[$2]=$3; else delete open[$2] }
-           END { n=0; for (i in open) if (open[i] + 0 > sweep + 0) n++; print n }')"
+  # The log only grows, so "before the sweep" is "above its line" - never a
+  # comparison of seconds, which a start in the sweep's own second would fail.
+  open_agents="$(grep -E '"kind":"(agent_start|agent_stop|sweep)"' "${LOG}" 2>/dev/null \
+    | jq -r '"\(.kind) \(.agent_id // "?")"' 2>/dev/null \
+    | awk '
+           $1=="sweep" { for (i in open) delete open[i]; next }
+           { if ($1=="agent_start") open[$2]=1; else delete open[$2] }
+           END { n=0; for (i in open) n++; print n }')"
   case "${open_agents}" in ''|*[!0-9]*) open_agents=0 ;; esac
 fi
 

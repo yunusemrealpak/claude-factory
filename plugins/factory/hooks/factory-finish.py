@@ -88,7 +88,7 @@ def section(text, title):
 
 
 def run(cmd):
-    r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, errors="replace")
+    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=ROOT, errors="replace")
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -479,7 +479,7 @@ def retro_state():
     setting under which the workflow runs the retro agent unasked."""
     try:
         r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-retro-apply.py"), "due"],
-                           capture_output=True, text=True, cwd=ROOT, errors="replace")
+                           capture_output=True, text=True, encoding="utf-8", cwd=ROOT, errors="replace")
         due = r.returncode == 0
     except OSError:
         due = False
@@ -698,4 +698,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

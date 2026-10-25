@@ -77,7 +77,7 @@ def run(cmd, check_env=None, timeout=None, stdin=None):
     if check_env:
         env.update(check_env)
     try:
-        r = subprocess.run(argv(cmd), capture_output=True, text=True, cwd=ROOT, env=env, timeout=timeout, input=stdin)
+        r = subprocess.run(argv(cmd), capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, env=env, timeout=timeout, input=stdin)
         return r.returncode, r.stdout, r.stderr
     except FileNotFoundError as e:
         return 127, "", str(e)
@@ -179,12 +179,12 @@ def take_lock(cid):
     os.makedirs(P, exist_ok=True)
     lock = os.path.join(P, cid + ".lock")
     try:
-        other = int(open(lock).read().strip() or 0)
+        other = int(open(lock, encoding="utf-8").read().strip() or 0)
     except (OSError, ValueError):
         other = 0
     if other and other != os.getpid() and pid_alive(other):
         return None
-    with open(lock, "w") as fh:
+    with open(lock, "w", encoding="utf-8") as fh:
         fh.write(str(os.getpid()))
     return lock
 
@@ -869,7 +869,7 @@ def main(argv):
         return 0
     if argv[0] == "--ack-audit" and len(argv) > 1:
         os.makedirs(P, exist_ok=True)
-        open(os.path.join(P, argv[1] + ".ack"), "w").write(now_iso())
+        open(os.path.join(P, argv[1] + ".ack"), "w", encoding="utf-8").write(now_iso())
         print("ACKED %s: the audit's high findings no longer hold the merge" % argv[1])
         return 0
     if argv[0] == "--resume-all":
@@ -892,4 +892,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

@@ -67,9 +67,9 @@ def task_paths(tid, text):
         for m in re.finditer(r"(?<![\w/.-])((?:[\w.-]+/)+[\w.*-]+|[\w-]+\.[a-zA-Z0-9]{1,6})(?![\w/])", section(text, sec)):
             paths.add(m.group(1).lstrip("./"))
     r = subprocess.run(["git", "log", "--format=%H", "--grep", "^Factory-Task: %s$" % tid, "-n", "5"], cwd=ROOT,
-                       capture_output=True, text=True, errors="replace")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     for sha in (r.stdout or "").split():
-        s = subprocess.run(["git", "show", "--name-only", "--format=", sha], cwd=ROOT, capture_output=True, text=True,
+        s = subprocess.run(["git", "show", "--name-only", "--format=", sha], cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
                            errors="replace")
         paths.update(p.strip() for p in (s.stdout or "").splitlines() if p.strip())
     return paths
@@ -120,4 +120,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

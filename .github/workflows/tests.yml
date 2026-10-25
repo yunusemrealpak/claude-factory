@@ -60,8 +60,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        # The workflow scheduling tests run fast.js under node where there is
-        # no JavaScriptCore.
+        # The workflow scheduling tests (loop-cases.mjs) run under node.
         with:
           node-version: 22
       - name: python3 on Windows
@@ -77,7 +76,16 @@ jobs:
         run: |
           bash --version | head -1; jq --version; python3 --version; node --version; git --version
       - name: Factory self-test
+        env:
+          FACTORY_TEST_LOGDIR: ${{ runner.temp }}/suite-logs
         run: |
           git config --global user.email ci@example.invalid
           git config --global user.name ci
           bash plugins/factory/tests/run-all.sh
+      - name: Keep each suite's whole output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-logs-${{ matrix.os }}
+          path: ${{ runner.temp }}/suite-logs
+          retention-days: 7

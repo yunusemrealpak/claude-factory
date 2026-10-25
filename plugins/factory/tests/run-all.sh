@@ -56,7 +56,11 @@ for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
   echo "--- suite ${n} ---"
   out="$(bash "$HERE/suite${n}.sh" 2>&1)"
   rc=$?
-  printf '%s\n' "$out" | grep -E '^FAIL' 
+  # Each failure with what the check printed under it (up to 20 lines).
+  printf '%s\n' "$out" | awk '/^FAIL /{show=1; k=0; print; next} /^(PASS |passed=)/{show=0} show && k<20 {k++; print}'
+  if [ -n "${FACTORY_TEST_LOGDIR:-}" ]; then
+    mkdir -p "$FACTORY_TEST_LOGDIR" && printf '%s\n' "$out" > "$FACTORY_TEST_LOGDIR/suite${n}.log"
+  fi
   line="$(printf '%s\n' "$out" | grep -E '^passed=' | tail -1)"
   p="$(printf '%s' "$line" | sed -n 's/.*passed=\([0-9]*\).*/\1/p')"
   f="$(printf '%s' "$line" | sed -n 's/.*failed=\([0-9]*\).*/\1/p')"

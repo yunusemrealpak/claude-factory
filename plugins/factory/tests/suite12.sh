@@ -70,7 +70,9 @@ Change the app.
 - package.json
 - tox.ini
 EOF
-config() { jq -n --arg m "${1:-full}" --argjson c "${2:-}" --argjson x "${3:-{\}}" \
+# Not "${3:-{\}}": bash 3.2 (macOS) keeps the backslash, and jq gets {\}.
+config() { local x="${3:-}"; [ -n "$x" ] || x='{}'
+  jq -n --arg m "${1:-full}" --argjson c "${2:-}" --argjson x "$x" \
   '{gate_mode:$m, min_tests:1, commands:$c} + $x' > .factory/config.json; }
 CMDS='{"build":"grep -q ok src/app.txt && ! grep -q broken src/other.txt","test":"echo 3 passed","lint":"true"}'
 config full "$CMDS"

@@ -134,7 +134,7 @@ def sample_size():
 
 
 def sh(cmd, **kw):
-    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, errors="replace", **kw)
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", **kw)
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
@@ -784,4 +784,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

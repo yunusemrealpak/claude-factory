@@ -77,7 +77,7 @@ def native(p):
     try:
         # On stdin: an MSYS program parses its command line like a shell and
         # would take an apostrophe in the path for a quote.
-        r = subprocess.run(["cygpath", "-w", "-f", "-"], input=p + "\n", capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["cygpath", "-w", "-f", "-"], input=p + "\n", capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -92,7 +92,7 @@ TERMINAL = ("done", "pr_only", "reverted", "abandoned")
 
 
 def sh(cmd, cwd=None):
-    r = subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True, errors="replace")
+    r = subprocess.run(cmd, cwd=cwd or ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
 
 
@@ -124,7 +124,7 @@ def decide():
         return False, "STOP is set", None
     env = dict(os.environ, FACTORY_ROOT=ROOT)
     r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")], cwd=ROOT, env=env,
-                       capture_output=True, text=True, errors="replace")
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
     level = (r.stdout or "").strip().splitlines()[-1:] or ["local"]
     if level[0] != "merge":
         return False, "autonomy level is %s, not merge" % level[0], None
@@ -337,4 +337,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

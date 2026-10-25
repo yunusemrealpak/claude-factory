@@ -484,14 +484,14 @@ def task(tid):
 def plain(main, tid, args):
     """factory-settle in the project tree, as if there were no checkout."""
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-settle.py"), tid] + list(args), cwd=main,
-                       capture_output=True, text=True, errors="replace",
+                       capture_output=True, text=True, encoding="utf-8", errors="replace",
                        env=dict(os.environ, FACTORY_WORKTREE_HANDOFF="1"))
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).rstrip()
 
 
 def run_py(cwd, script, *args):
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, script)] + list(args), cwd=cwd, capture_output=True,
-                       text=True, errors="replace")
+                       text=True, encoding="utf-8", errors="replace")
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).rstrip()
 
 
@@ -523,7 +523,7 @@ def sync(main, proj, tid):
 
 def hardblock(main, path):
     r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-hardblock.sh"), "check", fwd(main), "path"],
-                       input=path, capture_output=True, text=True, errors="replace")
+                       input=path, capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, (r.stdout or "").strip()
 
 
@@ -746,4 +746,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

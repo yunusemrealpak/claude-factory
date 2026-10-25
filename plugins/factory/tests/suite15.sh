@@ -105,7 +105,9 @@ out="$(FACTORY_ROOT="$P" FACTORY_CLAUDE="$FC/claude" python3 "$H/factory-next.py
 W=.factory/schedule/next.ps1
 check "the wrapper is written under .factory/schedule/" '[ $rc -eq 0 ] && [ -f "$W" ] && printf "%s" "$out" | grep -q "^SCHTASKS WROTE .factory/schedule/next.ps1"' "$out"
 check "every placeholder is filled" '! grep -q "__[A-Z]*__" "$W"' "$(grep -n "__" "$W")"
-check "with this machine's paths and the timeout asked for" 'grep -q "^\$TimeoutMin = 45" "$W" && grep -q "^\$Claude = .*s15-fakeclaude.claude.\$" "$W" && grep -q "^\$Script = .*factory-next\.py.\$" "$W" && grep -q "^\$Root = .*s15-night run.\$" "$W"' "$(grep -n "^\\$" "$W")"
+# The wrapper has Windows line ends; grep outside Git Bash keeps the \r before $.
+WL="$WORK/s15-next.lf"; tr -d '\r' < "$W" > "$WL"
+check "with this machine's paths and the timeout asked for" 'grep -q "^\$TimeoutMin = 45" "$WL" && grep -q "^\$Claude = .*s15-fakeclaude.claude.\$" "$WL" && grep -q "^\$Script = .*factory-next\.py.\$" "$WL" && grep -q "^\$Root = .*s15-night run.\$" "$WL"' "$(grep -n "^\\$" "$WL")"
 check "the register line is printed, at the hour asked for" 'printf "%s" "$out" | grep -qF "schtasks /Create /TN \"Factory\\next-s15-night-run\" /SC DAILY /ST 05:00 /TR \"powershell.exe -NoProfile -ExecutionPolicy Bypass -File" && printf "%s" "$out" | grep -qF "next.ps1\\\"\" /F"' "$out"
 check "and the line that removes it" 'printf "%s" "$out" | grep -qF "schtasks /Delete /TN \"Factory\\next-s15-night-run\" /F"' "$out"
 check "the wrapper honours STOP, takes a lock and kills the tree on timeout" 'grep -qF ".factory\\STOP" "$W" && grep -qF "next-schtasks.lock" "$W" && grep -qF "taskkill.exe /T /F" "$W"' ""
