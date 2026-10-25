@@ -54,7 +54,7 @@ const RESULT = {
   required: ['id', 'status', 'summary', 'concerns'],
   properties: {
     id: { type: 'string' },
-    status: { type: 'string', enum: ['landed', 'review', 'waiting', 'red', 'no_progress', 'blocked', 'halted', 'error'] },
+    status: { type: 'string', enum: ['landed', 'review', 'waiting', 'red', 'no_progress', 'blocked', 'halted', 'error', 'spec_conflict', 'refused'] },
     summary: { type: 'string' },
     concerns: { type: 'array', items: { type: 'string' } },
     files: { type: 'array', items: { type: 'string' } },
@@ -203,12 +203,21 @@ async function recheck(t, r) {
 async function land(t, r, how) {
   const l = await run1(`From the project root run exactly: factory-land ${t.id}\nReturn ok=true if its last line starts with LANDED or LAND SKIPPED, and that line.`, t.id + ' land')
   if (l && l.ok) progressed()
+  if (l && /^LAND UNCOMMITTED/.test(l.line || '')) return uncommitted(r, l.line)
   return l && l.ok
     ? Object.assign({}, r, { status: 'landed', summary: how + r.summary })
     : Object.assign({}, r, { status: 'error', summary: 'land failed: ' + (l ? l.line : 'no answer') })
 }
 
+// The task is done and green but its commit was refused (a commit-msg or
+// pre-commit hook): another builder would change nothing, and nothing that
+// depends on it can start.
+function uncommitted(r, line) {
+  return Object.assign({}, r, { status: 'blocked', summary: 'done, but its commit was refused - what depends on it cannot start: ' + line })
+}
+
 async function settle(t, r) {
+  if (r && r.status === 'error' && /LAND UNCOMMITTED/.test(r.summary || '')) return uncommitted(r, r.summary)
   if (r && r.status === 'waiting') {
     r = await recheck(t, r)
     if (r.status === 'green') return land(t, r, 'landed after waiting for work in flight: ')
@@ -249,6 +258,20 @@ async function block(t, reason) {
   return { id: t.id, status: 'blocked', summary: reason }
 }
 
+// A task whose spec contradicts itself, or that factory-start refused, ends
+// here: another attempt would meet the same task file. A conflict becomes a
+// question for the developer.
+async function conflict(t, r) {
+  const q = (r.summary || 'the task contradicts itself').slice(0, 300)
+  await run1(
+    `From the project root run exactly: factory-block ${t.id} ${shq('spec conflict: ' + q)} && factory-ask ask ${t.id} ${shq(q)}
+` +
+      'Return ok=true if the output has a line starting with BLOCKED and one starting with ASKED, and the last line.',
+    t.id + ' ask',
+  )
+  return { id: t.id, status: 'blocked', summary: 'spec conflict, asked: ' + q }
+}
+
 async function build(t) {
   if (halted) return { id: t.id, status: 'halted', summary: halted }
   building++
@@ -279,6 +302,11 @@ async function buildInner(t) {
   if (!r || FAILED.includes(r.status)) {
     return block(t, r ? `${r.status} after ${ATTEMPTS} attempt(s): ${r.summary}` : `the builder failed ${ATTEMPTS} time(s)`)
   }
+  if (r.status === 'spec_conflict') return conflict(t, r)
+  // An earlier attempt landed and then returned nothing: the task is done,
+  // and factory-land says whether its commit is there.
+  if (r.status === 'refused' && /it is in done\//.test(r.summary || '')) return land(t, r, 'landed by an earlier attempt: ')
+  if (r.status === 'refused') return block(t, 'refused at start: ' + r.summary)
   if (r.status !== 'review') return r
 
   if (!t.review && RISK_REVIEW === 'after') {
@@ -298,6 +326,7 @@ async function buildInner(t) {
       halted = halted || r.summary || '.factory/STOP is set'
       return r
     }
+    if (r && r.status === 'spec_conflict') return conflict(t, r)
     if (!r || r.status !== 'review') return r && r.status === 'blocked' ? r : block(t, 'could not address the review findings')
   }
 }

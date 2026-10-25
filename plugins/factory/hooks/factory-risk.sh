@@ -20,6 +20,11 @@
 # depth. So "*/migrations/*" catches db/Migrations/001.sql, "*.sql" every SQL
 # file, and "src/Auth/*" the same directory wherever the repo nests it.
 #
+# Dependency manifests and lockfiles are always risk paths, whatever the
+# config says: a new package is code nobody on the project wrote or reviewed,
+# and a green test suite says nothing about where it came from. "risk_builtin":
+# false in the config turns that list off.
+#
 # A file marked linguist-generated in .gitattributes, or matching a glob in
 # "risk_exclude", is never a reason for review.
 #
@@ -42,10 +47,37 @@ if [ -z "${TASK_FILE}" ]; then
 fi
 
 patterns="$(jq -r '.risk_paths // [] | .[]' "${ROOT}/.factory/config.json" 2>/dev/null)"
-if [ -z "${patterns}" ]; then
+builtin=1
+[ "$(jq -r '.risk_builtin' "${ROOT}/.factory/config.json" 2>/dev/null)" = "false" ] && builtin=0
+if [ -z "${patterns}" ] && [ "${builtin}" = 0 ]; then
   echo "RISK none for ${TASK_ID}: .factory/config.json has no risk_paths, so nothing is checked."
   exit 0
 fi
+# Matched against the file name alone, at any depth.
+MANIFESTS='package.json package-lock.json npm-shrinkwrap.json yarn.lock pnpm-lock.yaml pnpm-workspace.yaml bun.lock bun.lockb deno.json deno.lock
+pubspec.yaml pubspec.lock
+requirements*.txt constraints*.txt Pipfile Pipfile.lock poetry.lock uv.lock pdm.lock pyproject.toml setup.py setup.cfg
+go.mod go.sum go.work
+Cargo.toml Cargo.lock
+*.csproj *.fsproj *.vbproj packages.config packages.lock.json Directory.Packages.props Directory.Build.props global.json
+Gemfile Gemfile.lock *.gemspec
+build.gradle build.gradle.kts settings.gradle settings.gradle.kts libs.versions.toml gradle-wrapper.properties pom.xml
+composer.json composer.lock
+Package.swift Package.resolved Podfile Podfile.lock Cartfile Cartfile.resolved
+mix.exs mix.lock rebar.config cpanfile vcpkg.json conanfile.txt conanfile.py'
+# Split with globbing off: "*.csproj" is a pattern, not the .csproj files that
+# happen to sit in the current directory.
+set -f
+MANIFEST_PATTERNS=(${MANIFESTS})
+set +f
+is_manifest() {  # <path>
+  local base="${1##*/}" m
+  for m in "${MANIFEST_PATTERNS[@]}"; do
+    # Unquoted on the right: it is a pattern.
+    [[ "${base}" == ${m} ]] && return 0
+  done
+  return 1
+}
 
 # Same parser as factory-commit.sh: "- path" lines (backticks allowed) under
 # "## Files touched", up to the next heading of any level.
@@ -59,6 +91,10 @@ listed="$(awk '
     if (w[1] != "") print w[1]
   }' "${TASK_FILE}" | sed 's#^\./##' | sort -u)"
 
+if [ -z "${listed}" ] && [ -z "${patterns}" ]; then
+  echo "RISK none for ${TASK_ID}: the task lists no files and .factory/config.json has no risk_paths."
+  exit 0
+fi
 if [ -z "${listed}" ]; then
   echo "RISK ${TASK_ID}: the task lists no files under \"## Files touched\", so what it changed cannot be checked. Review it."
   exit 1
@@ -87,6 +123,11 @@ while IFS= read -r p; do
   if [ "$(git -C "${ROOT}" check-attr linguist-generated -- "${p}" 2>/dev/null | awk -F': ' '{print $3}')" = "true" ] \
      || { [ -n "${excludes}" ] && matches_any "${p}" "${excludes}"; }; then
     generated="${generated} ${p}"
+    continue
+  fi
+  if [ "${builtin}" = 1 ] && is_manifest "${p}"; then
+    hits="${hits}RISK ${TASK_ID}: ${p} is a dependency manifest - what it pulls in is code nobody here reviewed
+"
     continue
   fi
   while IFS= read -r pat; do

@@ -16,8 +16,12 @@
 # Two builders can finish at the same moment. Git's index takes one writer, so
 # lands are serialised with a lock.
 #
-# Exit: 0 landed (even when the commit itself was refused - the task is done,
-# its check is green, and the output says why it is uncommitted); 1 refused.
+# The last line says how it went: LANDED <id> <sha>, LAND SKIPPED (already in
+# tasks/done and committed), LAND UNCOMMITTED (in tasks/done, check green, but
+# no commit has it - its dependents cannot start), LAND REFUSED.
+#
+# Exit: 0 landed, skipped or uncommitted (the task is done either way); 1
+# refused.
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +38,10 @@ F="${ROOT}/.factory"
 [ -f "${F}/active" ] || { echo "LAND REFUSED for ${TASK_ID}: ${ROOT} has no .factory/active."; exit 1; }
 
 if [ -f "${T}/done/${TASK_ID}.md" ]; then
+  if git -C "${ROOT}" rev-parse -q --verify HEAD >/dev/null 2>&1      && ! git -C "${ROOT}" check-ignore -q "tasks/done/${TASK_ID}.md" 2>/dev/null      && ! git -C "${ROOT}" cat-file -e "HEAD:./tasks/done/${TASK_ID}.md" 2>/dev/null; then
+    echo "LAND UNCOMMITTED ${TASK_ID}: it is in tasks/done, but no commit has it - its dependents cannot start until it is committed."
+    exit 0
+  fi
   echo "LAND SKIPPED for ${TASK_ID}: it is already in tasks/done."
   exit 0
 fi
@@ -74,7 +82,7 @@ printf '%s\n' "${out}"
 sha="$(printf '%s\n' "${out}" | sed -n -E 's#^COMMIT ([0-9a-f]+) .*#\1#p' | head -1)"
 emit commit "$(jq -cn --arg id "${TASK_ID}" --arg s "${sha:-none}" '{task: $id, sha: $s}')"
 if [ "${rc}" -ne 0 ]; then
-  echo "LANDED ${TASK_ID} uncommitted - the task is done and its check is green, but the commit was refused (above)."
+  echo "LAND UNCOMMITTED ${TASK_ID}: the task is done and its check is green, but the commit was refused (above) - its dependents cannot start until it is committed."
   exit 0
 fi
 echo "LANDED ${TASK_ID} ${sha:-(nothing to commit)}"

@@ -45,9 +45,29 @@ check "harmless task passes" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^RI
 mktask "$R" in-progress C2-04 m
 out="$(bash $H/factory-risk.sh C2-04)"; rc=$?
 check "empty list is sent to review" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "lists no files"' "$out"
+mktask "$R" in-progress C2-05 m app/package.json mobile/pubspec.lock svc/requirements-dev.txt src/Api/Api.csproj src/x.cs
+out="$(bash $H/factory-risk.sh C2-05)"; rc=$?
+check "a dependency manifest or lockfile is always a risk path" '[ $rc -eq 1 ] && [ "$(printf "%s" "$out" | grep -c "is a dependency manifest")" = 4 ] && ! printf "%s" "$out" | grep -q "src/x.cs"' "$out"
+mktask "$R" in-progress C2-06 m docs/package.json.md src/requirements/notes.md
+out="$(bash $H/factory-risk.sh C2-06)"; rc=$?
+check "...by its file name, not a name that merely contains one" '[ $rc -eq 0 ]' "$out"
 jq -n '{}' > .factory/config.json
+out="$(bash $H/factory-risk.sh C2-05)"; rc=$?
+check "...even with no risk_paths configured" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "app/package.json is a dependency manifest"' "$out"
+: > App.csproj; : > requirements.txt
+mktask "$R" in-progress C2-07 m src/Lib/Lib.csproj requirements-dev.txt
+out="$(bash $H/factory-risk.sh C2-07)"; rc=$?
+check "...whatever manifests sit in the folder it runs from" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "src/Lib/Lib.csproj is a dependency manifest" && printf "%s" "$out" | grep -q "requirements-dev.txt is a dependency manifest"' "$out"
+rm -f App.csproj requirements.txt
+jq -n '{risk_exclude: ["*.lock"]}' > .factory/config.json
+out="$(bash $H/factory-risk.sh C2-05)"; rc=$?
+check "risk_exclude still wins over the built-in list" '! printf "%s" "$out" | grep -q "pubspec.lock is"' "$out"
+jq -n '{risk_builtin: false}' > .factory/config.json
 out="$(bash $H/factory-risk.sh C2-01)"; rc=$?
-check "no risk_paths configured: pass, and says so" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "no risk_paths"' "$out"
+check "no risk_paths and the built-in list off: pass, and says so" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "no risk_paths"' "$out"
+jq -n '{}' > .factory/config.json
+out="$(bash $H/factory-risk.sh C2-04)"; rc=$?
+check "an empty list with nothing configured is not a review" '[ $rc -eq 0 ]' "$out"
 out="$(bash $H/factory-risk.sh NOPE 2>&1)"; rc=$?
 check "unknown task: usage error" '[ $rc -eq 2 ]' "$out"
 

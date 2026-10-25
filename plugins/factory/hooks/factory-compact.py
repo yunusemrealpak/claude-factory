@@ -8,7 +8,9 @@ summarized. The file holds two things the summary cannot be trusted to keep:
   1. the exact board state, rebuilt from the task files on disk
   2. the tail of the lead's own reasoning, so intent survives the summary
 factory-brief.sh reads that file back on the SessionStart that fires with
-source "compact", which is how the state re-enters the compacted context.
+source "compact", which is how the state re-enters the compacted context, and
+then renames it lead-state.read.md: it is carried over once, and never into a
+session that did not compact.
 
 PostCompact appends the generated summary to <project>/.factory/compact-log.md
 as an audit trail.

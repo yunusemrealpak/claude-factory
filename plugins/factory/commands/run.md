@@ -1,6 +1,6 @@
 ---
 description: Run the factory production loop - build the team, assign ready tasks, gate every result, keep going until only blocked work remains
-argument-hint: [optional: worker count or module filter]
+argument-hint: "[optional: worker count or module filter]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Agent
 ---

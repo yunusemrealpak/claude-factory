@@ -79,7 +79,7 @@ import time
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HOOK_DIR)
-from factory_compat import bash, npath, strip_root  # noqa: E402
+from factory_compat import bash, npath, rel, strip_root  # noqa: E402
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
 
@@ -401,16 +401,286 @@ def changed_assertions(listed, check):
     return out
 
 
+def run_base():
+    """The commit this run started from (run-start.json "head"), when git has
+    it; else None."""
+    try:
+        sha = (json.loads(read(os.path.join(F, "run-start.json")) or "{}") or {}).get("head") or ""
+    except ValueError:
+        sha = ""
+    if sha and git("cat-file", "-e", sha + "^{commit}")[0] == 0:
+        return sha
+    return None
+
+
+# What the developer approved and the builder may not change: the task's
+# acceptance and its exemptions. A builder writes its task file (Files touched,
+# notes), so these are read from the task file as committed when the run
+# started (factory-plan --start commits the board), else as committed in HEAD -
+# never from the working tree.
+APPROVED_KEYS = ("acceptance", "needs_human", "untested_ok", "allow_test_removal", "modifies_tests", "dependencies")
+EXEMPTIONS = ("untested_ok", "allow_test_removal", "modifies_tests")
+DECLARED = ("dependencies",)
+
+
+def approved_frontmatter(task_id):
+    """The task's frontmatter as committed at the run's base, else at HEAD; {}
+    when no commit has the task file."""
+    for base in [b for b in (run_base(), "HEAD") if b]:
+        for col in ("backlog", "in-progress", "done", "blocked"):
+            rc, text = git("show", "%s:./tasks/%s/%s.md" % (base, col, task_id))
+            if rc == 0:
+                return frontmatter(text)
+    return {}
+
+
+def unanchored_task(task_id):
+    """True when this run planned the task (run-start.json "tasks") but no
+    commit has its file, although git could hold it: the snapshot that anchors
+    its approval did not happen."""
+    try:
+        planned = (json.loads(read(os.path.join(F, "run-start.json")) or "{}") or {}).get("tasks") or []
+    except ValueError:
+        planned = []
+    if task_id not in planned or git("rev-parse", "--verify", "-q", "HEAD")[0] != 0:
+        return False
+    for col in ("in-progress", "backlog"):
+        p = "tasks/%s/%s.md" % (col, task_id)
+        if os.path.isfile(os.path.join(ROOT, p)):
+            return git("check-ignore", "-q", "--", p)[0] != 0
+    return False
+
+
+def is_true(fm, key):
+    return str(fm.get(key, "")).strip().lower() == "true"
+
+
+def approval_changes(fm, approved):
+    """Approved keys the working tree's task file changed: [(key, now, approved)].
+    Only an exemption switched on or an acceptance rewritten counts; a builder
+    turning an exemption off only makes its own check stricter."""
+    out = []
+    for key in EXEMPTIONS:
+        if is_true(fm, key) and not is_true(approved, key):
+            out.append(key)
+    granted = set(declared_dependencies(approved))
+    if "*" not in granted and set(declared_dependencies(fm)) - granted:
+        out.append("dependencies")
+    if approved and fm.get("acceptance", "").strip() != approved.get("acceptance", "").strip():
+        out.append("acceptance")
+    return out
+
+
 def declared_modifies_tests(task_id, path):
-    """The declaration is read from the task file as committed in HEAD, so the
-    builder cannot grant itself the exemption in the edit it is about to check.
-    A task file HEAD does not have yet is read from the working tree."""
-    rel = os.path.relpath(path, ROOT).replace(os.sep, "/")
-    for col in ("backlog", "in-progress", "done", "blocked"):
-        rc, text = git("show", "HEAD:./tasks/%s/%s.md" % (col, task_id))
-        if rc == 0:
-            return frontmatter(text).get("modifies_tests", "").lower() == "true"
-    return frontmatter(read(path)).get("modifies_tests", "").lower() == "true"
+    """The declaration as approved (approved_frontmatter), so the builder cannot
+    grant itself the exemption in the edit it is about to check."""
+    return is_true(approved_frontmatter(task_id), "modifies_tests")
+
+
+# What the run is judged by: the gate and the factory's config. No task changes
+# them. factory-plan --start records a digest of each in run-start.json; every
+# check compares against it. config.json's hard_blocks is left out: the
+# developer's own session sets it (/factory:bans), and it is not the gate.
+PROTECTED = ("gates", ".factory/config.json")
+
+
+# What an editor, a file browser or Python leaves beside a file: never the gate.
+JUNK = re.compile(r"(^|/)(\.DS_Store|Thumbs\.db|desktop\.ini|__pycache__/.*|[^/]*\.pyc|[^/]*\.sw[a-p]|[^/]*~|\.#[^/]*)$",
+                  re.I)
+
+
+def protected_files():
+    """The files under gates/ git would see (tracked, or new and not
+    ignored), else every file there."""
+    rc, out = git("ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "gates")
+    if rc == 0:
+        names = [p for p in out.split("\0") if p.strip()]
+    else:
+        names = [rel(os.path.join(d, n), ROOT) for d, _, ns in os.walk(os.path.join(ROOT, "gates")) for n in ns]
+    return sorted({npath(p) for p in names if not JUNK.search(npath(p))})
+
+
+def protected_digest():
+    """{path: sha256} of every file under gates/ and of config.json."""
+    out = {}
+    for p in protected_files():
+        try:
+            with open(os.path.join(ROOT, p), "rb") as fh:
+                out[p] = hashlib.sha256(fh.read()).hexdigest()
+        except OSError:
+            pass
+    cfg = os.path.join(F, "config.json")
+    if os.path.isfile(cfg):
+        raw = read(cfg)
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                data.pop("hard_blocks", None)
+            raw = json.dumps(data, sort_keys=True, separators=(",", ":"))
+        except ValueError:
+            pass
+        out[".factory/config.json"] = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return out
+
+
+def protected_changes(listed=()):
+    """How the gate or the config differ from what the run started with: short
+    reasons, empty when nothing did."""
+    out = []
+    mine = sorted(p for p in listed if any(p == x or p.startswith(x + "/") for x in PROTECTED))
+    if mine:
+        out.append("the task lists " + " ".join(mine))
+    try:
+        start = (json.loads(read(os.path.join(F, "run-start.json")) or "{}") or {}).get("protected")
+    except ValueError:
+        start = None
+    if isinstance(start, dict):
+        now = protected_digest()
+        changed = sorted(p for p in set(start) | set(now) if start.get(p) != now.get(p))
+        if changed:
+            out.append("changed since the run started: " + " ".join(changed[:10]))
+    return out
+
+
+# Dependency manifests. A package a task adds is code nobody on the project
+# wrote or reviewed, and a green suite says nothing about where it came from: a
+# task changes a manifest only when its approved task file declares
+# `dependencies: [name, ...]`. Lockfiles are left to the risk review
+# (factory-risk): tools rewrite them on their own, so they say little about
+# intent.
+MANIFESTS = ("package.json", "deno.json", "pubspec.yaml", "requirements*.txt", "constraints*.txt", "pipfile",
+             "pyproject.toml", "setup.py", "setup.cfg", "go.mod", "go.work", "cargo.toml", "*.csproj", "*.fsproj",
+             "*.vbproj", "packages.config", "directory.packages.props", "gemfile", "*.gemspec", "build.gradle",
+             "build.gradle.kts", "libs.versions.toml", "pom.xml", "composer.json", "package.swift", "podfile",
+             "cartfile", "mix.exs", "vcpkg.json", "conanfile.txt", "conanfile.py")
+
+
+def is_manifest(path):
+    base = npath(path).rsplit("/", 1)[-1].lower()
+    return any(fnmatch.fnmatchcase(base, m) for m in MANIFESTS)
+
+
+def declared_dependencies(fm):
+    """The packages a task may add, as its approved frontmatter names them:
+    `dependencies: [a, b]`; `true` allows any; nothing, `[]` or `false` none."""
+    raw = str(fm.get("dependencies", "") or "").strip()
+    if raw.lower() == "true":
+        return ["*"]
+    if raw.lower() in ("", "false", "[]", "none"):
+        return []
+    return [d.strip().strip("\"'") for d in re.split(r"[,\s]+", raw.strip("[]")) if d.strip().strip("\"'")]
+
+
+def file_digest(path):
+    try:
+        with open(os.path.join(ROOT, path), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return ""
+
+
+def dirty_manifests():
+    """{path: sha256} of every dependency manifest that differs from HEAD."""
+    return {p: file_digest(p) for p in sorted(dirty_paths()) if is_manifest(p)}
+
+
+def manifest_changes(task_id, listed):
+    """(mine, unowned, open_listing): the manifests this task lists that differ
+    from HEAD; the ones that differ, no task in progress lists and were not
+    already so when the run started; and whether another task in progress has
+    listed nothing yet, so an unowned one may be its work."""
+    dirty = dirty_manifests()
+    if not dirty:
+        return [], [], False
+    claimed = {npath(p) for p in listed}
+    mine = sorted(p for p in dirty if p in claimed)
+    open_listing = False
+    d = os.path.join(ROOT, "tasks", "in-progress")
+    for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
+        if not name.endswith(".md") or name[:-3] == task_id:
+            continue
+        other = files_touched(read(os.path.join(d, name)))
+        open_listing = open_listing or not other
+        claimed.update(npath(p) for p in other)
+    try:
+        before = (json.loads(read(os.path.join(F, "run-start.json")) or "{}") or {}).get("manifests") or {}
+    except ValueError:
+        before = {}
+    unowned = sorted(p for p, h in dirty.items() if p not in claimed and before.get(p) != h)
+    return mine, unowned, open_listing
+
+
+# A module the task adds that would be imported in place of a package - the
+# local stub that makes a verification library say yes. Python resolves a
+# top-level module before site-packages, so a new <name>.py or <name>/ at the
+# top of the repo, of src/ or of a unit, named like a package the project
+# depends on (or a guarded standard-library module), shadows it. Anything written under
+# node_modules/ is a package nobody installed.
+# The standard-library and test-tool names worth guarding: the ones a stub would
+# take to make a check pass, and the two Python imports at startup. A project's
+# own calendar/ or email/ package is its business; its own unittest.py is not.
+GUARDED = ("unittest doctest importlib subprocess json re os typing pathlib logging inspect builtins "
+           "site sitecustomize usercustomize pytest _pytest pluggy hypothesis").split()
+SHADOW_EXEMPT = {"test", "tests", "__init__", "__main__", "conftest", "setup", "main", "app", "config"}
+
+
+def python_names():
+    """Module names a new top-level module must not take: the guarded ones,
+    the project's declared Python dependencies, and what a local virtualenv
+    has installed."""
+    names = set(GUARDED)
+
+    def add(dist):
+        n = re.split(r"[\s<>=!~;\[(@]", dist.strip(), 1)[0].strip().lower().replace("-", "_").replace(".", "_")
+        if n and not n.startswith("#"):
+            names.add(n)
+
+    for p in [x for x in os.listdir(ROOT) if fnmatch.fnmatchcase(x.lower(), "requirements*.txt")] if os.path.isdir(ROOT) else []:
+        for line in read(os.path.join(ROOT, p)).splitlines():
+            if line.strip() and not line.strip().startswith(("#", "-")):
+                add(line)
+    pyproject = read(os.path.join(ROOT, "pyproject.toml"))
+    m = re.search(r"(?ms)^dependencies\s*=\s*\[(.*?)\]", pyproject)
+    for dist in re.findall(r"[\"']([^\"']+)[\"']", m.group(1)) if m else []:
+        add(dist)
+    m = re.search(r"(?ms)^\[tool\.poetry\.dependencies\]\s*$(.*?)(^\[|\Z)", pyproject)
+    for line in m.group(1).splitlines() if m else []:
+        if "=" in line and not line.strip().startswith("#"):
+            add(line.split("=", 1)[0])
+    for venv in (".venv", "venv", "env"):
+        for sp in [os.path.join(ROOT, venv, "Lib", "site-packages")] + sorted(
+                os.path.join(ROOT, venv, "lib", d, "site-packages")
+                for d in (os.listdir(os.path.join(ROOT, venv, "lib")) if os.path.isdir(os.path.join(ROOT, venv, "lib")) else [])):
+            for n in os.listdir(sp) if os.path.isdir(sp) else []:
+                if n.endswith((".dist-info", ".egg-info", ".pth")) or n.startswith("_distutils"):
+                    continue
+                names.add((n[:-3] if n.endswith(".py") else n).lower())
+    return names - SHADOW_EXEMPT
+
+
+def shadow_modules(listed, units):
+    """[(path, reason)] for the new files this task adds that shadow a package."""
+    roots = {"", "src", "lib"} | {p for u in (units or []) for p in u["paths"]}
+    out, names = [], None
+    for p in sorted({npath(x) for x in listed}):
+        if not os.path.exists(os.path.join(ROOT, p)) or git("cat-file", "-e", "HEAD:./" + p)[0] == 0:
+            continue
+        if "node_modules" in p.split("/"):
+            out.append((p, "it is under node_modules/, where only the package manager writes"))
+            continue
+        if not p.endswith(".py"):
+            continue
+        head, _, base = p.rpartition("/")
+        if base == "__init__.py":
+            head, _, name = head.rpartition("/")
+        else:
+            name = base[:-3]
+        if head not in roots:
+            continue
+        names = python_names() if names is None else names
+        if name.lower() in names:
+            out.append((p, "a top-level module named %s is imported in place of the package of that name" % name))
+    return out
 
 
 def head_census(check):
@@ -848,7 +1118,18 @@ def check_task(task_id):
         set_frontmatter(path, {"stage": "verifying", "stage_since": now_iso()})
 
     text = read(path)
-    fm = frontmatter(text)
+    worktree_fm = frontmatter(text)
+    approved = approved_frontmatter(task_id)
+    tampered = approval_changes(worktree_fm, approved)
+    unanchored = not approved and unanchored_task(task_id)
+    # The approved values win; a task no commit has yet (an older board, never
+    # snapshot) keeps its acceptance from the working tree and has no exemptions.
+    fm = dict(worktree_fm)
+    for key in APPROVED_KEYS:
+        if approved:
+            fm[key] = approved.get(key, "")
+        elif key in EXEMPTIONS or key in DECLARED:
+            fm[key] = ""
     listed = files_touched(text)
     ctx = {"cfg": cfg, "check": check, "commands": commands, "units": units, "listed": listed,
            "existing": [p for p in listed if os.path.exists(os.path.join(ROOT, p))], "acc": fm.get("acceptance", "")}
@@ -860,6 +1141,22 @@ def check_task(task_id):
     while True:
         run = Run(task_id)
         # --- guards that cost nothing: always this task's own ----------------
+        if tampered:
+            run.fail("approval", "the task file changes what was approved: " + ", ".join(tampered),
+                     "a task's acceptance and its exemptions (untested_ok, allow_test_removal, modifies_tests, "
+                     "dependencies) are "
+                     "the developer's, set before the run. Put them back as they were; if the task cannot pass "
+                     "without the change, block it and say why")
+        if unanchored:
+            run.fail("approval", "the task file is in no commit, so what was approved cannot be told apart from "
+                     "what a builder wrote",
+                     "factory-plan --start commits the board when a run starts; commit the task file (or start the "
+                     "run again) and check again")
+        moved = protected_changes(listed)
+        if moved:
+            run.fail("protected", "what the run is judged by changed: " + "; ".join(moved),
+                     "no task changes gates/ or .factory/config.json. Undo the change by editing the file back; "
+                     "if the task needs it, block it and say why")
         if fm.get("needs_human", "").lower() != "true" and self_certifying(ctx["acc"]):
             run.fail("accept", "self-certifying: its only evidence is a file the agent writes itself",
                      "replace it with a command that runs the code, or mark the task needs_human: true")
@@ -881,6 +1178,28 @@ def check_task(task_id):
                              "%s (%d)" % (p, n) for p, n in sorted(changed.items())),
                          "a test that was green is not edited to pass. Fix the code. If the behaviour truly changed, "
                          "declare modifies_tests: true in the task file and commit that before the build")
+        mine_deps, unowned_deps, open_deps = manifest_changes(task_id, listed)
+        allowed = declared_dependencies(fm)
+        if mine_deps and not allowed:
+            run.fail("deps", "this task changes dependency manifest(s) its approved task file does not declare: "
+                     + " ".join(mine_deps[:10]),
+                     "a new or upgraded package is the developer's decision. Put the manifest back as it is in "
+                     "HEAD and do without it; if the task cannot be done without the package, block it and name "
+                     "the package and why - the developer approves it with dependencies: [name] in the task file")
+        elif mine_deps:
+            run.note("deps", "declared: %s (%s)" % (", ".join(allowed), " ".join(mine_deps[:5])))
+        if unowned_deps:
+            what = "dependency manifest(s) changed in the tree that no task lists: " + " ".join(unowned_deps[:10])
+            if open_deps:
+                run.note("deps", what + " - another task in progress has not listed its files yet")
+            else:
+                run.fail("deps", what,
+                         "the check ran with them, but they are in no task's commit. If this task changed one, list "
+                         "it (it has to be declared too); otherwise put it back as it is in HEAD")
+        for p, why in shadow_modules(listed, units) if listed else []:
+            run.fail("deps", "%s shadows a package: %s" % (p, why),
+                     "give the module a name no package or standard-library module has, and import the real "
+                     "package where the task needs it")
         limit = int(check.get("claude_md_max_lines", 200) or 0)
         for p, n in claude_md_over(listed, limit) if limit and listed else []:
             run.fail("claude_md", "%s is %d lines, the limit is %d" % (p, n, limit),
@@ -1010,12 +1329,13 @@ def check_full():
         pass
     now = head_census(check)
     if start and now:
-        # A task that declared allow_test_removal answers for its own files only.
+        # A task that declared allow_test_removal - in the approved task file,
+        # not the working tree - answers for its own files only.
         allowed = set()
         for tid in start.get("tasks", []):
             p, _ = task_file(tid)
             text = read(p) if p else ""
-            if frontmatter(text).get("allow_test_removal", "").lower() == "true":
+            if is_true(approved_frontmatter(tid), "allow_test_removal"):
                 allowed.update(files_touched(text))
         before, after = start.get("files") or {}, now["files"]
         lost = sorted(f for f in before if f not in after and f not in allowed)
@@ -1030,6 +1350,12 @@ def check_full():
         else:
             run.ok("census", "%d test file(s), %d suppression(s); %d/%d when the run started"
                    % (now["test_files"], now["skipped"], start.get("test_files", 0), start.get("skipped", 0)))
+
+    moved = protected_changes()
+    if moved:
+        run.fail("protected", "what the run is judged by changed: " + "; ".join(moved),
+                 "no task changes gates/ or .factory/config.json: find the change (git log -- gates .factory/config.json) "
+                 "and undo it before this run's work is trusted")
 
     limit = int(check.get("claude_md_max_lines", 200) or 0)
     if limit:
@@ -1095,6 +1421,9 @@ def main(argv):
         return 0
     if argv[0] == "census":
         c = head_census(load_config().get("check") or {})
+        if c:
+            c["protected"] = protected_digest()
+            c["manifests"] = dirty_manifests()
         print(json.dumps(c) if "--json" in argv else "HEAD %s: %s test file(s), %s suppression(s)"
               % (c["head"], c["test_files"], c["skipped"]) if c else "CENSUS: not a git repository")
         return 0 if c else 2

@@ -95,7 +95,7 @@ hb bash 'git push origin main' >/dev/null; rc=$?
 check "a ban that is not optional stays banned" '[ $rc -eq 3 ]'
 bash "$H/factory-deny.sh" --apply >/dev/null
 check "a re-run of factory-deny does not put it back" '! jq -e ".permissions.deny | index(\"Bash(fastlane *)\")" .claude/settings.json >/dev/null'
-check "the hard-block version carries the allowed set" '[ "$(bash "$H/factory-hardblock.sh" version "$B2")" = "1+store-deploy" ]'
+check "the hard-block version carries the allowed set" '[ "$(bash "$H/factory-hardblock.sh" version "$B2")" = "3+store-deploy" ]'
 hb bash 'factory-bans allow git-tag' >/dev/null; rc=$?
 check "an agent may not change the choice" '[ $rc -eq 3 ]'
 bash "$H/factory-bans.sh" forbid store-deploy >/dev/null

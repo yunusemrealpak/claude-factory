@@ -347,6 +347,18 @@ printf 'sOTHER' > .factory/run-owner
 out="$(brief_in sNEW startup | bash "$H/factory-brief.sh" >/dev/null; find .factory/inflight -type f | wc -l | tr -d ' ')"
 check "a bystander session never sweeps a run somebody else owns" '[ "$out" = "1" ]' "$out"
 
+echo "=== the lead's state comes back after a compaction, once"
+printf 'LEAD-STATE-MARK: dispatching T-7
+' > .factory/lead-state.md
+out="$(brief_in sA startup | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "a fresh session is not handed another session's carried state" '! printf "%s" "$out" | grep -q "LEAD-STATE-MARK" && [ -f .factory/lead-state.md ]' "$out"
+out="$(brief_in sA compact | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "after a compaction it is carried over" 'printf "%s" "$out" | grep -q "LEAD-STATE-MARK: dispatching T-7" && [ ! -f .factory/lead-state.md ] && [ -f .factory/lead-state.read.md ]' "$out"
+out="$(brief_in sA compact | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "...and only once" '! printf "%s" "$out" | grep -q "LEAD-STATE-MARK"' "$out"
+check "the brief and the stop message name the plugin's commands" 'grep -q "/factory:status for detail, /factory:run" "$H/factory-brief.sh" && grep -q "/factory:retro reviews" "$H/factory-stop-gate.sh" && ! grep -Eq "/factory-(status|run|retro|fast)" "$H/factory-brief.sh" "$H/factory-stop-gate.sh"'
+rm -f .factory/lead-state.read.md
+
 echo "=== claiming a run clears what the last one left"
 rm -f .factory/run-owner
 printf 'sZ' > .factory/run-owner.pending

@@ -58,7 +58,7 @@ fi
 fm() {  # <file> <key>
   awk 'NR==1 && /^---[[:space:]]*$/ {inside=1; next}
        inside && /^---[[:space:]]*$/ {exit}
-       inside {print}' "$1" 2>/dev/null | sed -n "s/^$2:[[:space:]]*//p" | head -1
+       inside {print}' "$1" 2>/dev/null | tr -d '\r' | sed -n "s/^$2:[[:space:]]*//p" | head -1
 }
 
 # Rewrites one key inside the leading --- block, adding it when it is missing.
@@ -75,6 +75,24 @@ if [ "$(fm "${file}" needs_human | tr '[:upper:]' '[:lower:]')" = "true" ]; then
   echo "START REFUSED for ${TASK_ID}: needs_human: true - no agent works on it. Move it to tasks/blocked and ask the developer."
   exit 1
 fi
+# A task builds on the committed work of what it depends on. One whose
+# dependency has not landed - blocked, failed, never run, or done but its commit
+# failed - would be built on code that is not there.
+in_git=0
+git -C "${ROOT}" rev-parse -q --verify HEAD >/dev/null 2>&1 && in_git=1
+for dep in $(fm "${file}" depends_on | tr -d '[]"'"'" | tr ',' ' '); do
+  if [ ! -f "${T}/done/${dep}.md" ]; then
+    lane="$(ls "${T}"/*/"${dep}.md" 2>/dev/null | head -1)"; lane="${lane#"${T}"/}"; lane="${lane%%/*}"
+    echo "START REFUSED for ${TASK_ID}: DEPENDENCY ${dep} is not done${lane:+ (it is in tasks/${lane})}. Change nothing and return status refused."
+    exit 1
+  fi
+  if [ "${in_git}" = 1 ] && ! git -C "${ROOT}" check-ignore -q "tasks/done/${dep}.md" 2>/dev/null \
+     && ! git -C "${ROOT}" cat-file -e "HEAD:./tasks/done/${dep}.md" 2>/dev/null; then
+    echo "START REFUSED for ${TASK_ID}: DEPENDENCY ${dep} is in tasks/done but not committed, so its work is not in HEAD. Change nothing and return status refused."
+    exit 1
+  fi
+done
+
 if [ -f "${F}/no-progress/${TASK_ID}" ] && [ "${FACTORY_ESCALATION:-0}" != "1" ]; then
   echo "START NOTE for ${TASK_ID}: the check has already seen the same failure twice ($(sed -n 's/^detail=//p' "${F}/no-progress/${TASK_ID}")). Read the ## Attempts section first and change the approach."
 fi

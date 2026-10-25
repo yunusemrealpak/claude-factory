@@ -12,13 +12,18 @@ const LIMITS = [
 ]
 
 // A cut of hooks/hard-blocks.txt, in its own format.
-const RULES = [
-  'hard_blocks_version: 1',
+const RULE_LINES = [
+  'hard_blocks_version: 2',
   'bash ## git-push ## (^|[^[:alnum:]_.-])git([[:space:]]+-[A-Za-z-]+)*[[:space:]]+push([[:space:];&|)]|$)',
+  'bash ## git-tree-write ## (^|[^[:alnum:]_.-])git([[:space:]]+-[A-Za-z-]+)*[[:space:]]+(add|commit|stash|reset|checkout|restore)([[:space:];&|)]|$)',
   'path ## env-file ## any ## \\.env(\\.[^/[:space:]]*)?',
+  'path ## gates-dir ## root ## gates/.*',
+  'path ## factory-config ## root ## \\.factory/config\\.json',
   'path ## autonomy-consent ## root ## \\.factory/autonomy.*',
+  'path ## factory-verified ## root ## \\.factory/verified/.* ## create-only',
   'deny ## Bash(git push *)',
-].join('\n')
+]
+const RULES = RULE_LINES.join('\n')
 
 // The engine hands a file noun the path in the host's own spelling: on Windows
 // /proj/x arrives as C:\proj\x. The mocks compare it in one spelling.
@@ -26,15 +31,15 @@ const P = (p) => String(p).replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
-function world(on, { active = true, runFails = false, files = {}, level = '', limits = [] } = {}) {
+function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' } } = {}) {
   const runs = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
-  on('session.root', () => ({ value: '/proj' }))
+  on('session.root', () => ({ value: rootPath }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('clock.now', () => ({ value: NOW }))
-  on('env.get', () => ({ value: '/home/u' }))
+  on('env.get', (_$, e) => ({ value: env[e.name] }))
   on('fs.exists', (_$, e) => ({ value: P(e.path).endsWith('/.factory/active') ? active : P(e.path) in files }))
-  on('fs.read', (_$, e) => ({ value: P(e.path).endsWith('/hard-blocks.txt') ? RULES : files[P(e.path)] }))
+  on('fs.read', (_$, e) => ({ value: P(e.path).endsWith('/hard-blocks.txt') ? rules : files[P(e.path)] }))
   on('fs.list', () => ({ value: [{ name: 'T1.md', kind: 'file', size: 1, isLink: false }] }))
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 's1' }))
@@ -98,6 +103,22 @@ describe('quota', () => {
     await start($)
     const r = await $.session.measure({ context: {}, rateLimits: LIMITS, changed: ['rateLimits'] })
     expect(r.changed).toEqual(['rateLimits'])
+  })
+})
+
+describe('the shell it runs', () => {
+  test('the Git Bash Claude Code was pointed at is the one every script runs in', async ($, on) => {
+    const runs = world(on, { env: { HOME: '/home/u', CLAUDE_CODE_GIT_BASH_PATH: 'D:/Git/bin/bash.exe' } })
+    await start($)
+    await $.session.measure({ context: {}, rateLimits: LIMITS, changed: ['rateLimits'] })
+    expect(runs[0].argv[0]).toBe('D:/Git/bin/bash.exe')
+  })
+
+  test('with no HOME, as a native Windows process may have, USERPROFILE is home', async ($, on) => {
+    const runs = world(on, { env: { USERPROFILE: 'C:\\Users\\u' } })
+    await start($)
+    await $.session.measure({ context: {}, rateLimits: LIMITS, changed: ['rateLimits'] })
+    expect(runs[0].argv.at(-1)).toBe('C:/Users/u/.claude/.factory-quota.json')
   })
 })
 
@@ -219,6 +240,88 @@ describe('hard blocks', () => {
     await start($)
     const r = await call($, 'Bash', { command: 'git status' }, 'a1')
     expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+
+  // Each case: [what, tool, input, rule or null for a clean call, options]
+  const CASES = [
+    ['a Windows path inside the root', 'Write', { file_path: 'C:\\proj\\gates\\verify.sh' }, 'gates-dir', { rootPath: 'C:\\proj' }],
+    ['the /c/ spelling in a command', 'Bash', { command: 'echo {} > /c/proj/.factory/config.json' }, 'factory-config', { rootPath: 'C:\\proj' }],
+    ['the root in another letter case', 'Write', { file_path: 'c:/PROJ/.factory/config.json' }, 'factory-config', { rootPath: 'C:\\proj' }],
+    ['a folder in another letter case', 'Write', { file_path: '/proj/GATES/x.sh' }, 'gates-dir'],
+    ['dir/../ inside the root', 'Write', { file_path: '/proj/src/../gates/verify.sh' }, 'gates-dir'],
+    ['../ from a subfolder', 'Bash', { command: 'cd src && echo x > ../gates/verify.sh' }, 'gates-dir'],
+    ['PowerShell Set-Content', 'PowerShell', { command: 'Set-Content gates\\verify.sh x' }, 'gates-dir'],
+    ['MultiEdit', 'MultiEdit', { file_path: '/proj/.factory/config.json' }, 'factory-config'],
+    ['python -c writing a marker', 'Bash', { command: "python3 -c \"open('.factory/verified/T1','w').write('ok')\"" }, 'factory-verified'],
+    ['python reading the config', 'Bash', { command: "python3 -c \"print(open('.factory/config.json').read())\"" }, null],
+    ['removing a marker', 'Bash', { command: 'rm -f .factory/verified/T1' }, null],
+    ['git checkout on the shared tree', 'Bash', { command: 'git checkout -- src/a.txt' }, 'git-tree-write'],
+    ['git diff', 'Bash', { command: 'git diff --stat' }, null],
+    ['a nested gates/ folder', 'Write', { file_path: '/proj/src/gates/x.ts' }, null],
+  ]
+  for (const [what, tool, input, rule, opts] of CASES) {
+    test((rule ? 'refused: ' : 'passes: ') + what, async ($, on) => {
+      world(on, opts || {})
+      on('tool.call', () => ({ result: 'ran' }))
+      await start($)
+      const r = JSON.stringify(await call($, tool, input, 'a1'))
+      if (rule) expect(r).toContain('(' + rule + ')')
+      else expect(r).not.toContain('hard block')
+    })
+  }
+
+  test('a rules file with CRLF line ends still refuses', async ($, on) => {
+    world(on, { rules: RULE_LINES.join('\r\n') })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: 'git push origin main' }, 'a1')
+    expect(JSON.stringify(r)).toContain('git-push')
+  })
+
+  test('a tool the factory cannot judge is refused without halting the run', async ($, on) => {
+    const runs = world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'mcp__github__merge_pull_request', { pullNumber: 3 }, 'a1')
+    expect(JSON.stringify(r)).toContain('tools the factory can judge')
+    expect(runs.some((x) => JSON.stringify(x).includes('trip'))).toBe(false)
+  })
+
+  test('inline code that writes a protected path is refused without halting the run', async ($, on) => {
+    const runs = world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Bash', { command: `python3 -c "open('.factory/config.json','w').write('{}')"` }, 'a1')
+    expect(JSON.stringify(r)).toContain('inline code')
+    expect(JSON.stringify(r)).toContain('factory-config')
+    expect(runs.some((x) => JSON.stringify(x).includes('trip'))).toBe(false)
+  })
+
+  test('a builder that records the run start again is refused and the run is stopped', async ($, on) => {
+    const runs = world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await $.agent.spawn({ subagentType: 'factory:builder', description: 'T1', prompt: 'go' })
+    const r = await call($, 'Bash', { command: 'factory-plan --json --start' }, 'a1')
+    expect(JSON.stringify(r)).toContain('plan-start')
+    expect(runs.some((x) => JSON.stringify(x).includes('trip'))).toBe(true)
+  })
+
+  test('the runner records the run start', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await $.agent.spawn({ subagentType: 'factory:runner', description: 'plan', prompt: 'go' })
+    const r = await call($, 'Bash', { command: 'factory-plan --json --start' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('hard block')
+  })
+
+  test('a read-only tool goes through', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    const r = await call($, 'Read', { file_path: '/proj/.factory/config.json' }, 'a1')
+    expect(JSON.stringify(r)).not.toContain('deny')
   })
 
   test('nothing is judged where the factory is not open', async ($, on) => {

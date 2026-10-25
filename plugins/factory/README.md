@@ -27,8 +27,13 @@ It reads the codebase, proposes a task list and a quality gate, and waits for yo
 approval. Nothing is dispatched until you say yes. Then:
 
 ```
-/factory:run
+/factory:fast
 ```
+
+That builds the approved board as a workflow: one builder and one deterministic
+check per task, and one full check at the end. It is the measured default, at
+about a third of the cost and time of `/factory:run`, the lead-driven loop that is
+still there for when you want to steer task by task (see [the fast lane](#the-fast-lane)).
 
 ## What it actually does
 
@@ -72,6 +77,11 @@ scripts, not model reasoning.
 between tasks. It is a Claude Code workflow: the dependency graph, the
 scheduling, the retry and the review routing are plain JavaScript, so the only
 model work left is writing each task's code.
+
+Leave the run alone while it works. A Monitor or a poll on it wakes the main
+session once per builder, and every wake-up re-reads that session's whole
+context: on a 14-task run that was about a quarter of its cost. The workflow
+reports once, at the end.
 
 - **One builder per task.** It starts the task (`factory-start` prints the task
   and its lessons in one go), writes the code and the tests the task asks for,
@@ -149,6 +159,53 @@ A closed change can leave your machine, but only through one script and only as 
 
 `factory-next check` answers `NEXT GO <change>` only when the autonomy level is `merge` (typed "auto devam et"), the quota file has a fresh reading under the even-spend line, no publish is in flight, no run is active and an approved change is waiting - otherwise `NEXT WAIT <why>`. `factory-next launch` then runs `claude -p "/factory:fast" --permission-mode auto --strict-mcp-config` in a git worktree under `.factory/worktrees/` (your working tree is never touched). `factory-next launchd --hour 3` prints a LaunchAgent plist for a nightly run; nothing is installed for you. A breaker's cap, `auto dur` or `.factory/STOP` stops it. Opt-in: `check.modifies_tests_guard: true` fails a task that rewrites an assertion in an existing test unless `modifies_tests: true` was committed in its task file first.
 
+## Rules that hold (3.2)
+
+- **What was approved is what is judged.** When a run starts, `factory-plan --start`
+  commits the run's task files as they were approved (a `Factory-Board: snapshot`
+  commit of task files only). From then on the check reads `acceptance` and the
+  exemptions (`untested_ok`, `allow_test_removal`, `modifies_tests`, `dependencies`)
+  from that commit, not from the working tree: an exemption a builder writes into its
+  own task is ignored and named, and an acceptance rewritten mid-run is red. A task
+  whose approval changed since its last commit is not committed as approved - the run
+  does not start until you commit it or put it back - and a snapshot git refuses
+  stops the run with git's reason. Only the run's own runner records the start.
+- **The gate cannot change under a run.** The run's start records a digest of
+  `gates/` and `.factory/config.json` (its `hard_blocks` choices aside). Every check
+  compares it, and a task that lists either is red.
+- **Bans in every spelling.** The hard blocks read a path in every spelling
+  (`C:\p\x`, `/c/p/x`, `$PWD/x`, `$(pwd)/x`, `~+/x`, `./x`, `a/../x`, any letter
+  case) and a command in every quoting (`g''it "push"`, `bash -c 'git push'`). They
+  judge PowerShell like bash, refuse a git command that rewrites the shared tree or
+  index (`stash`, `reset`, `checkout`, `commit`, ...) but not its read-only forms
+  (`git stash list`, `git config user.email`), hold the folders that keep protected
+  files (`rm -rf .factory`, `cp -r x gates`), refuse a forged consent
+  (`factory-consent`) and a lesson an agent writes, and protect the factory's own
+  records (`.factory/verified`, the event log, questions, lessons). A tool the
+  factory cannot judge is refused for a subagent.
+- **Prose is not a command.** What a command only prints or searches for is not
+  read as one: the quoted text of `factory-block`, `factory-ask`, `grep` or `echo`
+  (`factory-block T5 'copy the key into .env'`), a heredoc `cat` writes to a file, a
+  comment - so a blocked task's reason does not halt the run. Inline code that writes
+  and names a protected path (`python -c`, `node -e`) is refused without halting it:
+  that match is a guess. The judge is one algorithm in two languages (Python for the
+  PreToolUse hook, JavaScript in the hooks module), held to one list of cases
+  (`tests/hardblock-cases.txt`).
+- **A dependency is declared, or the task is red.** Changing a dependency manifest
+  (`package.json`, `requirements.txt`, `go.mod`, a `.csproj`, ...) is red unless the
+  approved task file says `dependencies: [name]`; a new module named like a package
+  (a local `requests.py`) or a write under `node_modules/` is red too. Manifests and
+  lockfiles are also a risk path for review; `risk_builtin: false` turns that off.
+- **A task that cannot be built as written is asked, not retried.** A builder returns
+  `spec_conflict` with the one question; the run blocks the task and puts the
+  question in your inbox. `factory-start` refuses a task whose dependency has not
+  landed in HEAD.
+- **One pointer in CLAUDE.md.** Every agent loads `CLAUDE.md` on every turn, so
+  `/factory:init` writes a five-line pointer there and the rules stay in each agent's
+  instructions. `/factory:upgrade` replaces the old 64-line protocol section.
+- **Windows.** The suites and the hooks module run on Windows under Git Bash, and CI
+  runs them on macOS, Linux and Windows.
+
 ## Commands
 
 | command | what it is for |
@@ -164,6 +221,44 @@ A closed change can leave your machine, but only through one script and only as 
 | `/factory:upgrade` | bring an older project's factory files up to date |
 | `/factory:bans` | choose which optional bans (store/TestFlight tooling, git tags, GitHub releases) apply to this project |
 | `/factory:selftest` | run the factory's own test suite |
+| `/factory-board` | lane counts, what is ready and the week's quota, straight from disk: no model turn, so no tokens |
+
+## The hooks module
+
+Besides its command hooks, the plugin ships a [mod](https://code.claude.com/docs/en/plugins/mods/overview):
+`hooks/register.js`, listed under `modules` in `hooks/hooks.json`. It needs Claude Code
+2.1.287 or later (tested on 2.1.310). Nothing in it calls a model. Its hooks are of two
+kinds, and the difference is the contract:
+
+- **The hard blocks.** For a subagent of a factory run, `tool.call` judges every call
+  against `hooks/hard-blocks.txt` - the same list the `PreToolUse` hook and the
+  `permissions.deny` rules come from - and refuses what it forbids: a push, a rewrite
+  of the work tree's git state, a write to `gates/`, the config, `.env*`, keys or the
+  factory's own records, in any spelling of the path, through any shell or inline
+  interpreter. A tool it cannot judge is refused too. This hook **fails closed**: if
+  it cannot decide, the call is refused. A hit also writes `.factory/STOP`, which
+  halts the run until you look. `agent.spawn` holds back a new agent when the week's
+  quota is spent.
+- **Observers.** Everything else - quota, usage metering, the board, the autonomy band -
+  never refuses or rewrites anything, and a failure inside one is swallowed rather than
+  allowed to stop a turn.
+
+- **Quota.** Each rate-limit reading goes to `~/.claude/.factory-quota.json` — the
+  5-hour and 7-day windows, and the line an even spend of the week would be at now.
+  The status line below writes the same file; the mod also writes it in `claude -p`
+  runs, where there is no status line.
+- **Usage metering.** Every agent turn in a project with `.factory/active` adds one
+  line to `.factory/usage.jsonl` (gitignored): the agent's id, type and label, the
+  model, and its input, output, cache-read and cache-write tokens. This is what cost
+  per task is computed from.
+- **`/factory-board`.** The board read from disk and printed as is; it runs
+  `factory-ready` and costs no model turn.
+- **Consent.** `auto devam et` / `auto dur`, typed by you as the whole prompt, is
+  handed to `factory-consent`, which writes the autonomy record.
+
+`claude --safe-mode`, `--bare` and `disableAllHooks` turn mods off. The hard blocks
+then still stand in the `PreToolUse` hook and in `permissions.deny`; the gate itself
+never relies on the mod.
 
 ## The status line
 
@@ -209,7 +304,7 @@ rewritten without you watching.
 
 ## Safety
 
-- An agent never pushes; a script publishes only when your autonomy level allows it. The only git write in the loop is one commit per task.
+- An agent never pushes; a script publishes only when your autonomy level allows it. The only git writes in the loop are one commit per task and, when a run starts, one commit of the approved task files.
 - The hooks are inert in a project with no `.factory/active`, so having the plugin
   enabled changes nothing anywhere else.
 - No `--dangerously-skip-permissions`. Commands declare narrow `allowed-tools`.
@@ -221,8 +316,9 @@ rewritten without you watching.
 claude --plugin-dir ./plugins/factory     # load it without installing
 # with the plugin also installed, its bin/ shadows yours - put yours first:
 PATH="$PWD/plugins/factory/bin:$PATH" claude --plugin-dir ./plugins/factory
-bash plugins/factory/tests/run-all.sh     # 409 tests, sandboxes only
-claude plugin validate ./plugins/factory
+bash plugins/factory/tests/run-all.sh     # the shell suites, sandboxes only
+claude plugin validate --strict ./plugins/factory   # what Claude Code reads from the mod
+(cd plugins/factory && claude plugin test)          # the mod's own tests, no session
 ```
 
 The test suites build throwaway git repositories, boards and gates and run the real

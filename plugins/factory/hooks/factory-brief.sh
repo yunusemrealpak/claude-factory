@@ -126,10 +126,17 @@ fi
 
 
 # Written by the PreCompact hook. On the SessionStart that fires with source
-# "compact", this is how the lead's pre-summary state re-enters context.
+# "compact", this is how the lead's pre-summary state re-enters context - once:
+# the file is set aside after it is read, so a later session never mistakes an
+# old run's state for its own.
+# On an empty board there is nothing for that state to resume, so it is set
+# aside unread and the brief stays two lines.
 lead_state=""
-if [ -f "$project_dir/.factory/lead-state.md" ]; then
-  lead_state="$(cat "$project_dir/.factory/lead-state.md")"
+if [ "$source" = "compact" ] && [ -f "$project_dir/.factory/lead-state.md" ]; then
+  if [ "$((backlog + in_progress + blocked + proposed))" -gt 0 ]; then
+    lead_state="$(cat "$project_dir/.factory/lead-state.md")"
+  fi
+  mv -f "$project_dir/.factory/lead-state.md" "$project_dir/.factory/lead-state.read.md" 2>/dev/null
 fi
 
 # Delivery (2.8): a change that stopped half-way - a sleeping laptop, an expired
@@ -215,7 +222,7 @@ ${lead_state}
 Session id: ${session_id:-unknown}
 Run owner: ${run_owner}
 
-Rules in force: a task enters tasks/done only after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. The Stop hook keeps the session running while actionable tasks remain. Run /factory-status for detail, /factory-run to continue the loop.
+Rules in force: a task enters tasks/done only after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. The Stop hook keeps the session running while actionable tasks remain. Run /factory:status for detail, /factory:run to continue the loop.
 While /factory:fast runs: do not attach a Monitor, a poll or a progress message to it. Every builder result that wakes this session re-reads its whole context; the workflow reports once, when it is done.
 BRIEF
 )"

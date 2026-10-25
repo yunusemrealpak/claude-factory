@@ -138,7 +138,9 @@ no owner is a task nobody is finishing.
 
 A long run outlives its context, so expect a compaction. When it happens you lose the
 conversation, not the run: the PreCompact hook wrote `.factory/lead-state.md`
-before the summary, and the SessionStart hook re-injects it afterwards.
+before the summary, and the SessionStart hook re-injects it afterwards, once
+(it then renames the file `lead-state.read.md`, so a later session is not
+handed an old state).
 
 - Read the carried-over board before dispatching anything. It was rebuilt from
   disk, so where it disagrees with the summary, the board is right.

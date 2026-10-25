@@ -27,6 +27,8 @@ hb() {  # <kind> <text> -> rule name on stdout, exit code
 }
 hit()   { local out rc; out="$(hb "$1" "$2")"; rc=$?; [ "$rc" -eq 3 ] && [ "$out" = "$3" ]; }
 clean() { hb "$1" "$2" >/dev/null; [ $? -eq 0 ]; }
+# A soft hit refuses the one call and does not halt the run (exit 5).
+soft()  { local out rc; out="$(hb "$1" "$2")"; rc=$?; [ "$rc" -eq 5 ] && [ "$out" = "$3" ]; }
 
 echo "=== matcher: one case per rule"
 check "git push"              'hit bash "git push origin main" git-push'
@@ -62,12 +64,100 @@ check "write tool: STOP"      'hit path "$P/.factory/STOP" stop-switch'
 
 echo "=== matcher: clean commands"
 check "git status"            'clean bash "git status"'
-check "git commit message"    'clean bash "git commit -m \"push the button\""'
+check "push inside an argument" 'clean bash "git log --grep=\"push the button\""'
 check "git log --oneline"     'clean bash "git log --oneline -5"'
 check "gh pr view"            'clean bash "gh pr view 3"'
 check "gh api read"           'clean bash "gh api repos/a/b"'
 check "write src file"        'clean path "$P/lib/main.dart"'
 check "echo to a log"         'clean bash "echo hi > out.log"'
+
+echo "=== matcher: one spelling per file (Windows, case, dot segments)"
+hbr() {  # <root> <kind> <text>
+  printf '%s' "$3" | bash "$H/factory-hardblock.sh" check "$1" "$2"
+}
+hitr() { local out rc; out="$(hbr "$1" "$2" "$3")"; rc=$?; [ "$rc" -eq 3 ] && [ "$out" = "$4" ]; }
+Q="'"
+check "C:\\ path inside root"          'hitr "C:\\proj" path "C:\\proj\\gates\\verify.sh" gates-dir'
+check "drive and folder in other case" 'hitr "C:\\proj" path "c:/PROJ/.factory/config.json" factory-config'
+check "/c/ spelling in a command"      'hitr "C:\\proj" bash "echo x > /c/proj/.factory/STOP" stop-switch'
+check "backslashes in a command"       'hitr "C:\\proj" bash "echo K=1 > C:\\proj\\.env" env-file'
+check "an MSYS root, a Windows path"   'hitr "/c/proj" path "C:\\proj\\gates\\x.sh" gates-dir'
+check "dir/../ inside the root"        'hit path "$P/src/../gates/verify.sh" gates-dir'
+check "../ from a subfolder"           'hit bash "cd src && echo x > ../gates/verify.sh" gates-dir'
+check "letter case of a folder"        'hit path "$P/GATES/run.sh" gates-dir'
+check "letter case of a command"       'hit bash "GIT push origin main" git-push'
+check "a nested gates/ is not the root one" 'clean path "$P/src/gates/x.ts"'
+
+echo "=== matcher: git that rewrites the shared tree"
+for c in "git checkout -- src/a.txt" "git stash" "git stash pop" "git restore src" "git reset --hard" "git add -A" \
+         "git commit -m x" "git clean -fd" "git -C sub checkout main" "git switch -c x" "git apply x.patch" \
+         "git cherry-pick abc" "git worktree add ../x" "git config core.hooksPath /dev/null" "git update-ref HEAD x"; do
+  check "refused: $c" 'hit bash "$c" git-tree-write'
+done
+check "git -c on the command line"     'hit bash "git -c core.hooksPath=/dev/null log" git-inline-config'
+check "GIT_CONFIG_* in the env"        'hit bash "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.hooksPath git log" git-env-config'
+for c in "git status" "git log --oneline -5" "git diff --stat" "git show HEAD:src/a.txt" "git rev-parse HEAD" \
+         "git blame src/a.txt" "git log -c" "git diff HEAD -- src" "git ls-files"; do
+  check "read-only: $c" 'clean bash "$c"'
+done
+
+echo "=== matcher: the factory's own state"
+check "cd into .factory"               'hit bash "cd .factory && echo x > config.json" protected-cd'
+check "cd into gates"                  'hit bash "cd gates; ls" protected-cd'
+check "cd into src is fine"            'clean bash "cd src && ls"'
+check "an agent answers a question"    'hit bash "factory-ask answer Q1 yes" ask-answer'
+check "an agent asks one"              'clean bash "factory-ask ask T-1 \"which one?\""'
+check "touch a verified marker"        'hit bash "touch .factory/verified/T-1" factory-verified'
+check "write a verified marker"        'hit bash "echo ok > .factory/verified/T-1" factory-verified'
+check "write tool: verified marker"    'hit path "$P/.factory/verified/T-1" factory-verified'
+check "removing a marker is allowed"   'clean bash "rm -f .factory/verified/T-1"'
+check "run-start.json"                 'hit bash "echo {} > .factory/run-start.json" factory-run-start'
+check "no-progress"                    'hit bash "rm .factory/no-progress/T-1" factory-no-progress'
+check "failures"                       'hit path "$P/.factory/failures/T-1.txt" factory-failures'
+check "questions"                      'hit path "$P/.factory/questions/Q1.md" factory-questions'
+check "lessons"                        'hit bash "echo rule >> .factory/lessons/core.md" factory-lessons'
+check "the event log"                  'hit bash "echo {} >> .factory/events.jsonl" factory-events'
+check "publisher state"                'hit path "$P/.factory/publish/C1.json" factory-publish-state'
+check "the active switch"              'hit bash "rm .factory/active" factory-active'
+check "a git hook"                     'hit path "$P/.git/hooks/pre-commit" git-dir'
+check "git config file"                'hit bash "echo x >> .git/config" git-dir'
+check "reading .git is fine"           'clean bash "cat .git/HEAD"'
+
+echo "=== matcher: inline code that writes"
+check "python -c writes a marker"      'soft bash "python3 -c \"open(${Q}.factory/verified/T-1${Q},${Q}w${Q}).write(${Q}ok${Q})\"" factory-verified'
+check "node -e writes the gate"        'soft bash "node -e \"require(${Q}fs${Q}).writeFileSync(${Q}gates/verify.sh${Q},${Q}exit 0${Q})\"" gates-dir'
+check "a python heredoc writes config" 'soft bash "$(printf "python3 - <<EOF\nimport pathlib\npathlib.Path(\".factory/config.json\").write_text(\"{}\")\nEOF\n")" factory-config'
+check "python reading config passes"   'clean bash "python3 -c \"print(open(${Q}.factory/config.json${Q}).read())\" 2>/dev/null"'
+check "python tests pass"              'clean bash "python3 -m pytest tests/ -q 2>/dev/null"'
+check "sed -n reading config passes"   'clean bash "sed -n 1,5p .factory/config.json"'
+
+echo "=== matcher: PowerShell"
+check "Set-Content to gates"           'hit powershell "Set-Content -Path gates\\verify.sh -Value x" gates-dir'
+check "Out-File to STOP"               'hit powershell "\"x\" | Out-File .factory\\STOP" stop-switch'
+check "git push from PowerShell"       'hit powershell "git push origin main" git-push'
+check "[IO.File] write to config"      'soft powershell "[IO.File]::WriteAllText(${Q}.factory/config.json${Q}, ${Q}{}${Q})" factory-config'
+check "Get-Content is fine"            'clean powershell "Get-Content .factory/config.json"'
+
+echo "=== matcher: the shared cases, in Python and in JavaScript"
+# tests/hardblock-cases.txt holds both judges to one answer per command.
+wrong=""; n=0
+while IFS=$'\t' read -r expect kind root raw; do
+  case "${expect}" in ''|'#'*) continue ;; esac
+  [ "${root}" = "-" ] && root="$P"
+  text="${raw//\{R\}/$root}"; text="${text//\{NL\}/$'\n'}"
+  out="$(printf '%s' "${text}" | bash "$H/factory-hardblock.sh" check "${root}" "${kind}" 2>&1)"; rc=$?
+  case $rc in 0) got=clean ;; 3) got="hard:${out}" ;; 5) got="soft:${out}" ;; *) got="rc${rc}:${out}" ;; esac
+  n=$((n + 1))
+  [ "${got}" = "${expect}" ] || wrong="${wrong}
+  ${kind} ${text}: expected ${expect}, got ${got}"
+done < "$H/../tests/hardblock-cases.txt"
+check "every shared case, through factory-hardblock.sh ($n)" '[ "$n" -gt 100 ] && [ -z "$wrong" ]' "$wrong"
+if command -v node >/dev/null 2>&1; then
+  out="$(node "$H/../tests/hb-cases.mjs" 2>&1)"
+  check "every shared case, through register.js" 'printf "%s" "$out" | grep -q "^cases=[0-9]* wrong=0$"' "$out"
+else
+  echo "SKIP register.js half: no node on PATH"
+fi
 
 echo "=== matcher: unreadable rules fail closed"
 printf 'x' | FACTORY_HARD_BLOCKS=/nonexistent bash "$H/factory-hardblock.sh" check "$P" bash >/dev/null 2>&1
@@ -92,6 +182,34 @@ out="$(guard "" Write "$P/gates/verify.sh")"
 check "main session writes gates freely" '[ -z "$out" ]' "$out"
 out="$(guard agent-1 Bash "git status")"
 check "subagent clean command passes" '[ -z "$out" ] && [ ! -f .factory/STOP ]' "$out"
+guard2() {  # <cwd> <agent> <tool> <text>
+  jq -cn --arg cwd "$1" --arg a "$2" --arg t "$3" --arg c "$4" \
+    '{cwd:$cwd, tool_name:$t, tool_input:(if ($t=="Bash" or $t=="PowerShell") then {command:$c} else {file_path:$c} end)} + (if $a=="" then {} else {agent_id:$a} end)' \
+    | bash "$H/factory-done-guard.sh"; }
+mkdir -p src
+out="$(guard2 "$P/src" agent-1 Write "$P/gates/verify.sh")"
+check "a subagent that cd'd into src/ is still judged" 'printf "%s" "$out" | grep -q deny' "$out"
+rm -f .factory/STOP
+out="$(guard2 "$P" agent-1 PowerShell "Set-Content gates/verify.sh x")"
+check "subagent PowerShell is judged" 'printf "%s" "$out" | grep -q deny' "$out"
+rm -f .factory/STOP
+out="$(guard2 "$P" agent-1 MultiEdit "$P/.factory/config.json")"
+check "subagent MultiEdit is judged" 'printf "%s" "$out" | grep -q deny' "$out"
+rm -f .factory/STOP
+check "the guard hook sees PowerShell and MultiEdit" 'jq -e ".hooks.PreToolUse[0].matcher | test(\"PowerShell\") and test(\"MultiEdit\")" "$H/hooks.json" >/dev/null'
+
+echo "=== agents: only tools the factory can judge"
+bad_tools=""
+for a in "$H"/../agents/*.md; do
+  # The lead is the developer's own session's role (/factory:run), not a subagent.
+  [ "$(basename "$a")" = lead.md ] && continue
+  t="$(sed -n 's/^tools:[[:space:]]*//p' "$a" | head -1 | tr -d '\r')"
+  [ -n "$t" ] || { bad_tools="$bad_tools $(basename "$a"):(all)"; continue; }
+  for x in $(printf '%s' "$t" | tr ',' ' '); do
+    case "$x" in Read|Write|Edit|Bash|Grep|Glob) ;; *) bad_tools="$bad_tools $(basename "$a"):$x" ;; esac
+  done
+done
+check "every agent lists its tools, all judgeable" '[ -z "$bad_tools" ]' "$bad_tools"
 
 echo "=== STOP halts factory-start"
 mkdir -p tasks/backlog tasks/in-progress

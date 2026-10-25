@@ -16,7 +16,11 @@
 #
 # --apply only ever adds: config keys that are missing, directories that are
 # missing, gitignore lines that are missing, task sections that are missing. It
-# never rewrites a value, a gate, or a task body. The gate is reported and left
+# never rewrites a value, a gate, or a task body. The one replacement it makes is
+# the old 64-line "## Factory Protokolü" section of CLAUDE.md, which every agent
+# read on every turn and which contradicted the agents' own instructions: it
+# becomes the short pointer /factory:init now writes, and the old text is kept
+# in .factory/claude-md-protocol.old.md. The gate is reported and left
 # alone: it is the one file that is legitimately project-specific, and merging
 # into it is /factory-init's job, with the developer watching.
 set -uo pipefail
@@ -66,7 +70,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP"; do
+  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/lead-state.read.md" ".factory/claude-md-protocol.old.md"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -91,6 +95,11 @@ else
   missing_gate=" (no gates/verify.sh at all)"
 fi
 
+old_protocol=""
+if [ -f "${ROOT}/CLAUDE.md" ] && grep -q '^## Factory Protokolü[[:space:]]*$' "${ROOT}/CLAUDE.md"; then
+  old_protocol=yes
+fi
+
 missing_sections=""
 for col in backlog in-progress proposed; do
   [ -d "${ROOT}/tasks/${col}" ] || continue
@@ -107,12 +116,13 @@ done
 [ -n "${missing_deny}" ]     && note ".claude/settings.json is missing hard-ban rules in:${missing_deny}"
 [ -n "${missing_gate}" ]     && note "gates/verify.sh is missing:${missing_gate}"
 [ -n "${missing_sections}" ] && note "task files with no '## Files touched' / '## Attempts':${missing_sections}"
+[ -n "${old_protocol}" ]     && note "CLAUDE.md still carries the old '## Factory Protokolü' section (every agent reads it on every turn)"
 [ "${project_version}" = "${HARNESS}" ] || note "initialised by factory ${project_version}, harness is now ${HARNESS}"
 
 # --- brief: one line for the session briefing --------------------------------
 if [ "${mode}" = "brief" ]; then
   [ "${gaps}" -eq 0 ] && exit 0
-  echo "This project was set up by factory ${project_version}; the harness is ${HARNESS}, and ${gaps} thing(s) it writes into a project are out of date. Run /factory-upgrade - it is additive and takes seconds."
+  echo "This project was set up by factory ${project_version}; the harness is ${HARNESS}, and ${gaps} thing(s) it writes into a project are out of date. Run /factory:upgrade - it is additive and takes seconds."
   exit 0
 fi
 
@@ -123,8 +133,8 @@ fi
 
 if [ "${mode}" = "report" ]; then
   echo
-  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections."
-  [ -n "${missing_gate}" ] && echo "The gate is never touched by --apply: run /factory-init in this project and it will offer to merge the missing parts into gates/verify.sh, keeping everything the file already does."
+  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections, and replaces the old CLAUDE.md protocol with its pointer."
+  [ -n "${missing_gate}" ] && echo "The gate is never touched by --apply: run /factory:init in this project and it will offer to merge the missing parts into gates/verify.sh, keeping everything the file already does."
   exit 1
 fi
 
@@ -205,6 +215,40 @@ if [ -n "${missing_sections}" ]; then
   applied=$((applied + 1))
 fi
 
+if [ -n "${old_protocol}" ]; then
+  claude_was_clean=no
+  if git -C "${ROOT}" ls-files --error-unmatch -- CLAUDE.md >/dev/null 2>&1 \
+     && [ -z "$(git -C "${ROOT}" status --porcelain -- CLAUDE.md 2>/dev/null)" ]; then
+    claude_was_clean=yes
+  fi
+  # The section runs from its heading to the next level-1 or level-2 heading, or
+  # to the end of the file; its own subsections are level 3.
+  if FACTORY_POINTER="$(cat <<'POINTER'
+<!-- factory: written by /factory:init, kept current by /factory:upgrade -->
+## Factory
+While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:fast` builds the approved backlog and `/factory:status` shows the board.
+Compact instructions: keep which tasks were dispatched and at which stage, the last check results, retries and blocked reasons; where the summary and `.factory/lead-state.md` disagree, the file is right.
+<!-- /factory -->
+POINTER
+)" awk -v keep="${F}/claude-md-protocol.old.md" '
+      BEGIN { pointer = ENVIRON["FACTORY_POINTER"] }
+      !inside && /^## Factory Protokolü[[:space:]]*$/ { inside = 1; print pointer; print $0 > keep; next }
+      inside && /^##?[ 	]/ { inside = 0 }
+      inside { print > keep; next }
+      { print }' "${ROOT}/CLAUDE.md" > "${ROOT}/CLAUDE.md.tmp.$$" \
+     && mv -f "${ROOT}/CLAUDE.md.tmp.$$" "${ROOT}/CLAUDE.md"; then
+    echo "  replaced the old CLAUDE.md protocol with the pointer (the old text is in .factory/claude-md-protocol.old.md)"
+    applied=$((applied + 1))
+    if [ "${claude_was_clean}" = yes ]; then
+      git -C "${ROOT}" add -- CLAUDE.md >/dev/null 2>&1 \
+        && git -C "${ROOT}" commit -q -m "factory: CLAUDE.md protocol replaced by its pointer" -m "Factory-Upgrade: ${HARNESS}" -- CLAUDE.md >/dev/null 2>&1 \
+        && echo "  committed CLAUDE.md"
+    fi
+  else
+    rm -f "${ROOT}/CLAUDE.md.tmp.$$"
+  fi
+fi
+
 # Stamp the version even when nothing else was missing, so the next check is
 # quiet - except when the gate is behind, which --apply cannot fix.
 if [ -z "${missing_gate}" ] && [ -f "${CONFIG}" ]; then
@@ -222,7 +266,7 @@ fi
 echo "UPGRADE APPLIED: ${applied} area(s) brought up to factory ${HARNESS}."
 if [ -n "${missing_gate}" ]; then
   echo "STILL BEHIND - gates/verify.sh is missing:${missing_gate}"
-  echo "The gate is the project's own file and is never rewritten by this script. Run /factory-init here: it reads the existing gate, reports exactly which protections it lacks and what each one would have caught, and merges in only the missing parts once you approve. Until then the config still says ${project_version}."
+  echo "The gate is the project's own file and is never rewritten by this script. Run /factory:init here: it reads the existing gate, reports exactly which protections it lacks and what each one would have caught, and merges in only the missing parts once you approve. Until then the config still says ${project_version}."
   exit 1
 fi
 exit 0

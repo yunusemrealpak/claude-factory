@@ -1,6 +1,6 @@
 ---
 description: Open the factory dashboard - what the team is doing right now, what it is stuck on, and what it needs from me
-argument-hint: [optional: "publish" to get a link I can open on my phone]
+argument-hint: "[optional: publish, to get a link I can open on my phone]"
 disable-model-invocation: true
 allowed-tools: Read, Bash(factory-dash), Bash(open *), Bash(ls *), Bash(cat *), Artifact
 ---

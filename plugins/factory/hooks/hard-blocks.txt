@@ -5,18 +5,33 @@
 # factory-deny.sh, which copies the `deny` lines into a project's
 # .claude/settings.json. Change a rule here and every layer changes with it.
 #
-# Fields are separated by " ## ". Regexes are POSIX ERE that also parse as
-# JavaScript once [[:space:]] / [:alnum:] are spelled out, which register.js
-# does; keep to that subset (no \b, \d, lookahead).
+# Fields are separated by " ## ". Regexes are read by Python
+# (factory-hardblock.py) and by JavaScript (register.js), with [:space:] and
+# [:alnum:] spelled out for both; keep to what the two read alike (lookahead
+# is fine, no \b or \d, no lookbehind).
+#
+# A rule that refuses a command halts the run (.factory/STOP). What a command
+# only prints or searches for is not read as a command: the quoted text of a
+# command that runs nothing (factory-block T1 'copy the key into .env',
+# grep -rn "git push" scripts), a heredoc cat or tee writes to a file, a
+# comment.
 #
 #   hard_blocks_version: N        raised whenever a rule is added or loosened;
 #                                 an autonomy consent written under another
 #                                 number counts for nothing (factory-autonomy)
 #   bash ## name ## regex          a Bash command (newlines are read as ';')
-#   path ## name ## any|root ## X  a file written by a write tool, or by a Bash
-#                                  redirect / tee / cp / mv / rm / sed -i ...;
-#                                  "root" is relative to the project root,
-#                                  "any" matches at any depth
+#   path ## name ## any|root ## X [## create-only]
+#                                  a file written by a write tool, or by a Bash
+#                                  or PowerShell redirect / tee / cp / mv / rm /
+#                                  sed -i / Set-Content ..., or by inline code
+#                                  (python -c, node -e, a heredoc) that names it
+#                                  and calls a write; "root" is relative to the
+#                                  project root, "any" matches at any depth;
+#                                  create-only lets rm through (removing the file
+#                                  only takes a green away). The folders such a
+#                                  path starts with (.factory, gates, .git) are
+#                                  held too: writing into one, moving or removing
+#                                  it (rule name protected-dir).
 #   deny ## rule                   a Claude Code permissions.deny rule
 #   group ## name ## question      an optional ban: the developer may allow it per
 #                                  project (.factory/config.json,
@@ -26,26 +41,47 @@
 #                                  what a group lifts: the name of a bash or path
 #                                  rule, or a deny rule line. An allowed group is
 #                                  dropped from all three layers at once.
+#
+# Matching ignores letter case and reads every spelling of a path as one: "\"
+# as "/", the project root in any form (C:\p, /c/p, $PWD, $(pwd), ~+,
+# $CLAUDE_PROJECT_DIR, ...) removed, "dir/../" collapsed. Inline code that
+# writes and names a protected path is refused without halting the run: that
+# match is a guess.
 
-hard_blocks_version: 1
+hard_blocks_version: 3
 
 # --- git: an agent never publishes ------------------------------------------
-bash ## git-push ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+push([[:space:];&|)]|$)
+bash ## git-push ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+push([[:space:];&|)"'`]|$)
 bash ## git-force ## (^|[^[:alnum:]_.-])git[[:space:]]+[^;&|]*[[:space:]]--force
-bash ## git-tag ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+tag([[:space:];&|)]|$)
-bash ## git-no-verify ## (^|[^[:alnum:]_.-])git[[:space:]]+[^;&|]*[[:space:]]--no-verify([[:space:];&|)]|$)
-bash ## git-remote-set-url ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+remote[[:space:]]+([^;&|]*[[:space:]])?set-url([[:space:];&|)]|$)
+bash ## git-tag ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+tag([[:space:];&|)"'`]|$)
+bash ## git-no-verify ## (^|[^[:alnum:]_.-])git[[:space:]]+[^;&|]*[[:space:]]--no-verify([[:space:];&|)"'`]|$)
+bash ## git-remote-set-url ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+remote[[:space:]]+([^;&|]*[[:space:]])?set-url([[:space:];&|)"'`]|$)
+
+# --- git: an agent never rewrites the shared tree or how git runs -----------
+# Builders share one working tree; each of these acts on all of it (or on the
+# index, the refs, or the hooks that judge a commit). The factory's scripts do
+# the one git write a task needs.
+bash ## git-tree-write ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+(add|commit|reset|checkout|restore|switch|rm|mv|am|cherry-pick|revert|merge|rebase|pull|update-ref|update-index|filter-branch|filter-repo|replace|notes|stash(?![[:space:]]+(list|show)([[:space:];&|)"'`]|$))|worktree(?![[:space:]]+list([[:space:];&|)"'`]|$))|apply(?!(?![^;&|]*[[:space:]]--apply([[:space:];&|)"'`]|$))[^;&|]*[[:space:]]--(check|stat|numstat|summary)([[:space:];&|)=]|$))|clean(?![^;&|]*[[:space:]](-[A-Za-z]*n[A-Za-z]*|--dry-run)([[:space:];&|)"'`]|$))|config(?!([[:space:]]+(--(global|local|system|worktree|show-origin|show-scope|null|name-only|includes|no-includes)|-z|--type(=|[[:space:]]+)[^[:space:];&|]+))*[[:space:]]+(--get(-all|-regexp|-urlmatch)?|-l|--list|get|list)([[:space:];&|)=]|$))(?!([[:space:]]+(--(global|local|system|worktree|show-origin|show-scope|null|name-only|includes|no-includes)|-z|--type(=|[[:space:]]+)[^[:space:];&|]+))*[[:space:]]+[A-Za-z][A-Za-z0-9._-]*[[:space:]]*([;&|)]|$)))([[:space:];&|)"'`]|$)
+bash ## git-inline-config ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+(-c[[:space:]]*[^[:space:]=;&|]+=|--config-env)
+bash ## git-env-config ## (^|[^[:alnum:]_])(GIT_CONFIG[A-Za-z0-9_]*|GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE|GIT_EXEC_PATH|GIT_OBJECT_DIRECTORY)=
+bash ## protected-cd ## (^|[;&|(`"'[:space:]])(cd|pushd|chdir|set-location|sl)[[:space:]]+["']?(\./|(\.\./)+)?(\.factory|gates|\.git)(/|["']?([[:space:];&|)"'`]|$))
 
 # --- gh: no merge, no release, no state-changing API call --------------------
-bash ## gh-pr-merge ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?pr[[:space:]]+merge([[:space:];&|)]|$)
-bash ## gh-release ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?release([[:space:];&|)]|$)
+bash ## gh-pr-merge ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?pr[[:space:]]+merge([[:space:];&|)"'`]|$)
+bash ## gh-release ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?release([[:space:];&|)"'`]|$)
 bash ## gh-api-write ## (^|[^[:alnum:]_.-])gh[[:space:]]+([^;&|]*[[:space:]])?api[[:space:]]+([^;&|]*[[:space:]])?(-X|--method|-f|-F|--field|--raw-field|--input)
 
 # --- store and deploy tooling, at the start of a command ---------------------
 bash ## store-deploy ## (^|[;&|(`"']|\$\()[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*((sudo|xcrun|env|time|nohup|command|exec|bundle[[:space:]]+exec|bundler[[:space:]]+exec)[[:space:]]+)*([^[:space:];&|]*/)?(fastlane|altool|notarytool|codemagic[A-Za-z_-]*)([[:space:];&|)"']|$)
 
 # --- the choice of optional bans is the developer's, never an agent's --------
-bash ## bans-change ## (^|[^[:alnum:]_.-])factory-bans(\.sh)?[[:space:]]+(allow|forbid|set)([[:space:];&|)]|$)
+bash ## bans-change ## (^|[^[:alnum:]_.-])factory-bans(\.sh)?[[:space:]]+["']?(allow|forbid|set)["']?([[:space:];&|)"'`]|$)
+# An answer to a question is the developer's word; an agent asks, never answers.
+bash ## ask-answer ## (^|[^[:alnum:]_.-])factory-ask(\.sh)?[[:space:]]+["']?answer["']?([[:space:];&|)"'`]|$)
+# Consent is the developer's own typed words, handed over by the prompt hook.
+bash ## consent-forge ## (^|[;&|(`"']|\$\()[[:space:]]*(([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*|sudo|env|exec|command|nohup|time|xargs|bash|sh|source|\.)[[:space:]]+)*([^[:space:];&|]*/)?factory-consent(\.sh)?([[:space:];&|)<"'`]|$)
+# A lesson is a rule every later builder of its module reads: /factory:retro, not an agent.
+bash ## lesson-change ## (^|[^[:alnum:]_.-])factory-lesson(\.sh)?[[:space:]]+["']?(add|remove)["']?([[:space:];&|)"'`]|$)
 
 # --- writes ------------------------------------------------------------------
 path ## env-file ## any ## \.env(\.[^/[:space:]]*)?
@@ -57,6 +93,18 @@ path ## census-baseline ## root ## \.factory/baseline\.json
 path ## factory-config ## root ## \.factory/config\.json
 path ## autonomy-consent ## root ## \.factory/autonomy.*
 path ## stop-switch ## root ## \.factory/STOP
+# The factory's own record of what passed, what failed and what was asked:
+# written by its scripts, never by an agent.
+path ## factory-verified ## root ## \.factory/verified/.* ## create-only
+path ## factory-run-start ## root ## \.factory/run-start\.json
+path ## factory-no-progress ## root ## \.factory/no-progress/.*
+path ## factory-failures ## root ## \.factory/failures/.*
+path ## factory-questions ## root ## \.factory/questions/.*
+path ## factory-lessons ## root ## \.factory/lessons/.*
+path ## factory-events ## root ## \.factory/events\.jsonl
+path ## factory-publish-state ## root ## \.factory/publish/.*
+path ## factory-active ## root ## \.factory/active
+path ## git-dir ## any ## \.git/.*
 
 # --- second layer: the same bans as permissions.deny -------------------------
 # Not here: gates/, verify.sh, baseline.json and config.json. The developer's own

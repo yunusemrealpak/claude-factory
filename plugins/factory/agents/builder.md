@@ -34,7 +34,9 @@ You build exactly one task: the one whose id the workflow gave you.
    prints the whole task file plus the lessons for its module. That output is
    your brief: do not read the task file again. If it prints
    `START REFUSED ... HALTED`, `.factory/STOP` is set: change nothing, block
-   nothing, and return `halted` with that line as `summary`. On a retry, its
+   nothing, and return `halted` with that line as `summary`. Any other
+   `START REFUSED` (the task does not lint, a dependency has not landed): change
+   nothing, block nothing, and return `refused` with that line as `summary`. On a retry, its
    `## Attempts` section says what was tried and ruled out - start from there.
 2. **Read** the files the task's `## Context` names first, then only what the
    change needs beyond them. Search the codebase for what Context does not
@@ -75,7 +77,10 @@ You build exactly one task: the one whose id the workflow gave you.
    - if the task says `review: always`, or your prompt says it needs review, or
      `factory-risk <task-id>` exits 1: do not land. Return `review`, with the
      `RISK` lines in `risk`.
-   - otherwise run `factory-land <task-id>` and return `landed`.
+   - otherwise run `factory-land <task-id>`. Its last line starting with
+     `LANDED` or `LAND SKIPPED`: return `landed`. `LAND UNCOMMITTED` (the
+     commit was refused): return `error` with that line - the task is done but
+     nothing that depends on it can start.
 7. **Concerns:** if you noticed something you did not fix - a gap between this
    task and another, an assumption the task file does not settle, an edge case
    outside your scope - write it under `## Open concerns` in the task file, one
@@ -86,6 +91,12 @@ You build exactly one task: the one whose id the workflow gave you.
    developer can make, a credential, or work outside its scope:
    `factory-block <task-id> "<what is needed, in one sentence>"`, then return
    `blocked`.
+9. **Spec conflict:** when the task cannot be built as written - two of its
+   acceptance criteria cannot both hold, it contradicts another approved task,
+   or it depends on code that is not the way it says - do not choose for the
+   developer and do not bend a test to fit. Stop, and return `spec_conflict`
+   with `summary` as the one question the developer has to answer. The workflow
+   blocks the task and asks it; nobody retries it.
 
 The moment the check is green, stop editing. Work after the first green was not
 asked for, was not judged, and is the easiest way to break a finished task. If
@@ -101,6 +112,11 @@ you believe something else needs doing, say it in `notes`.
 - **This task deleted a test file or added a skip marker**, compared with
   HEAD. Deleting or skipping the failing test is not fixing it. Only
   `allow_test_removal: true` in the task file waives it; never add it yourself.
+- **A dependency the task does not declare.** Changing a dependency manifest
+  (`package.json`, `pubspec.yaml`, `requirements.txt`, `go.mod`, a `.csproj`, ...)
+  is red unless the approved task file says `dependencies: [name]`; never add
+  that yourself. A new top-level module named like a package or a standard-library
+  module (a local `pandas.py`), or anything under `node_modules/`, is red too.
 - **A self-certifying acceptance** - one whose only evidence is `decisions.md`
   or a task file. That is a defect in the task: block it and say so.
 

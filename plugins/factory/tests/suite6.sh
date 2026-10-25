@@ -168,7 +168,14 @@ out="$(factory-check T-02)"; rc=$?
 check "a change no test exercises is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "no test exercised this change"' "$out"
 setfm tasks/in-progress/T-02.md untested_ok true
 out="$(factory-check T-02)"; rc=$?
-check "untested_ok written in the task waives it" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "waived by untested_ok"' "$out"
+check "untested_ok a builder writes is not an exemption" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changes what was approved: untested_ok" && ! printf "%s" "$out" | grep -q "waived by untested_ok"' "$out"
+git add -f tasks/in-progress/T-02.md; git commit -qm "approve T-02"
+out="$(factory-check T-02)"; rc=$?
+check "untested_ok in the approved task file waives it" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "waived by untested_ok"' "$out"
+sed -i.bak 's/^acceptance: .*/acceptance: true/' tasks/in-progress/T-02.md; rm -f tasks/in-progress/T-02.md.bak
+out="$(factory-check T-02)"; rc=$?
+check "an acceptance rewritten after approval is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changes what was approved: acceptance"' "$out"
+git checkout -q tasks/in-progress/T-02.md
 git checkout -q tools/gen.src
 mktask in-progress T-03 "" "grep -q done decisions.md && test -f tasks/done/T-03.md" ui/src/main.src
 out="$(factory-check T-03)"; rc=$?
@@ -180,6 +187,69 @@ mktask in-progress T-04 "" "bash runner.sh ui"
 out="$(factory-check T-04)"; rc=$?
 check "an empty Files touched list is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "lists nothing under"' "$out"
 
+echo "=== what the run is judged by"
+factory-check census --json > .factory/run-start.json
+check "the run's start records the gate and config digests" 'jq -e ".protected[\".factory/config.json\"] | length == 64" .factory/run-start.json >/dev/null'
+mktask in-progress T-P1 "" "bash runner.sh core" core/src/main.src
+cp .factory/config.json "$WORK/s6-config.keep"
+jq '.commands.test = "true"' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check T-P1)"; rc=$?
+check "a config changed since the start is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "what the run is judged by changed: changed since the run started: .factory/config.json"' "$out"
+cp "$WORK/s6-config.keep" .factory/config.json
+jq '.hard_blocks = {"allow": ["git-tag"]}' .factory/config.json > c && mv c .factory/config.json
+out="$(factory-check T-P1)"; rc=$?
+check "the developer's ban choices are not the gate" '! printf "%s" "$out" | grep -q "what the run is judged by"' "$out"
+cp "$WORK/s6-config.keep" .factory/config.json
+mkdir -p gates; printf 'exit 0\n' > gates/extra.sh
+out="$(factory-check T-P1)"; rc=$?
+check "a new file under gates/ is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changed since the run started: gates/extra.sh"' "$out"
+rm -rf gates
+mkdir -p gates/__pycache__; : > gates/.DS_Store; : > gates/__pycache__/x.cpython-312.pyc; : > gates/verify.sh.swp
+out="$(factory-check T-P1)"; rc=$?
+check "...but what an editor or Python leaves beside it is not" '! printf "%s" "$out" | grep -q "what the run is judged by"' "$out"
+rm -rf gates
+mktask in-progress T-P2 "" "bash runner.sh core" core/src/main.src gates/verify.sh
+out="$(factory-check T-P2)"; rc=$?
+check "a task that lists the gate is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "the task lists gates/verify.sh"' "$out"
+rm -f tasks/in-progress/T-P1.md tasks/in-progress/T-P2.md .factory/run-start.json
+
+echo "=== dependencies a task did not declare"
+printf '{"name":"poly","dependencies":{}}\n' > package.json; git add package.json; git commit -qm "manifest"
+mktask in-progress T-D1 "" "bash runner.sh core" core/src/main.src package.json
+git add -f tasks/in-progress/T-D1.md; git commit -qm "approve T-D1"
+printf '{"name":"poly","dependencies":{"left-pad":"1.0.0"}}\n' > package.json
+out="$(factory-check T-D1)"; rc=$?
+check "a manifest change the approved task does not declare is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "deps     FAIL (this task changes dependency manifest(s) its approved task file does not declare: package.json)"' "$out"
+setfm tasks/in-progress/T-D1.md dependencies "[left-pad]"
+out="$(factory-check T-D1)"; rc=$?
+check "a builder declaring it in its own task file is not a declaration" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changes what was approved: dependencies"' "$out"
+git add -f tasks/in-progress/T-D1.md; git commit -qm "approve left-pad"
+out="$(factory-check T-D1)"; rc=$?
+check "declared in the approved task file, it passes the guard" '! printf "%s" "$out" | grep -q "deps     FAIL" && printf "%s" "$out" | grep -q "deps     declared: left-pad (package.json)"' "$out"
+git checkout -q package.json; git rm -qf tasks/in-progress/T-D1.md; git commit -qm "T-D1 done"
+mv tasks/in-progress/T-04.md "$WORK/T-04.keep"
+mktask in-progress T-D2 "" "bash runner.sh core" core/src/main.src
+printf '{"name":"poly","dependencies":{"evil":"1"}}\n' > package.json
+out="$(factory-check T-D2)"; rc=$?
+check "a manifest changed in the tree that no task lists is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changed in the tree that no task lists: package.json"' "$out"
+factory-check census --json > .factory/run-start.json
+out="$(factory-check T-D2)"; rc=$?
+check "...unless it was already so when the run started" '! printf "%s" "$out" | grep -q "no task lists: package.json"' "$out"
+rm -f .factory/run-start.json; git checkout -q package.json; mv "$WORK/T-04.keep" tasks/in-progress/T-04.md
+printf 'helper\n' > pandas.py; mkdir -p core/hypothesis; : > core/hypothesis/__init__.py
+printf 'requests==2.0\n' > requirements.txt; git add requirements.txt; git commit -qm reqs
+printf 'x\n' > requests.py; printf 'x\n' > core/helpers.py
+mktask in-progress T-D3 "" "bash runner.sh core" core/src/main.src pandas.py requests.py core/helpers.py
+out="$(factory-check T-D3)"; rc=$?
+check "a new top-level module named like a declared package is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "requests.py shadows a package"' "$out"
+check "...while an ordinary new module is not, nor a name the project does not use" '! printf "%s" "$out" | grep -q "core/helpers.py shadows" && ! printf "%s" "$out" | grep -q "pandas.py shadows"' "$out"
+mktask in-progress T-D4 "" "bash runner.sh core" core/src/main.src core/hypothesis/__init__.py node_modules/left-pad/index.js
+mkdir -p node_modules/left-pad; printf 'x\n' > node_modules/left-pad/index.js
+out="$(factory-check T-D4)"; rc=$?
+check "a test tool's name at a unit's top, or anything under node_modules/, is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "core/hypothesis/__init__.py shadows" && printf "%s" "$out" | grep -q "node_modules/left-pad/index.js shadows"' "$out"
+rm -rf pandas.py requests.py core/helpers.py core/hypothesis node_modules tasks/in-progress/T-D?.md
+git rm -q requirements.txt package.json; git commit -qm "drop manifests"
+
 echo "=== the census is judged per task, against HEAD"
 rm -f api/tests/main.t
 mktask in-progress T-05 "" "bash runner.sh api" api/src/main.src api/tests/main.t
@@ -187,7 +257,10 @@ out="$(factory-check T-05)"; rc=$?
 check "a task that deletes a tracked test file is red" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "this task deletes test file(s): api/tests/main.t"' "$out"
 setfm tasks/in-progress/T-05.md allow_test_removal true
 out="$(factory-check T-05)"; rc=$?
-check "allow_test_removal written in the task waives it" '! printf "%s" "$out" | grep -q "census"' "$out"
+check "allow_test_removal a builder writes is not an exemption" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "changes what was approved: allow_test_removal"' "$out"
+git add -f tasks/in-progress/T-05.md; git commit -qm "approve T-05"
+out="$(factory-check T-05)"; rc=$?
+check "allow_test_removal in the approved task file waives it" '! printf "%s" "$out" | grep -q "census"' "$out"
 git checkout -q api/tests/main.t
 printf 'exit 0 # SKIP flaky\n' > ui/tests/main.t
 mktask in-progress T-06 "" "bash runner.sh ui" ui/tests/main.t
@@ -251,16 +324,19 @@ check "a planned run records where it started" 'jq -e ".test_files == 3 and (.fi
 out="$(factory-check --full)"; rc=$?
 check "the full check runs build, test and lint" '[ $rc -eq 0 ] && [ "$(tools_log)" = "build,runner .,lint," ] && printf "%s" "$out" | grep -q "test     PASS (6 test(s))"' "$(tools_log) / $out"
 check "its verdict is recorded" 'grep -q "^verdict=green" .factory/full-check && grep -q "^tests=6" .factory/full-check'
-jq '.commands.test = "echo no tests found"' .factory/config.json > c && mv c .factory/config.json
+# The cases below retune the gate commands between full checks, as a developer
+# would between runs: each one records the new config as the run's start.
+redigest() { jq --argjson p "$(factory-check census --json | jq -c .protected)" '.protected = $p' .factory/run-start.json > rs && mv rs .factory/run-start.json; }
+jq '.commands.test = "echo no tests found"' .factory/config.json > c && mv c .factory/config.json; redigest
 out="$(factory-check --full)"; rc=$?
 check "a suite that ran zero tests is never a green full check" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "reported 0 test(s)"' "$out"
-jq '.commands.test = "echo done"' .factory/config.json > c && mv c .factory/config.json
+jq '.commands.test = "echo done"' .factory/config.json > c && mv c .factory/config.json; redigest
 out="$(factory-check --full)"; rc=$?
 check "an unrecognised count passes but says so" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "count not recognised - set check.count"' "$out"
-jq '.commands.test = "echo done; echo \"ran=7\"" | .check.count = "ran=(\\d+)"' .factory/config.json > c && mv c .factory/config.json
+jq '.commands.test = "echo done; echo \"ran=7\"" | .check.count = "ran=(\\d+)"' .factory/config.json > c && mv c .factory/config.json; redigest
 out="$(factory-check --full)"
 check "check.count teaches it any runner's summary" 'printf "%s" "$out" | grep -q "test     PASS (7 test(s))"' "$out"
-jq '.commands.test = "bash runner.sh ." | del(.check.count)' .factory/config.json > c && mv c .factory/config.json
+jq '.commands.test = "bash runner.sh ." | del(.check.count)' .factory/config.json > c && mv c .factory/config.json; redigest
 git rm -q ui/tests/main.t; git commit -qm "lose a test"
 out="$(factory-check --full)"; rc=$?
 check "a run that lost a test file in HEAD is red, whoever lost it" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "test files in HEAD went from 3 to 2"' "$out"
@@ -297,6 +373,42 @@ mktask backlog K "L" "x" a; mktask backlog L "K" "x" a
 j="$(factory-plan --json)"; rc=$?
 check "a dependency cycle stops the plan" '[ $rc -eq 1 ] && jq -e ".ok == false and (.problems[0] | test(\"cycle\"))" <<< "$j" >/dev/null' "$j"
 
+echo "=== the board is committed as approved when a run starts"
+SN="$WORK/snap"; rm -rf "$SN"; mkdir -p "$SN/.factory" "$SN/src"; cd "$SN" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+: > .factory/active; echo '{"fast":{"workers":2}}' > .factory/config.json; printf '.factory/\n' > .gitignore
+printf 'a\n' > src/a.txt; git add -A; git commit -qm base
+P="$SN"
+mktask backlog Q-01 "" "true" src/a.txt
+setfm tasks/backlog/Q-01.md untested_ok true
+printf 'mine\n' > src/a.txt; printf 'staged\n' > src/b.txt; git add src/b.txt
+j="$(factory-plan --json --start)"
+check "start commits the run's task files" 'git log -1 --format=%B | grep -q "^Factory-Board: snapshot" && git show HEAD:./tasks/backlog/Q-01.md | grep -q "^untested_ok: true"' "$j"
+check "...and nothing else" '[ "$(git show --name-only --format= HEAD)" = "tasks/backlog/Q-01.md" ] && [ "$(git diff --cached --name-only)" = "src/b.txt" ] && [ "$(git diff --name-only)" = "src/a.txt" ]' "$(git show --stat HEAD)"
+check "the plan says which commit it is" '[ "$(jq -r .snapshot <<< "$j")" = "$(git rev-parse --short HEAD)" ]' "$j"
+check "run-start points at the snapshot" '[ "$(jq -r .head .factory/run-start.json)" = "$(git rev-parse --short HEAD)" ]'
+j="$(factory-plan --json --start)"
+check "a board already committed is not committed again" '[ "$(git log --format=%s | grep -c "board snapshot")" = 1 ] && [ "$(jq -r ".snapshot // empty" <<< "$j")" = "" ]' "$j"
+sed -i.bak 's/^acceptance: .*/acceptance: echo ok/' tasks/backlog/Q-01.md && rm -f tasks/backlog/Q-01.md.bak
+j="$(factory-plan --json --start)"; rc=$?
+check "a change to what was approved is not committed as approved: the run does not start" '[ $rc -eq 1 ] && printf "%s" "$j" | grep -q "Q-01: tasks/backlog/Q-01.md changes what was approved (acceptance)" && [ "$(git log --format=%s | grep -c "board snapshot")" = 1 ]' "$j"
+git checkout -q tasks/backlog/Q-01.md
+mkdir -p tasks/in-progress; mv tasks/backlog/Q-01.md tasks/in-progress/Q-01.md
+sed -i.bak 's/^stage: .*/stage: implementing/' tasks/in-progress/Q-01.md && rm -f tasks/in-progress/Q-01.md.bak
+j="$(factory-plan --json --start)"; rc=$?
+check "a task a dead run left in progress, its approval unchanged, is committed where it is" '[ $rc -eq 0 ] && git show HEAD:./tasks/in-progress/Q-01.md | grep -q "^stage: implementing" && ! git cat-file -e HEAD:./tasks/backlog/Q-01.md 2>/dev/null' "$j"
+sed -i.bak 's/^stage: .*/stage: verifying/' tasks/in-progress/Q-01.md && rm -f tasks/in-progress/Q-01.md.bak
+git rev-parse HEAD > .git/MERGE_HEAD
+j="$(factory-plan --json --start)"; rc=$?
+check "a snapshot git refuses stops the run, and says why" '[ $rc -eq 1 ] && printf "%s" "$j" | grep -q "the board snapshot could not be committed"' "$j"
+rm -f .git/MERGE_HEAD
+mktask in-progress Q-02 "" "true" src/a.txt
+printf '{"head":"%s","tasks":["Q-02"]}\n' "$(git rev-parse --short HEAD)" > .factory/run-start.json
+out="$(factory-check Q-02 2>&1)"; rc=$?
+check "a task this run planned that no commit has is red: its approval has no anchor" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "the task file is in no commit"' "$out"
+rm -f tasks/in-progress/Q-02.md .factory/run-start.json
+git reset -q; git checkout -q src/a.txt; rm -f src/b.txt
+
 echo "=== start, land, block"
 S="$WORK/land"; rm -rf "$S"; mkdir -p "$S/.factory/lessons" "$S/.factory/verified" "$S/src"; cd "$S" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
@@ -320,11 +432,28 @@ check "land refuses without a green check" '[ $rc -eq 1 ] && printf "%s" "$out" 
 printf 'y\n' > src/x.txt; touch .factory/verified/C2-01
 out="$(factory-land C2-01)"; rc=$?
 check "land moves to done and commits exactly the task" '[ $rc -eq 0 ] && [ -f tasks/done/C2-01.md ] && printf "%s" "$out" | grep -q "^LANDED C2-01 [0-9a-f]" && git log -1 --format=%B | grep -q "Factory-Task: C2-01"' "$out"
+out="$(factory-land C2-01)"
+check "landing it again says it is already done and committed" 'printf "%s" "$out" | grep -q "^LAND SKIPPED for C2-01"' "$out"
+git rm -q --cached tasks/done/C2-01.md; git commit -qm "drop it from HEAD"
+out="$(factory-land C2-01)"
+check "...and says so when no commit has it: its dependents cannot start" 'printf "%s" "$out" | grep -q "^LAND UNCOMMITTED C2-01"' "$out"
+git add tasks/done/C2-01.md; git commit -qm "back"
 check "land records the move and the commit in the event log" 'jq -e "select(.kind==\"commit\" and .task==\"C2-01\")" .factory/events.jsonl >/dev/null && jq -e "select(.kind==\"move\" and .to==\"done\")" .factory/events.jsonl >/dev/null'
 mktask backlog C2-02 "" "bash run.sh" src/x.txt
 sed -i.bak 's/^title: .*/title: <placeholder>/; s/^acceptance: .*/acceptance: <command>/' tasks/backlog/C2-02.md; rm -f tasks/backlog/C2-02.md.bak
 out="$(factory-start C2-02)"; rc=$?
 check "start refuses a task that does not lint" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "does not lint" && [ -f tasks/backlog/C2-02.md ]' "$out"
+mktask backlog C2-11 "C2-98" "bash run.sh" src/x.txt
+out="$(factory-start C2-11)"; rc=$?
+check "start refuses a task whose dependency is not done" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "DEPENDENCY C2-98 is not done" && [ -f tasks/backlog/C2-11.md ]' "$out"
+mktask done C2-98 "" "x" src/x.txt
+out="$(factory-start C2-11)"; rc=$?
+check "...or done but not committed" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "DEPENDENCY C2-98 is in tasks/done but not committed"' "$out"
+git add tasks/done/C2-98.md; git commit -qm "C2-98 landed"
+out="$(factory-start C2-11)"; rc=$?
+check "...and starts once it has landed" '[ $rc -eq 0 ] && [ -f tasks/in-progress/C2-11.md ]' "$out"
+check "the builder is told to return refused" 'grep -q "Any other" "$PLUGIN/agents/builder.md" && grep -q "return \`refused\`" "$PLUGIN/agents/builder.md"'
+rm -f tasks/in-progress/C2-11.md; git rm -q tasks/done/C2-98.md; git commit -qm "drop C2-98"
 mktask backlog C2-03 "" "bash run.sh" src/x.txt; touch .factory/verified/C2-03
 out="$(factory-block C2-03 "needs the payment provider decided")"
 check "block moves the task with its reason and drops its marker" '[ -f tasks/blocked/C2-03.md ] && grep -q "needs the payment provider decided" tasks/blocked/C2-03.md && [ ! -f .factory/verified/C2-03 ]' "$out"
@@ -442,11 +571,14 @@ printf '\n## Review 2026-01-02\nverdict: fail\nfindings:\n- src/a.txt:3 tenant f
 out="$(factory-finish --tasks F-04 --no-full)"
 check "a failed review of a task that already landed is reported first" 'jq -e ".attention[0].concern | startswith(\"review failed: src/a.txt:3 tenant filter\")" <<< "$out" >/dev/null' "$out"
 
-echo "=== the workflow's scheduling (JavaScriptCore)"
+echo "=== the workflow's scheduling (JavaScriptCore, or node)"
 JSC=/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
-if [ -x "$JSC" ]; then
+JSRUN=""
+if [ -x "$JSC" ]; then JSRUN="$JSC"; elif command -v node >/dev/null 2>&1; then JSRUN=node; fi
+if [ -n "$JSRUN" ]; then
   harness() {  # <scenario js defining agent()> -> prints result JSON and call order
-    { cat <<'JS'
+    { [ "$JSRUN" = node ] && echo 'var print = function (s) { console.log(s) };'
+      cat <<'JS'
 var logs=[]; function log(m){logs.push(m)} function phase(p){}
 var args={workers:2}; var calls=[]; var prompts={};
 JS
@@ -456,7 +588,7 @@ JS
       echo "}"
       echo "__main().then(function(r){ print(JSON.stringify(r)); print('CALLS '+calls.join(',')); print('FINISH '+prompts.finish); print('AUDIT '+prompts.audit) }, function(e){ print('ERROR '+e) });"
     } > "$WORK/wf.js"
-    "$JSC" "$WORK/wf.js"
+    "$JSRUN" "$WORK/wf.js"
   }
   base='function reply(o){return Promise.resolve(o)}
 function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
@@ -508,8 +640,42 @@ function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
  if(l==="X land") return reply({ok:true,line:"LANDED X abc"});
  return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
   check "a waiting task is re-checked after the work it waited on lands, then landed" 'printf "%s" "$out" | grep -q "^CALLS plan,X,Y,X recheck,X land,finish$" && printf "%s" "$out" | head -1 | jq -e "(.agent_notes[] | select(.id==\"X\") | .status) == \"landed\"" >/dev/null' "$out"
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
+ if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
+ if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
+ if(l==="A ask") return reply({ok:true,line:"ASKED Q1 for A"});
+ if(l==="A") return reply({id:"A",status:"spec_conflict",summary:"criteria 2 and 3 cannot both hold: which wins?",concerns:[]});
+ return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
+  check "a spec conflict is asked, not retried, and holds what depends on it" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A ask,finish$" && printf "%s" "$out" | head -1 | jq -e "[.agent_notes[] | .status] == [\"blocked\",\"skipped\"]" >/dev/null' "$out"
+  check "the question goes to factory-ask and the reason to factory-block" 'grep -q "factory-ask ask" "$WORK/wf.js" && printf "%s" "$out" | head -1 | jq -e "(.agent_notes[0].summary | startswith(\"spec conflict, asked: criteria 2 and 3\"))" >/dev/null' "$out"
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
+ if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]}]});
+ if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
+ if(/ block$/.test(l)) { prompts.block=p; return reply({ok:true,line:"BLOCKED A"}) }
+ return reply({id:"A",status:"refused",summary:"START REFUSED for A: DEPENDENCY Z is not done",concerns:[]}); }')"
+  check "a task refused at start is blocked once, with the refusal" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A block,finish$" && grep -q "refused at start" "$WORK/wf.js"' "$out"
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
+ if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
+ if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
+ if(l==="A") return reply(null);
+ if(l==="A retry") return reply({id:"A",status:"refused",summary:"START REFUSED for A: it is in done/A.md - only a task in tasks/backlog or tasks/in-progress can be started.",concerns:[]});
+ if(l==="A land") return reply({ok:true,line:"LAND SKIPPED for A: it is already in tasks/done."});
+ return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
+  check "a task an earlier attempt landed is landed, and what depends on it runs" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A land,B,finish$"' "$out"
+  out="$(harness 'function reply(o){return Promise.resolve(o)}
+function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
+ if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
+ if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
+ if(l==="A") return reply({id:"A",status:"waiting",summary:"waits on work in flight",concerns:[]});
+ if(l==="A recheck") return reply({ok:true,line:"CHECK RESULT: GREEN"});
+ if(l==="A land") return reply({ok:false,line:"LAND UNCOMMITTED A: the task is done and its check is green, but the commit was refused (above)"});
+ return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
+  check "a land whose commit was refused is not a landing: what depends on it waits" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A recheck,A land,finish$"' "$out"
 else
-  echo "(JavaScriptCore not found - workflow scheduling tests skipped)"
+  echo "(neither JavaScriptCore nor node found - workflow scheduling tests skipped)"
 fi
 
 echo "=== 2.6.1: what chains a plan, and where the lead wakes"
@@ -523,7 +689,7 @@ check "the brief tells the lead not to watch a running workflow" 'grep -q "do no
 
 echo "=== 2.6: the runner agent, helper calls, metrics, the idle brief"
 check "runner.md is a cheap, bounded, CLAUDE.md-free agent" 'f="$PLUGIN/agents/runner.md"; grep -q "^name: runner" "$f" && grep -q "^model: haiku" "$f" && grep -q "^effort: low" "$f" && grep -q "^maxTurns: 4" "$f" && grep -q "^omitClaudeMd: true" "$f"'
-if [ -x "$JSC" ]; then
+if [ -n "$JSRUN" ]; then
   out="$(harness 'function reply(o){return Promise.resolve(o)}
 function agent(p,o){var l=(o&&o.label)||""; calls.push(l+"@"+((o&&o.agentType)||"-")+(o&&o.model?"!model":""));
  if(l==="A block") prompts.finish=p;
@@ -568,6 +734,11 @@ mkdir -p gates; printf '# count_tests guard_test_census guard_acceptance record_
 out="$(jq -n --arg c "$IDLE" '{cwd:$c, session_id:"S9", hook_event_name:"SessionStart", source:"startup"}' | bash "$H/factory-brief.sh" 2>/dev/null)"
 ctx="$(printf "%s" "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')"
 check "an empty board gets a short brief, not the full one" '[ -n "$ctx" ] && [ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ] && printf "%s" "$ctx" | grep -q "board is empty"' "$out"
+printf 'LEAD-STATE: dispatching T-9\n' > .factory/lead-state.md
+out="$(jq -n --arg c "$IDLE" '{cwd:$c, session_id:"S9", hook_event_name:"SessionStart", source:"compact"}' | bash "$H/factory-brief.sh" 2>/dev/null)"
+ctx="$(printf "%s" "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')"
+check "...after a compaction too: an empty board has nothing to resume" '[ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ] && ! printf "%s" "$ctx" | grep -q "LEAD-STATE" && [ ! -f .factory/lead-state.md ]' "$out"
+rm -f .factory/lead-state.read.md
 
 # nested config keys are migrated
 NEST="$WORK/nest"; rm -rf "$NEST"; mkdir -p "$NEST/gates" "$NEST/tasks/backlog" "$NEST/.factory"; cd "$NEST" || exit 1

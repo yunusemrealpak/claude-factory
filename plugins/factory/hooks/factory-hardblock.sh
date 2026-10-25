@@ -18,9 +18,10 @@
 #                                                     the breaker: .factory/STOP,
 #                                                     an event, a notification
 #
-# check: prints the rule's name and exits 3 on a hit; exits 0 on a clean call.
-# A rules file that cannot be read exits 4 - callers treat that as a hit
-# (fail closed): a missing rule list is not permission.
+# check: prints the rule's name and exits 3 on a hit (refuse, halt the run) or
+# 5 on a soft one (refuse this call only); exits 0 on a clean call. A rules
+# file that cannot be read exits 4 - callers treat that as a hit (fail closed):
+# a missing rule list is not permission.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -117,64 +118,13 @@ esac
 
 ROOT="${2:-}"
 KIND="${3:-}"
-text="$(cat)"
-
-# Same normalisation as register.js: a continued line is one line, every
-# remaining newline separates commands, and the project root is spelled
-# relative, so an absolute path cannot hide a root-relative rule.
-if [ "${KIND}" = "bash" ]; then
-  text="$(printf '%s\n' "${text}" | sed -e :a -e '/\\$/N; s/\\\n//; ta' | tr '\n' ';')"
-fi
-if [ -n "${ROOT}" ]; then
-  rootpre="${ROOT%/}/"
-  text="${text//"${rootpre}"/}"
-fi
-
-LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
-hit() {
-  if [ -n "${LIFTED}" ] && printf '%s\n' "${LIFTED}" | grep -qxF -- "$1"; then return 0; fi
-  printf '%s\n' "$1"; exit 3
-}
-matches() { printf '%s' "$2" | grep -Eq -- "$1"; }
-
-T='([[:space:];&|)"'"'"'>]|$)'
-
-if [ "${KIND}" = "bash" ]; then
-  while IFS=$'\t' read -r name re; do
-    [ -n "${name}" ] || continue
-    matches "${re}" "${text}" && hit "${name}"
-  done < <(fields bash)
-  while IFS=$'\t' read -r name anchor x; do
-    [ -n "${name}" ] || continue
-    if [ "${anchor}" = "root" ]; then
-      lead='(\./)?'
-      pre='[[:space:]"'"'"'=<>]'
-      vlead='(\./)?'
-    else
-      lead='([^[:space:];&|"'"'"']*/)?'
-      pre='[[:space:]/"'"'"'=<>]'
-      vlead=''
-    fi
-    verbs='(^|[^[:alnum:]_.-])(tee|cp|mv|install|ln|rm|rsync|truncate|touch|chmod|chown|dd|shred|unlink|(sed|perl)[[:space:]]+([^;&|]*[[:space:]])?-[A-Za-z]*i)'
-    redirect=">>?[|]?[[:space:]]*[\"']?${lead}(${x})${T}"
-    verb="${verbs}[[:space:]]+([^;&|]*${pre})?${vlead}(${x})${T}"
-    matches "${redirect}" "${text}" && hit "${name}"
-    matches "${verb}" "${text}" && hit "${name}"
-  done < <(fields path)
-  exit 0
-fi
-
-if [ "${KIND}" = "path" ]; then
-  while IFS=$'\t' read -r name anchor x; do
-    [ -n "${name}" ] || continue
-    if [ "${anchor}" = "root" ]; then
-      matches "^(\./)?(${x})\$" "${text}" && hit "${name}"
-    else
-      matches "(^|/)(${x})\$" "${text}" && hit "${name}"
-    fi
-  done < <(fields path)
-  exit 0
-fi
-
-echo "unknown kind: ${KIND}" >&2
-exit 2
+# The judge is factory-hardblock.py: the same algorithm as register.js, in a
+# language with the same regular expressions. The rule names the project's
+# allowed groups lift go with it. No Python, no judge: the call is refused.
+command -v python3 >/dev/null 2>&1 || { echo "python3 not found: the hard blocks cannot be judged" >&2; exit 4; }
+# The root goes in on the first line of stdin: under MSYS an argument that looks
+# like a path is rewritten on its way to a Windows program, and the root has to
+# arrive in the spelling the command uses.
+HB_LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
+export HB_LIFTED
+{ printf '%s\n' "${ROOT}"; cat; } | python3 -I "${HERE}/factory-hardblock.py" "${RULES}" "${KIND}"

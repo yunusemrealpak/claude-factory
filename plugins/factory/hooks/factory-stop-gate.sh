@@ -176,7 +176,7 @@ if [ -n "$unverified" ]; then
   acc_red="$(printf '%s\n' "$unverified" | tr '\n' ' ' | sed 's/ $//')"
   msg="$msg Waiting on a change acceptance: ${acc_red} - see .factory/changes/<change>/acceptance.log."
 fi
-msg="$msg /factory-retro reviews the run."
+msg="$msg /factory:retro reviews the run."
 
 # systemMessage is shown to the developer; with no decision field the session
 # stops normally.

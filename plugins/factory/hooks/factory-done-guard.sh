@@ -25,7 +25,20 @@ input="$(cat)"
 project_dir="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
 [ -z "$project_dir" ] && project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-[ -f "$project_dir/.factory/active" ] || exit 0
+# The call's cwd is wherever the agent last cd'd to. The factory is the nearest
+# folder above it that has .factory/active - a cd into src/ must not turn the
+# guard off.
+factory_root() {  # <dir>
+  local d
+  d="$(factory_posix_path "$1")"; d="${d%/}"
+  while [ -n "$d" ]; do
+    [ -f "$d/.factory/active" ] && { printf '%s' "$d"; return 0; }
+    case "$d" in */*) d="${d%/*}" ;; *) break ;; esac
+  done
+  return 1
+}
+found="$(factory_root "$project_dir")" || found="$(factory_root "${CLAUDE_PROJECT_DIR:-}")" || exit 0
+project_dir="$found"
 
 tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
 
@@ -66,12 +79,18 @@ if [ -n "$agent_id" ]; then
   hb_kind=""; hb_text=""
   case "$tool_name" in
     Bash) hb_kind=bash; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" ;;
-    Write|Edit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)" ;;
+    PowerShell) hb_kind=powershell; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" ;;
+    Write|Edit|MultiEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)" ;;
     NotebookEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // empty' 2>/dev/null)" ;;
   esac
   if [ -n "$hb_kind" ] && [ -n "$hb_text" ]; then
     hb_rule="$(printf '%s' "$hb_text" | bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
     hb_rc=$?
+    # 5: inline code that writes and names a protected path - a guess, so only
+    # this call is refused and the run goes on.
+    if [ "$hb_rc" -eq 5 ]; then
+      deny "Factory: inline code that writes files and names a protected path (${hb_rule}) is refused - the factory cannot tell what it writes. Read protected files with the Read tool; if the task has to change one, say so in your result. The run goes on."
+    fi
     if [ "$hb_rc" -ne 0 ]; then
       [ "$hb_rc" -eq 3 ] || hb_rule="rule-list-unreadable"
       bash "$HOOK_DIR/factory-hardblock.sh" trip "$project_dir" "$hb_rule" "$tool_name" "$agent_id" >/dev/null 2>&1
@@ -81,7 +100,7 @@ if [ -n "$agent_id" ]; then
 fi
 
 case "$tool_name" in
-  Bash)
+  Bash|PowerShell)
     payload="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
     # Join backslash continuations first, so a move written across two lines is
     # still one line by the time it is examined.
@@ -99,9 +118,11 @@ case "$tool_name" in
     # unrelated move elsewhere in the same script is prose and must not be
     # blocked. Narrowing the payload to those lines also keeps the task-id scan
     # below from claiming every other .md file the command happens to name.
-    moves="$(printf '%s\n' "$payload" \
-      | grep -E '(^|[|;&(]|[[:space:]])(mv|cp|rsync|ln|install)([[:space:]]|$)|git[[:space:]]+mv|>[[:space:]]*[^[:space:]]*tasks/done' \
-      | grep 'tasks/done')"
+    # PowerShell moves with Move-Item / Copy-Item and their aliases, in any
+    # letter case.
+    moves="$(printf '%s\n' "$payload" | tr '\\' '/' \
+      | grep -Ei '(^|[|;&(]|[[:space:]])(mv|cp|rsync|ln|install|move-item|copy-item|mi|cpi|move|copy)([[:space:]]|$)|git[[:space:]]+mv|>[[:space:]]*[^[:space:]]*tasks/done' \
+      | grep -i 'tasks/done')"
     # A gate run is about to start: fingerprint the tree it will see. The event
     # hook compares this with the tree when the run went green, and only when
     # the two match does it write the fingerprint into the marker - which is what
@@ -115,7 +136,7 @@ case "$tool_name" in
     [ -n "$moves" ] || exit 0
     payload="$moves"
     ;;
-  Write|Edit|NotebookEdit)
+  Write|Edit|MultiEdit|NotebookEdit)
     payload="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)"
     case "$payload" in
       *tasks/done*) ;;

@@ -1,14 +1,14 @@
 ---
 description: Bootstrap the factory in this project - detect or decide the stack, scaffold tasks/ and gates/, split the spec into dependency-ordered tasks, then ask for approval
-argument-hint: [spec path or one-line goal]
+argument-hint: "[spec path or one-line goal]"
 disable-model-invocation: true
 allowed-tools: Read, Write, Edit, Bash, Grep, Glob, AskUserQuestion
 ---
 
 Bootstrap the factory in the current project. Argument (optional): $ARGUMENTS
 
-Work through the steps in order. Do not skip step 5: `/factory:run` must not run
-without my explicit approval.
+Work through the steps in order. Do not skip step 5: nothing builds - not
+`/factory:fast`, not `/factory:run` - without my explicit approval.
 
 ---
 
@@ -40,7 +40,7 @@ Incremental mode changes the steps below like this:
   Never write `.factory/config.json`, `gates/verify.sh`, `decisions.md` or
   `.factory/active` in this mode: each already exists and may have been adjusted
   by hand since the first run.
-- **Step 3** - skip; the protocol section is already in `CLAUDE.md`.
+- **Step 3** - skip if `CLAUDE.md` already has the `<!-- factory` pointer; if it still has the old `## Factory Protokolü` section, run `factory-upgrade --apply`, which replaces it.
 - **Step 4, the spec** - the spec for this run is the command argument and only
   the argument. A path means read that file; a sentence means that sentence is
   the goal. With no argument, stop and ask me what this run is for. `specs/` is
@@ -875,6 +875,8 @@ the repo while `.factory/active` and `config.json` remain committed:
 ```
 .factory/verified/
 .factory/lead-state.md
+.factory/lead-state.read.md
+.factory/claude-md-protocol.old.md
 .factory/compact-log.md
 .factory/failures/
 .factory/no-progress/
@@ -929,73 +931,19 @@ takes a deliberate act instead of happening quietly.
 
 ## Step 3 - Project CLAUDE.md
 
-Append this section to the project's `CLAUDE.md` (create the file if absent, do
-not touch unrelated content, do not duplicate the section if it is already there):
+Every agent loads `CLAUDE.md` on every turn, so the factory puts only a pointer
+there; the rules live in each agent's own instructions and in the hooks. Add
+this block to the project's `CLAUDE.md` (create the file if absent, do not touch
+unrelated content). If the file already has a block between `<!-- factory`
+markers, or an old `## Factory Protokolü` section from an earlier factory,
+replace it with this one instead of adding a second:
 
 ```markdown
-## Factory Protokolü
-
-Bu projede `.factory/active` dosyası varken factory üretim döngüsü açıktır.
-
-### Görev yaşam döngüsü
-`tasks/backlog` -> `tasks/in-progress` -> review (yalnızca kırmızı kapıda,
-`review: always` işaretliyse ya da görev `risk_paths` kalıplarına uyan bir
-dosyaya dokunduysa) -> entegrasyon kapısı -> `tasks/done` -> commit.
-Kapanmayan iş `tasks/blocked` altına düşer. Görev dosyası tek gerçek kaynaktır.
-
-### Commit kuralı
-Fabrika tek, paylaşılan çalışma ağacında ve mevcut dalda çalışır. Her görev,
-entegrasyon kapısı yeşil dönüp `tasks/done` altına taşındıktan sonra
-`factory-commit <task-id>` ile TEK commit olarak
-kaydedilir. Commit yalnızca görev dosyasının `## Files touched` listesindeki
-dosyaları, görev dosyasını ve `decisions.md` dosyasını içerir; mesajında
-`Factory-Task` ve `Factory-Change` trailer'ları bulunur. Ajan asla push etmez; kademe izin veriyorsa betik yayımlar. Fabrika dal
-açmaz, geçmişi yeniden yazmaz, commit hook'larını atlamaz. Commit'i yalnızca
-entegratör atar. Paylaşılan ağaçta `git checkout`, `restore`, `stash` ve `reset`
-başka bir görevin işini de silebileceği için hiçbir ajan bunları kullanmaz.
-
-### Dersler
-`.factory/lessons/<module>.md` ve `.factory/lessons/general.md`, bu projede daha
-önce bir görevin hata yaparak öğrendiği kuralları tutar. Implementer işe
-başlamadan önce kendi modülünün ve genel dosyanın derslerini okur. Ders yalnızca
-`/factory:retro` üzerinden, geliştirici tek tek onayladıktan sonra ve kanıtıyla
-birlikte (`factory-lesson`) eklenir. Ajanlar kendiliğinden ders yazmaz.
-
-### Değişiklik arşivi
-Her `/factory:init` onayı bir değişiklik açar (C1, C2, ...). İstek
-`.factory/changes/<id>-<slug>/goal.md` dosyasında, görevler, commit'ler ve
-kararlar `summary.md` dosyasında durur. Son görevi biten değişiklik kapanır ve
-yerel `refs/factory/<id>-<slug>` ref'i o değişikliğin son commit'ini gösterir. Bu
-ref ajan tarafından push edilmez.
-
-### Kapı kuralı
-Bir görev `tasks/done` dizinine ancak `bash gates/verify.sh <task-id>` yeşil
-dönüp `.factory/verified/<task-id>` işaretini yazdıktan sonra taşınabilir.
-PreToolUse hook'u işaret dosyası olmadan yapılan her taşımayı reddeder.
-Kapı kırmızıysa: çıktı görev dosyasına eklenir, `retries` artırılır, görev geri
-atanır; `retries` limiti aşarsa görev `tasks/blocked` altına taşınır.
-
-### decisions.md zorunluluğu
-Her tamamlanan görev `decisions.md` dosyasına TEK satır karar notu bırakır:
-`- <task-id>: <alınan karar> - <tek cümlelik gerekçe>`
-
-### Lead kod yazmaz
-Takım lideri görev atar, sonuç toplar, yönlendirir. Kaynak kod, test veya
-konfigürasyon yazmaz; bunu implementer yapar.
-
-### Compact instructions
-Konuşma özetlenirken (compact) şunlar mutlaka korunacak: hangi görevlerin
-dispatch edildiği ve hangi aşamada oldukları, son kapı sonuçları (yeşil/kırmızı
-ve hangi görev), retries sayaçları, blocked görevlerin sebepleri ve `decisions.md`
-dosyasına henüz yazılmamış kararlar. Uzun araç çıktıları, dosya içerikleri ve
-tamamlanmış görevlerin ayrıntıları atılabilir. Özetten hemen önce PreCompact
-hook'u `.factory/lead-state.md` dosyasına tahtanın diskten yeniden kurulmuş halini
-yazar; özet ile bu dosya çelişirse dosya doğrudur.
-
-### Kapsam genişletme yasağı
-Ajan yalnızca görev dosyasında yazan işi yapar. Görevde geçmeyen refactor, ek
-dosya, bağımlılık yükseltmesi veya "hazır girmişken" iyileştirme yapılmaz.
-Mevcut yapı kusurluysa iş yapılmaz, durum lead'e bildirilir.
+<!-- factory: written by /factory:init, kept current by /factory:upgrade -->
+## Factory
+While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:fast` builds the approved backlog and `/factory:status` shows the board.
+Compact instructions: keep which tasks were dispatched and at which stage, the last check results, retries and blocked reasons; where the summary and `.factory/lead-state.md` disagree, the file is right.
+<!-- /factory -->
 ```
 
 ---
@@ -1110,6 +1058,10 @@ Rules:
   scaffolding, an entry point that only wires things together. `factory-check`
   turns a change no test imports red, because a change nothing exercises proves
   nothing; the flag is how the exception is written down, like the next one.
+- `dependencies: [name, ...]` on a task that has to add or upgrade a package.
+  `factory-check` turns a change to a dependency manifest red unless the approved
+  task file names it, so a builder cannot pull in code nobody chose; name the
+  packages the spec calls for, and nothing on a task that should need none.
 - `allow_test_removal: true` only on a task whose actual job is removing or
   skipping tests - retiring a feature, deleting a dead suite. The gate counts
   test files and suppression markers on every run and turns red when a run has
@@ -1148,7 +1100,7 @@ level as `factory-plan` measured them. On the first run,
 also print the `risk_paths` list you wrote into the config, one line: green
 tasks touching these get a reviewer before commit.
 
-Then stop and ask for approval in plain words. Do not start `/factory:run`, do not
+Then stop and ask for approval in plain words. Do not start a run, do not
 dispatch any agents, do not touch source code until I approve. If I want changes,
 edit the task files and show the table again. The slug and the type are part of
 what I approve; I may change them.
@@ -1190,7 +1142,9 @@ When I approve:
    branch and commit it starts from, its tasks, the earlier changes it builds
    on - and a first `summary.md`. It refuses a reused id, a malformed slug or
    type, and a change with no tasks: fix what it names and run it again.
-3. Tell me the change is open and that `/factory:run` builds it.
+3. Tell me the change is open and that `/factory:fast` builds it: one builder per
+   task and one deterministic check each, measured at about a third of the cost
+   of `/factory:run`, which remains for when I want a lead to steer task by task.
 ### The one line that approves and hands over
 
 End the board with exactly one line: `Onaylıyorsanız "auto devam et" yazın.` That

@@ -251,6 +251,96 @@ def build(proposed=False, change=None):
     return out
 
 
+# What a task's approval is (factory-check.py APPROVED_KEYS holds the same).
+APPROVED_KEYS = ("acceptance", "needs_human", "untested_ok", "allow_test_removal", "modifies_tests", "dependencies")
+
+
+def git(*args):
+    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def committed_task(tid):
+    """(path, frontmatter) of the task file as HEAD has it, in any lane; None
+    when HEAD has none."""
+    rc, out, _ = git("ls-tree", "-r", "--name-only", "HEAD", "--", "tasks")
+    for p in out.splitlines() if rc == 0 else []:
+        if p.rsplit("/", 1)[-1] == tid + ".md":
+            rc, text, _ = git("show", "HEAD:./" + p)
+            if rc == 0:
+                fm = {}
+                lines = text.splitlines()
+                if lines and lines[0].strip() == "---":
+                    for line in lines[1:]:
+                        if line.strip() == "---":
+                            break
+                        key, sep, value = line.partition(":")
+                        if sep and key.strip() not in fm:
+                            fm[key.strip()] = value.strip()
+                return p, fm
+    return None
+
+
+def snapshot_board(plan):
+    """The task files this run builds, committed as approved before anything
+    starts. factory-check reads a task's acceptance and exemptions from this
+    commit, never from the working tree a builder writes. Only those files go
+    in: anything else staged or changed stays as it was.
+
+    A task file HEAD already has is committed again only when what was approved
+    is unchanged (a builder's notes, a stage): a run never approves a change to
+    a task it builds - that would let one run launder its own untested_ok. Such
+    a change is a problem the developer settles by committing the file.
+
+    Returns (short sha or None, problems, warnings)."""
+    problems, warnings = [], []
+    if git("rev-parse", "--is-inside-work-tree")[0] != 0:
+        return None, problems, warnings
+    paths = []
+    for t in plan["tasks"]:
+        for col in ("backlog", "in-progress"):
+            p = "tasks/%s/%s.md" % (col, t["id"])
+            on_disk = os.path.isfile(os.path.join(ROOT, p))
+            tracked = git("ls-files", "--error-unmatch", "--", p)[0] == 0
+            if not (on_disk or tracked):
+                continue
+            head = committed_task(t["id"])
+            if head and on_disk:
+                now = frontmatter(os.path.join(ROOT, p))
+                changed = [k for k in APPROVED_KEYS if now.get(k, "").strip() != head[1].get(k, "").strip()]
+                if changed:
+                    problems.append("%s: %s changes what was approved (%s) since %s was committed - a run never "
+                                    "approves a change to a task it builds. If you made the change, commit the task "
+                                    "file; otherwise put it back" % (t["id"], p, ", ".join(changed), head[0]))
+                    continue
+            paths.append(p)
+    if problems or not paths:
+        return None, problems, warnings
+    ignored = [p for p in paths if git("check-ignore", "-q", "--", p)[0] == 0]
+    if ignored:
+        warnings.append("task files are gitignored (%s): what was approved cannot be committed, so factory-check "
+                        "reads each task's approval from the working tree" % " ".join(ignored[:5]))
+        paths = [p for p in paths if p not in ignored]
+        if not paths:
+            return None, problems, warnings
+    rc, st, _ = git("status", "--porcelain", "--", *paths)
+    if rc != 0 or not st.strip():
+        return None, problems, warnings
+    msg = "factory: board snapshot (%d task(s))" % len(plan["tasks"])
+    # No project hook judges this commit: it holds task files only, and a
+    # commit-msg rule that refused it would leave the approvals unanchored.
+    for step in (["add", "-A", "--"] + paths,
+                 ["commit", "-q", "--no-verify", "-m", msg, "-m", "Factory-Board: snapshot", "--"] + paths):
+        rc, out, err = git(*step)
+        if rc != 0:
+            why = ((err or out).strip().splitlines() or ["git " + step[0] + " failed"])[0]
+            problems.append("the board snapshot could not be committed (%s). factory-check reads each task's "
+                            "approval from it, so the run does not start: commit the task files yourself, or fix "
+                            "what git refused" % why)
+            return None, problems, warnings
+    return (git("rev-parse", "--short", "HEAD")[1].strip() or None), problems, warnings
+
+
 def record_start(plan):
     """The test census of HEAD before anything lands. Each task's check can only
     see its own files; this is what lets the end of the run see all of them."""
@@ -304,6 +394,14 @@ def main(argv):
         if gate:
             plan["ok"] = False
             plan["problems"] += gate
+    if "--start" in argv and plan["ok"] and "--proposed" not in argv:
+        snap, problems, warnings = snapshot_board(plan)
+        plan["warnings"] += warnings
+        if problems:
+            plan["ok"] = False
+            plan["problems"] += problems
+        elif snap:
+            plan["snapshot"] = snap
     if "--start" in argv and plan["ok"] and "--proposed" not in argv:
         record_start(plan)
         try:

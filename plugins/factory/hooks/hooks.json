@@ -11,7 +11,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash|Write|Edit|NotebookEdit",
+        "matcher": "Bash|PowerShell|Write|Edit|MultiEdit|NotebookEdit",
         "hooks": [
           { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}\"/hooks/factory-done-guard.sh", "timeout": 15 }
         ]
