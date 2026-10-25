@@ -17,6 +17,10 @@
 //     .factory/usage.jsonl (tokens, model, agent label), for cost per task.
 //   - /factory-board: the board from disk, with no model turn.
 //   - tool.call: the hard blocks (class D) for subagents - see hard-blocks.txt.
+//   - turn.step / tool.call: a builder's budget (config.json fast.budget):
+//     its model requests and tokens are counted, at 80% it is told once, and
+//     at the ceiling every call but its way out (factory-settle, the task
+//     file) is refused. Judged after the hard blocks, and it FAILS OPEN.
 //   - prompt.submit: "auto devam et" / "auto dur" typed by the developer is
 //     handed to factory-consent.sh, which writes the autonomy record.
 //   - an AbovePrompt band showing the autonomy level, with an "auto dur" button.
@@ -30,10 +34,20 @@ const LANES = ['backlog', 'in-progress', 'blocked', 'done']
 // phrase). "origin" kinds that are the developer's own hand.
 const CONSENT = /^\s*auto (devam( et)?|dur)\s*$/i
 const HUMAN_ORIGINS = ['composer', 'bridge']
+// One builder's budget when config.json has no fast.budget: its model
+// requests (each one a turn, as maxTurns counts them) and the tokens they
+// cost - input, output and cache writes; cache reads are cheap and grow with
+// every turn, so they are left out.
+const BUDGET = { turns: 150, tokens: 3000000 }
+// agents/builder.md stops a builder outright at maxTurns: 250. A ceiling is
+// kept below that, so the builder always has turns left to settle.
+const TURN_CAP = 230
+const BUDGET_WARN = 0.8
 
 // Per load: a reload runs register again and starts these over.
 let root = null
 let agents = {}
+let spent = {}
 let quotaWrittenAt = 0
 let rules = null
 let band = { level: 'local', stopped: false, publish: '' }
@@ -43,6 +57,7 @@ export function register(on) {
   root = null
   bashExe = null
   agents = {}
+  spent = {}
   quotaWrittenAt = 0
   rules = null
   band = { level: 'local', stopped: false, publish: '' }
@@ -107,6 +122,16 @@ export function register(on) {
     return next(e)
   })
 
+  // A subagent's run is one turn and its turn.complete comes at the end, so
+  // a builder's budget is counted here, one model request at a time.
+  on('turn.step', async function* ($, e, next) {
+    const r = yield* next(e)
+    try {
+      if (e.agentId && r && r.usage) await spend($, e.agentId, r.usage)
+    } catch {}
+    return r
+  })
+
   // The hard blocks. Only a subagent's call is judged here (the developer's
   // own session pushes and writes gates when it has to); the same list is
   // enforced for every session by factory-done-guard.sh and the project's
@@ -118,7 +143,7 @@ export function register(on) {
       rule: 'hook-error',
       why: 'the hard-block check failed (' + String(err && err.message ? err.message : err) + ')',
     }))
-    if (!hit) return next(e)
+    if (!hit) return withinBudget($, e, next)
     // A tool the factory cannot judge is refused, but it is not a ban the
     // agent broke: the run goes on.
     if (hit.rule === 'unjudged-tool') {
@@ -227,12 +252,7 @@ async function meter($, e) {
   if (!root || !e.usage) return
   if (!(await $.fs.exists(root + '/.factory/active'))) return
   const id = e.agentId || 'main'
-  let who = agents[id]
-  if (!who && e.agentId) {
-    const found = (await $.agent.list()).find((a) => a.id === e.agentId)
-    who = found ? { type: found.type, label: found.description } : { type: null, label: null }
-    agents[id] = who
-  }
+  const who = e.agentId ? await whoIs($, e.agentId) : agents[id]
   const u = e.usage
   const line = JSON.stringify({
     ts: Math.floor((await $.clock.now()) / 1000),
@@ -249,6 +269,176 @@ async function meter($, e) {
     reason: e.reason,
   })
   await $.process.run([await bashPath($), '-c', 'cat >> "$1"', 'sh', root + '/.factory/usage.jsonl'], {
+    stdin: line + '\n',
+    timeoutMs: 5000,
+  })
+}
+
+// The type and label of a subagent: from its spawn when this module saw it,
+// else from the session's list of agents.
+async function whoIs($, id) {
+  if (!agents[id]) {
+    const found = (await $.agent.list()).find((a) => a.id === id)
+    agents[id] = found ? { type: found.type, label: found.description } : { type: null, label: null }
+  }
+  return agents[id]
+}
+
+// --- a builder's budget -------------------------------------------------------
+
+// fast.budget: {turns, tokens}. A missing or unusable value is the default;
+// 0 lifts that one limit; false lifts the budget. Read once per builder, at
+// its first request, so a change applies to the next builder.
+async function budgetLimits($) {
+  let b
+  try {
+    const cfg = JSON.parse(await $.fs.read(root + '/.factory/config.json'))
+    b = cfg && cfg.fast ? cfg.fast.budget : undefined
+  } catch {}
+  if (b === false) return null
+  const pick = (v, d) => (v === 0 ? Infinity : typeof v === 'number' && v > 0 ? v : d)
+  const o = b && typeof b === 'object' ? b : {}
+  return { turns: Math.min(pick(o.turns, BUDGET.turns), TURN_CAP), tokens: pick(o.tokens, BUDGET.tokens) }
+}
+
+// Only a factory builder has a budget: a reviewer, a runner and the main
+// session are never limited here. The task is the first word of its label
+// ("C2-01 retry" builds C2-01).
+async function spend($, id, u) {
+  let b = spent[id]
+  if (!b) {
+    spent[id] = { off: true }
+    const who = await whoIs($, id)
+    if (!who || who.type !== 'factory:builder') return
+    if (!root) root = await $.session.root()
+    if (!(await $.fs.exists(root + '/.factory/active'))) return
+    const lim = await budgetLimits($)
+    if (!lim) return
+    const task = String(who.label || '').trim().split(/\s+/)[0] || '<task-id>'
+    b = spent[id] = { off: false, task, lim, turns: 0, tokens: 0, warned: false, full: false }
+  }
+  if (b.off) return
+  b.turns++
+  b.tokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0)
+}
+
+const fmtTokens = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n))
+const fmtLimit = (n, f) => (n === Infinity ? 'no limit' : f(n))
+const usedText = (b) =>
+  b.turns + ' of ' + fmtLimit(b.lim.turns, String) + ' turns, ' + fmtTokens(b.tokens) + ' of ' + fmtLimit(b.lim.tokens, fmtTokens) + ' tokens'
+
+// A builder's way out once its budget is full: factory-settle, factory-block
+// or factory-ask run on their own, the task file and decisions.md, and its
+// structured answer.
+const EXIT_CMD = /^\s*([^\s]*\/)?factory-(settle|block|ask)(\.py|\.sh)?(\s|$)/
+const EXIT_FILE = /^(\.\/)?(tasks\/.+\.md|decisions\.md)$/i
+
+// The command with every quoted span emptied, or null when a span runs a
+// command ($( ) or backticks inside double quotes) or a quote does not close.
+function unquoted(c) {
+  let out = ''
+  let q = ''
+  for (let i = 0; i < c.length; i++) {
+    const ch = c[i]
+    if (q === "'") {
+      if (ch === "'") q = ''
+      continue
+    }
+    if (q === '"') {
+      if (ch === '\\') i++
+      else if (ch === '"') q = ''
+      else if (ch === '`' || (ch === '$' && c[i + 1] === '(')) return null
+      continue
+    }
+    if (ch === '\\') {
+      i++
+      out += '_'
+    } else if (ch === "'" || ch === '"') {
+      q = ch
+      out += '_'
+    } else out += ch
+  }
+  return q ? null : out
+}
+
+function budgetExit(e) {
+  // The structured answer is how the builder returns `budget` to the loop.
+  if (e.tool === 'StructuredOutput') return true
+  if (SHELL_TOOLS.has(e.tool)) {
+    const bare = unquoted(String(e.command || ''))
+    return bare !== null && EXIT_CMD.test(bare) && !/[;&|`<>\n]|\$\(/.test(bare)
+  }
+  if (FILE_TOOLS.has(e.tool) || e.tool === 'Read') {
+    return EXIT_FILE.test(normalise(String(e.file_path || e.notebook_path || ''), root))
+  }
+  return false
+}
+
+// null, or what this call meets: a full budget (deny) or the 80% line (warn).
+function budgetCheck(e) {
+  const b = spent[e.agentId]
+  if (!b || b.off) return null
+  if (b.turns >= b.lim.turns || b.tokens >= b.lim.tokens) {
+    if (budgetExit(e)) return null
+    return {
+      b,
+      deny:
+        'Factory budget full for ' + b.task + ': ' + usedText(b) + '. Stop working on the code. The way out: ' +
+        '(1) add an entry to ## Attempts in the task file (### Attempt <n> - <UTC time> - budget: what you tried, what is left, what to rule out); ' +
+        '(2) run, on its own: factory-settle ' + b.task + ' "budget: ' + b.turns + ' turns, ' + fmtTokens(b.tokens) + ' tokens"; ' +
+        '(3) return status budget with the line it printed as settle. ' +
+        'Only that is allowed now: factory-settle, factory-block or factory-ask run alone, and reading or editing the task file and decisions.md.',
+    }
+  }
+  const warm = b.turns >= b.lim.turns * BUDGET_WARN || b.tokens >= b.lim.tokens * BUDGET_WARN
+  if (b.warned || !warm) return null
+  return {
+    b,
+    warn:
+      'Factory budget: ' + b.task + ' has used ' + usedText(b) + ' (past 80%). Finish the smallest change that meets the acceptance criteria and run the check now. ' +
+      'At the ceiling every call is refused but factory-settle, factory-block, factory-ask and the task file.',
+  }
+}
+
+// Runs after the hard blocks found nothing. It never refuses on a failure of
+// its own: an error here lets the call through.
+async function withinBudget($, e, next) {
+  let c = null
+  try {
+    c = budgetCheck(e)
+  } catch {}
+  if (c && c.deny) {
+    if (!c.b.full) {
+      c.b.full = true
+      await budgetEvent($, c.b, 'full').catch(() => {})
+    }
+    return { deny: c.deny }
+  }
+  const r = await next(e)
+  if (!c || !c.warn || !r || r.deny) return r
+  try {
+    c.b.warned = true
+    await budgetEvent($, c.b, 'warn').catch(() => {})
+    return { ...r, context: [...(r.context || []), c.warn] }
+  } catch {
+    return r
+  }
+}
+
+async function budgetEvent($, b, level) {
+  const now = await $.clock.now()
+  const line = JSON.stringify({
+    ts: new Date(now).toISOString().replace(/\.\d+Z$/, 'Z'),
+    epoch: Math.floor(now / 1000),
+    kind: 'budget',
+    level,
+    task: b.task,
+    turns: b.turns,
+    tokens: b.tokens,
+    limit_turns: b.lim.turns === Infinity ? null : b.lim.turns,
+    limit_tokens: b.lim.tokens === Infinity ? null : b.lim.tokens,
+  })
+  await $.process.run([await bashPath($), '-c', 'cat >> "$1"', 'sh', root + '/.factory/events.jsonl'], {
     stdin: line + '\n',
     timeoutMs: 5000,
   })

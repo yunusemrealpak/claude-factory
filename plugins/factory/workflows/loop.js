@@ -206,9 +206,11 @@ function verdict(text) {
 }
 
 // The builder did not settle (or its line was lost): a runner settles, so the
-// disk decides, not the builder's word.
+// disk decides, not the builder's word. A builder whose budget ran out is
+// settled as an attempt that ended on its budget.
 async function settleBy(t, r) {
-  const why = shq(((r && r.summary) || 'the builder did not settle').slice(0, 300))
+  const said = (r && r.summary) || 'the builder did not settle'
+  const why = shq((r && r.status === 'budget' && !/^budget\b/i.test(said) ? 'budget: ' + said : said).slice(0, 300))
   const how = r && r.status === 'refused' ? `--refused ${why}` : r && r.status === 'spec_conflict' ? `--conflict ${why}` : why
   const s = await run1(
     `From the project root run exactly: factory-settle ${t.id} ${how}\nReturn ok=true if its last line starts with SETTLED, and that last line.`,
@@ -225,6 +227,7 @@ function buildPrompt(t, previous, findings, attempt, owner) {
   if (previous) {
     lines.push(`This is attempt ${attempt}. The one before it ended "${previous.status}": ${previous.summary}${previous.notes ? ' (' + previous.notes + ')' : ''}.`)
     lines.push('Read ## Attempts in the task file first and do not repeat an approach it already ruled out.')
+    if (previous.status === 'budget') lines.push('It used up its turn and token budget: take the smallest change that meets the criteria, and check early.')
   }
   if (findings && findings.length) {
     lines.push('A reviewer failed the change with these findings (the ## Review section of the task file has them too). Fix exactly these, run the check, and settle:')

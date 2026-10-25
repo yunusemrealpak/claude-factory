@@ -176,7 +176,7 @@ A closed change can leave your machine, but only through one script and only as 
 
 ## Outer loop (3.0)
 
-`factory-next check` answers `NEXT GO <change>` only when the autonomy level is `merge` (typed "auto devam et"), the quota file has a fresh reading under the even-spend line, no publish is in flight, no run is active and an approved change is waiting - otherwise `NEXT WAIT <why>`. `factory-next launch` then runs `claude -p "/factory:run <change>" --permission-mode auto --allowedTools "Workflow(factory:loop)" --strict-mcp-config` in a git worktree under `.factory/worktrees/` (your working tree is never touched). `factory-next launchd --hour 3` prints a LaunchAgent plist for a nightly run; nothing is installed for you. A breaker's cap, `auto dur` or `.factory/STOP` stops it. Opt-in: `check.modifies_tests_guard: true` fails a task that rewrites an assertion in an existing test unless `modifies_tests: true` was committed in its task file first.
+`factory-next check` answers `NEXT GO <change>` only when the autonomy level is `merge` (typed "auto devam et"), the quota file has a fresh reading under the even-spend line, no publish is in flight, no run is active and an approved change is waiting - otherwise `NEXT WAIT <why>`. `factory-next launch` then runs `claude -p "/factory:run <change>" --permission-mode auto --permission-prompts none --allowedTools "Workflow(factory:loop)" --strict-mcp-config` in a git worktree under `.factory/worktrees/` (your working tree is never touched). `factory-next launchd --hour 3` prints a LaunchAgent plist for a nightly run; nothing is installed for you. A breaker's cap, `auto dur` or `.factory/STOP` stops it. Opt-in: `check.modifies_tests_guard: true` fails a task that rewrites an assertion in an existing test unless `modifies_tests: true` was committed in its task file first.
 
 ## Rules that hold (3.2)
 
@@ -318,6 +318,72 @@ A closed change can leave your machine, but only through one script and only as 
 - **The schedule is tested.** `tests/suite13.sh` runs the workflow under a fake
   `agent()`: dependencies, retries, waits, an empty answer, the stop race, reviews
   before and after landing, and the plan from args or from the preflight.
+
+## The plan, and a night with nobody there (3.5)
+
+- **The plan is checked before you approve it.** `/factory:init` writes the
+  change's requirements, numbered, to `.factory/changes/<Cn>.requirements.md`
+  (`- FR-001: ...`), asks at most five questions - each with the answer it
+  recommends - and every task names what it builds in `covers: [FR-001]`.
+  `factory-lint --plan <Cn>` fails a plan with a requirement no task builds, a
+  task that covers none, a dependency cycle or a dependency on a task that does
+  not exist, an open `[NEEDS CLARIFICATION]`, `TODO`, `TKTK` or `???`, a task
+  past 8 acceptance criteria or 15 named paths (`plan.max_criteria`,
+  `plan.max_files`), or an acceptance command that never exits (a watch mode, a
+  dev server) or cannot fail (`true`, `... || true`). A change of three tasks or
+  fewer fails only on a broken graph. The approval screen shows the verdict and
+  a coverage table, and `factory-preflight` does not start a run on a FAIL.
+- **Must-haves.** A task's `## Must haves` says what has to exist when it is
+  done. `artifact: <path>` (there, and not empty) and `link: <path>: <text>`
+  (wired in) are checked by `factory-musthaves` at the end of every run, and a
+  miss is the first thing the report shows; a `truth:` is behaviour, for the
+  auditor. The auditor starts from "every task is done and the goal is still
+  missed" and classes each finding as missing, partial, contradicts or
+  unrequested.
+- **More is always reviewed.** Besides dependency manifests, `factory-risk`
+  always sends these to a reviewer: the test harness configuration, the CI, the
+  project's `gates/`, test doubles (`mocks/`, `__mocks__/`, `fakes/`, `stubs/`,
+  `*.mock.*`) and migrations - a task can make its own tests pass by changing
+  them - and any change larger than `review.max_lines` (400; `0` turns it off).
+- **Standards by path.** A file `.factory/criteria/<area>.md` with
+  `applies_to: [globs]` or `modules: [...]` in its frontmatter is printed by
+  `factory-start` only to a builder whose task names a matching path, and read by
+  the reviewer through `factory-criteria <id>`. A standard no task touches is in
+  nobody's context.
+- **A budget per builder.** A builder that loops is stopped. The hooks module
+  counts each builder's model requests and tokens (`fast.budget`, default 150
+  turns and 3,000,000 tokens of input, output and cache writes; `0` turns one
+  limit off, `false` both). At 80% the builder is told to wrap up; at the
+  ceiling every tool call is refused except settling, blocking or asking, so it
+  writes what it tried, settles, and the task is retried at a higher effort or
+  blocked. Reviewers, runners and your own session are never limited.
+- **A start check.** With `check.start_full: auto`, `factory-preflight` runs
+  `factory-check --full` at HEAD before the run unless the last full check was
+  green at that commit, and a red tree does not start a run. `always` runs it
+  every time; `off`, the default for a project set up before 3.5, skips it.
+- **Nothing waits on a prompt.** `factory-next launch` adds
+  `--permission-prompts none`: anything that would ask is refused, and the
+  agent is told so. `factory-allow --apply` (run by `/factory:init` and
+  `/factory:upgrade`) adds what a run needs to `permissions.allow`: the loop
+  workflow, the factory's commands, read-only git and the project's build,
+  test, lint and format commands, keeping your own rules. A headless preflight
+  warns about any that are missing.
+- **You are told, wherever you are.** `factory-notify` sends every new question,
+  every breaker trip and every run's one line to the desktop (Notification
+  Center on macOS, a toast on Windows, notify-send on Linux) and, with
+  `notify.ntfy` set to an ntfy topic URL, to your phone. A question carries a
+  deadline (`questions.deadline_hours`, 24) and may carry a default
+  (`factory-ask ask <id> "<question>" --default "<answer>" --deadline 8h`): past
+  the deadline the next preflight takes the default and the task goes on, or
+  marks the question expired and the task stays blocked.
+- **Windows nights.** `factory-next schtasks [--hour H] [--timeout-min M]`
+  writes `.factory/schedule/next.ps1` and prints the `schtasks /Create` line
+  that registers it (and the `/Delete` line). The wrapper starts nothing while
+  `.factory/STOP` exists, takes a lock so two starts never overlap, stops a run
+  that outlives the timeout (4 hours) with every process it started, and logs
+  to `.factory/logs/`. Nothing is installed for you. On macOS it is
+  `factory-next launchd`. A night run's worktree now gets the lessons and the
+  criteria files too.
 
 ## Commands
 

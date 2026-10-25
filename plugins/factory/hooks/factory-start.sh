@@ -7,7 +7,9 @@
 #
 # One call lints the task, moves it into tasks/in-progress, writes owner, stage
 # and stage_since, and prints the task file together with the lessons for its
-# module.
+# module and the project's criteria files that apply to the paths it names
+# (factory-criteria) - not the rest: a standard nobody's task touches is only
+# tokens in every builder's context.
 # The builder starts with everything it needs in one tool result.
 #
 # A task already in tasks/in-progress is a retry, or a task a dead run left
@@ -147,4 +149,13 @@ for scope in general ${module}; do
     cat "${lf}"
   fi
 done
+if [ -d "${F}/criteria" ]; then
+  crit="$(python3 "${HOOK_DIR}/factory-criteria.py" "${TASK_ID}" 2>/dev/null)"
+  case "${crit}" in
+    "### Criteria:"*)
+      echo
+      echo "=== criteria for the paths this task names (.factory/criteria/; the task file wins where they disagree)"
+      printf '%s\n' "${crit}" ;;
+  esac
+fi
 exit 0

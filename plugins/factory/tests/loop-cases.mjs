@@ -265,5 +265,32 @@ const T = (id, deps = [], review = false) => ({ id, deps, review })
   check('every command-only step goes to factory:runner with no model override', runners(r).length === 2 && r.calls.every(c => !c.opts.model))
 }
 
+// 18. a builder whose budget ran out: its settle line decides, like any other
+{
+  const r = await runLoop(plan([T('A'), T('B', ['A'])]), {
+    A: { id: 'A', status: 'budget', summary: 'budget full', settle: 'SETTLED A RETRY 1/2: red - budget: 150 turns, 2.1M tokens', concerns: [] },
+    'A retry': landed('A'),
+    B: { id: 'B', status: 'budget', summary: 'budget full', settle: 'SETTLED B BLOCKED: red after 2 attempt(s), the limit: budget: 150 turns', concerns: [] },
+    finish: FINISH,
+  })
+  check('budget with a RETRY line is retried at escalated effort, with no runner',
+    r.labels.join(',') === 'A,A retry,B,finish' && r.calls[1].opts.effort === 'high', r.labels.join(','))
+  check('the retry is told the one before it ran out of budget', /ended "budget"[\s\S]*budget: 150 turns[\s\S]*smallest change/.test(r.calls[1].prompt), r.calls[1].prompt)
+  check('budget with a BLOCKED line is blocked', r.result.tasks === 'A landed, B blocked', r.result.tasks)
+}
+
+// 19. a builder whose budget ran out and did not settle: a runner settles it as budget
+{
+  const r = await runLoop(plan([T('A')]), {
+    A: { id: 'A', status: 'budget', summary: '150 turns, 2.1M tokens', settle: '', concerns: [] },
+    'A settle': { ok: true, line: 'SETTLED A RETRY 1/2: red - budget: 150 turns, 2.1M tokens' },
+    'A retry': landed('A'),
+    finish: FINISH,
+  })
+  const p = (r.calls.find(c => c.label === 'A settle') || {}).prompt || ''
+  check('an unsettled budget is settled by a runner, with budget as the reason', /factory-settle A 'budget: 150 turns, 2\.1M tokens'/.test(p), p)
+  check('the runner\'s RETRY line then retries it', r.labels.join(',') === 'A,A settle,A retry,finish' && r.result.tasks === 'A landed', r.labels.join(',') + ' | ' + r.result.tasks)
+}
+
 console.log(`loop: passed=${passed} failed=${failed}`)
 process.exit(failed ? 1 : 0)

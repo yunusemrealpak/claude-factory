@@ -196,6 +196,26 @@ mark them `linguist-generated=true` in `.gitattributes` if the project does not
 already, or list their globs under `risk_exclude` in the config. The final list is part of what I approve in
 Step 5.
 
+Some paths are risk paths whatever the list says, and need not be in it:
+dependency manifests and lockfiles, the test harness configuration
+(`conftest.py`, `pytest.ini`, jest/vitest/playwright configs), the CI
+(`.github/workflows/`, `.gitlab-ci.yml`, ...), the project's `gates/`, test
+doubles (`mocks/`, `__mocks__/`, `fakes/`, `stubs/`, `*.mock.*`) and
+migrations - the places where a green check proves least, because a task can
+make its own tests pass by changing them. `"risk_builtin": false` turns that
+list off. A change of more lines than `review.max_lines` (default 400, `0`
+turns it off) is reviewed too: `"review": {"max_lines": 400}`.
+
+Three more optional blocks, written only when I ask or the default is wrong:
+`plan` (`max_criteria`, default 8, and `max_files`, default 15: the most
+acceptance criteria and named paths one task may have before the plan check
+says split it; `small_change`, default 3: a change of that many tasks or fewer
+is never failed on scope or coverage), `notify` (`"ntfy":
+"https://ntfy.sh/<a topic only I know>"` sends every question and every run's
+result to my phone as well as the desktop) and `questions`
+(`deadline_hours`, default 24: how long a question waits before its default
+answer is taken, or it is marked expired).
+
 `fast` is optional and configures the loop `/factory:run` runs: `workers` (how
 many builders at once, default 4), `effort_build` (default `medium`),
 `effort_escalate` (a retry of a red task, default `high`), `effort_review`
@@ -203,7 +223,10 @@ many builders at once, default 4), `effort_build` (default `medium`),
 `risk_review` (`after`, the default: a task sent to review only by a risk path
 lands first and is reviewed alongside the run; `before`: it waits for the
 review), `audit` (default `true`: one auditor reads the run's seams at the end)
-and `effort_audit` (default `high`). The top-level `retry_limit` (default 2)
+and `effort_audit` (default `high`), and `budget` (default `{"turns": 150,
+"tokens": 3000000}`: past it a builder may only settle, block or ask - a builder
+that loops is stopped instead of spending the night; `0` turns one limit off,
+`false` both). The top-level `retry_limit` (default 2)
 is how many attempts a red task gets in total, the first included.
 
 `check` is optional too, and it is how the loop judges one task without
@@ -221,7 +244,8 @@ the project's own tools already express:
   "count":     "<regex whose group is the number of tests a run reported>",
   "ignore":    ["<path globs no test can observe>"],
   "claude_md_max_lines": 200,
-  "untracked_guard":     true
+  "untracked_guard":     true,
+  "start_full":          "auto"
 }
 ```
 
@@ -242,6 +266,13 @@ the project's own tools already express:
 - **untracked_guard** (default `true`): a file git does not track, inside a unit
   the task touched and not in its `## Files touched`, is red - it would be left
   out of the task's commit (a generated migration, a new file nobody listed).
+- **start_full** (`auto`, `always` or `off`; `off` when the key is missing):
+  the start check. With `auto`, `factory-preflight` runs `factory-check --full`
+  at HEAD before a run unless the last full check was green at that very
+  commit, and a red tree does not start a run - a night of builders judged
+  against a tree that was already broken is a night spent on nothing. Write
+  `auto` when `commands.test` is set and the suite is green now; leave it out
+  on a project whose full check cannot pass yet (Phase 0 still to build).
 - **count** only when the test runner's summary does not say "N passed", "passed:
   N" or "Total tests: N". Without a count the zero-test guard cannot see a run
   that executed nothing.
@@ -299,6 +330,19 @@ factory-bans set <the groups I allowed, none if I allowed none>
 which is why it runs from my session and is banned for agents, and it runs
 `factory-deny --apply` itself. On a re-run of init on an existing project, do
 not ask again: point to `/factory:bans`.
+
+**Rules for unattended runs.** Once `config.json` has its commands, run
+`factory-allow --apply`. A night run (`factory-next`) starts with
+`--permission-prompts none`: nobody is there to answer, so anything that would
+ask is refused. This adds to `permissions.allow` what a run needs and should
+never ask for: `Workflow(factory:loop)`, the factory commands a run calls,
+read-only git (`diff`, `log`, `show`, `status`, `rev-parse`, `ls-files`), and the
+build, test, lint and format commands of `config.json` (a `{placeholder}`
+becomes a wildcard). Rules already there stay, in their order, and the deny
+rules still win. Show me any `ALLOW NOTE` lines as they are: those commands run
+through a shell or a launcher and got no rule, and adding one is my call. The
+rules come from `config.json`, so this runs again whenever its commands change
+(`/factory:upgrade` does it).
 
 Auto-compact stays on so a long session does not stop at its context limit.
 Do not write `autoCompactWindow`: when to compact is the developer's own
@@ -365,6 +409,8 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/logs/
 .factory/locks/
 .factory/full-check
+.factory/start-check
+.factory/schedule/
 .factory/run.lock
 .factory/run-start.json
 .factory/last-run.md
@@ -428,6 +474,38 @@ the argument is what gets split and `specs/` is context. With neither, stop and
 ask me for one before generating anything. Incremental mode narrows this
 further; see Step 0.
 
+### Requirements first, then at most five questions
+
+Before any task file, write what the change must do, numbered, to
+`.factory/changes/<change-id>.requirements.md` (`C1` on the first run):
+
+```markdown
+# C2 invoice-csv-export - requirements
+
+- FR-001: An accountant can download the month's invoices as one CSV file.
+- FR-002: Amounts are in the invoice's own currency, with two decimals.
+- FR-003: An empty month downloads a CSV with only the header row.
+```
+
+One line each, one behaviour a user or a caller can observe, numbered from
+`FR-001` in every change. Everything the spec asks for is on the list, and
+nothing it does not ask for: a task that builds something no requirement
+names is work nobody requested, and the plan check says so.
+
+Then the questions. Where the spec leaves open something that changes what
+gets built - and that a builder would otherwise settle by guessing at three
+in the morning - ask me, in my language, with AskUserQuestion: **at most five
+questions** (one call holds four; a fifth goes in a second call), each with
+the answer you recommend as its first option, marked "(Recommended)". Ask
+nothing the spec, the code or an earlier decision in `decisions.md` already
+settles, nothing about style, and nothing when nothing is open - then say so
+in one line. Write every answer under `## Clarifications` in the requirements
+file, as `- Q1: <question> -> <answer>`, and into the task files it decides. A
+question only I can answer later (a credential, a contract, a call outside the
+spec) is not asked here: it is a `needs_human: true` task. No task file and no
+requirement may keep a `[NEEDS CLARIFICATION]`, `TODO`, `TKTK` or `???`: each
+one is a guess a builder will make.
+
 One task = one markdown file in `tasks/backlog/<id>.md` (`tasks/proposed/<id>.md`
 in incremental mode) with this frontmatter:
 
@@ -437,6 +515,7 @@ id: T-014
 title: Order module public contract
 module: orders
 depends_on: [P0-03, P0-04]
+covers: [FR-002]
 acceptance: dotnet test tests/Orders.Contracts.Tests
 needs_human: false
 review: on-red
@@ -458,6 +537,11 @@ stage_since:
 ## Acceptance criteria
 - [ ] <criterion that the acceptance command actually checks>
 - [ ] <criterion>
+
+## Must haves
+- truth: <behaviour that must hold when the change is done>
+- artifact: <path of a file this task must leave behind>
+- link: <path>: <the text that wires it in - an import, a route, a registration>
 
 ## Files touched
 <filled in by the builder: one repo-relative path per line, as "- path">
@@ -485,6 +569,19 @@ Rules:
   writes what it tried and what it ruled out there, so a retry starts from the
   last attempt's knowledge instead of from zero; the first green after a red
   adds what finally fixed it, which is what `/factory:retro` turns into lessons.
+
+- `covers:` names the requirements the task builds, by their `FR-` ids. Every
+  requirement is covered by at least one task, and every task covers at least
+  one requirement - Phase 0 (`P0-*`) excepted, since the ground is not a
+  requirement.
+- `## Must haves` is what has to exist once the task is done, written so a
+  script can look: an `artifact` is a file that must be there and not empty, a
+  `link` is a file that must contain a piece of text (`src/routes.tsx:
+  OrdersPage`). `factory-finish` checks both and the auditor starts from them;
+  a `truth` is behaviour, which the auditor reads the code for. Write them
+  where a task's whole point could be missed while its tests pass: a screen
+  nothing routes to, a handler nobody subscribes, a job never scheduled. Leave
+  the section out on a task where the acceptance command already proves it.
 
 - Ids are never reused, not even for a task that was deleted. Every record the
   factory keeps is keyed by id - the verified marker the done-guard trusts, the
@@ -558,6 +655,18 @@ command that checks nothing runnable. Fix them and run it again until the only
 output is `LINT OK` lines. Do not show me a table built on files that do not
 lint.
 
+Then check the plan the files add up to:
+
+```bash
+factory-lint --plan <change-id>
+```
+
+A `FAIL` is a plan a night run would get stuck on - a requirement no task
+builds, a task that covers nothing, two tasks waiting on each other, an open
+question, a task too big for one builder, an acceptance command that never
+exits or cannot fail. Fix every one and run it again; `factory-preflight` will
+not start a run on a plan that fails. A `CONCERN` you may leave, and I see it.
+
 Head it with the change these tasks form: `Change C2 · <slug> · <type>` (`C1` on
 the first run). The slug is a short name of lowercase ASCII words joined by
 hyphens, at most 40 characters - `invoice-csv-export`, `login-timeout-fix`. The
@@ -567,7 +676,10 @@ in a folder name and a git ref name, which is why the alphabet is narrow.
 Print a table: `id | title | module | depends_on | acceptance | needs_human`,
 grouped by phase/module, in dependency order. Then the totals: task count,
 Phase 0 count, needs-human count, and the longest dependency chain and widest
-level as `factory-plan` measured them. On the first run,
+level as `factory-plan` measured them. Below it, the plan check: its `PLAN`
+verdict line, a coverage table `requirement | tasks` built from its `COVERAGE`
+lines, the clarifications and their answers, and every `CONCERN` line as it
+is. On the first run,
 also print the `risk_paths` list you wrote into the config, one line: green
 tasks touching these get a reviewer (alongside the run once they have landed,
 or before they land with `fast.risk_review: before`).

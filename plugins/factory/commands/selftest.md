@@ -31,6 +31,9 @@ What it covers:
 | 11 | the 3.1 pieces: the unpushed breaker, an upgrade committing its own config change, an unclassified gate result keeping a hint |
 | 12 | shadow mode: the gate template every project had until 3.3 and the engine that replaced it, verdict for verdict, each difference explained |
 | 13 | the 3.4 loop: the `factory:loop` workflow's schedule under a fake `agent()` (`tests/loop-cases.mjs`, under node) - dependencies, settle lines, a retry and `retry_limit`, waiting and its one re-check, an empty answer retried once and halted as infra on the second, the stop race, review before and after landing, owed reviews, the plan from args or from the preflight |
+| 14 | the 3.5 plan check and what a run is judged by: `factory-lint --plan` (an uncovered requirement, a cycle, an open question, a watch-mode or cannot-fail acceptance, scope ceilings, a small change held to less), the built-in review triggers and `review.max_lines`, criteria files chosen by path, must-haves at the end of a run, the preflight's plan check and start check |
+| 15 | unattended permissions and scheduling: `factory-allow` (report, apply, a second apply adds nothing, the developer's rules kept), `factory-next schtasks` (the wrapper written with this machine's paths and parsed by PowerShell), `--permission-prompts none` on the night launch |
+| 16 | escalation: `factory-notify` (mute, the test log, ntfy to a local server), question deadlines and defaults, `factory-ask expire`, notifications from the breakers and the publisher |
 
 Report:
 

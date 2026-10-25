@@ -81,7 +81,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/"; do
+  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/" ".factory/schedule/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -91,6 +91,14 @@ fi
 missing_deny=""
 if ! FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" >/dev/null 2>&1; then
   missing_deny=" permissions.deny"
+fi
+
+# The rules an unattended run needs in permissions.allow: a night run is
+# started with --permission-prompts none, so whatever would ask is refused.
+# factory-allow.py holds the list and does the merge.
+missing_allow=""
+if ! FACTORY_ROOT="${ROOT}" python3 "${HOOK_DIR}/factory-allow.py" >/dev/null 2>&1; then
+  missing_allow=" permissions.allow"
 fi
 
 # The gate: the shim (current), a template an older factory wrote (--apply
@@ -131,6 +139,7 @@ done
 [ -n "${missing_dirs}" ]     && note ".factory/ is missing:${missing_dirs}"
 [ -n "${missing_ignore}" ]   && note ".gitignore is missing:${missing_ignore}"
 [ -n "${missing_deny}" ]     && note ".claude/settings.json is missing hard-ban rules in:${missing_deny}"
+[ -n "${missing_allow}" ]    && note ".claude/settings.json is missing the rules an unattended run needs in:${missing_allow}"
 [ -n "${missing_gate}" ]     && note "gates/verify.sh is missing:${missing_gate}"
 [ -n "${missing_sections}" ] && note "task files with no '## Files touched' / '## Attempts':${missing_sections}"
 [ -n "${old_protocol}" ]     && note "CLAUDE.md still carries the old '## Factory Protokolü' section (every agent reads it on every turn)"
@@ -226,6 +235,11 @@ fi
 
 if [ -n "${missing_deny}" ]; then
   FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" --apply | sed 's/^/  /'
+  applied=$((applied + 1))
+fi
+
+if [ -n "${missing_allow}" ]; then
+  FACTORY_ROOT="${ROOT}" python3 "${HOOK_DIR}/factory-allow.py" --apply | sed 's/^/  /'
   applied=$((applied + 1))
 fi
 

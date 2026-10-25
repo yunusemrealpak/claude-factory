@@ -107,8 +107,13 @@ case "${1:-}" in
     jq -cn --arg ts "${now}" --argjson epoch "$(date +%s)" --arg rule "${rule}" --arg tool "${tool}" --arg agent "${agent}" \
       '{ts: $ts, epoch: $epoch, kind: "hard_block", rule: $rule, tool: $tool, agent_id: $agent}' \
       >> "${root}/.factory/events.jsonl" 2>/dev/null
-    if [ "${FACTORY_NO_NOTIFY:-0}" != "1" ] && command -v osascript >/dev/null 2>&1; then
-      osascript -e "display notification \"hard block ${rule}: run stopped\" with title \"Factory\" sound name \"Glass\"" >/dev/null 2>&1 &
+    # Wherever the developer is: the desktop, and ntfy when the project set
+    # one up. factory-notify mutes and detaches; only its test log
+    # (FACTORY_NOTIFY_LOG) gets past FACTORY_NO_NOTIFY.
+    if [ "${FACTORY_NO_NOTIFY:-0}" != "1" ] || [ -n "${FACTORY_NOTIFY_LOG:-}" ]; then
+      (cd "${root}" && python3 "${HERE}/factory-notify.py" "Factory · $(basename "${root}")" \
+        "hard block ${rule}: the run stopped. Read .factory/STOP, then remove it." --tag stop --bg) \
+        </dev/null >/dev/null 2>&1 || true
     fi
     exit 0
     ;;

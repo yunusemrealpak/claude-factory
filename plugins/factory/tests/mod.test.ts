@@ -11,6 +11,16 @@ const LIMITS = [
   { kind: 'seven_day', percentUsed: 41, resetsAt: '2026-10-12T00:00:00Z' },
 ]
 
+// What one model request of a subagent costs in the tests: 2,000 tokens that
+// count, and cache reads that do not.
+const STEP_USAGE = {
+  model: 'claude-haiku-5-5',
+  input_tokens: 500,
+  output_tokens: 1000,
+  cache_read_input_tokens: 90000,
+  cache_creation_input_tokens: 500,
+}
+
 // A cut of hooks/hard-blocks.txt, in its own format.
 const RULE_LINES = [
   'hard_blocks_version: 2',
@@ -31,7 +41,7 @@ const P = (p) => String(p).replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
-function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' }, readonly = '' } = {}) {
+function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' }, readonly = '', step = STEP_USAGE } = {}) {
   const runs = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: rootPath }))
@@ -48,6 +58,10 @@ function world(on, { active = true, runFails = false, files = {}, level = '', li
   on('session.measure', (_$, e) => ({ changed: e.changed }))
   on('agent.spawn', () => ({ model: 'claude-haiku-5-5', agentId: 'a1' }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
+  // Every model request answers with one tool call and costs `step`.
+  on('turn.step', async function* (_$, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: 'tool_use', usage: step }
+  })
   on('process.run', (_$, e) => {
     runs.push(e)
     if (runFails) return { deny: 'no processes in this test' }
@@ -411,5 +425,212 @@ describe('quota breaker on agent.spawn', () => {
     await $.turn.complete(turn())
     const r = await spawn($, 'factory:builder')
     expect(JSON.stringify(r)).not.toContain('quota breaker')
+  })
+})
+
+describe('builder budget', () => {
+  const call = ($, tool, input, agentId = 'a1') => $.tool.call({ tool, ...input, ...(agentId ? { agentId } : {}) })
+  const cfg = (budget) => ({ '/proj/.factory/config.json': JSON.stringify({ fast: { budget } }) })
+  const spawn = ($, type = 'factory:builder', description = 'T1') => $.agent.spawn({ subagentType: type, description, prompt: 'go' })
+  async function steps($, n, agentId = 'a1') {
+    for (let i = 0; i < n; i++) {
+      const s = $.turn.step({ turnId: 'tb', index: i, model: 'claude-haiku-5-5', messageCount: 1 + i, ...(agentId ? { agentId } : {}) })
+      for await (const _c of s) {
+      }
+      await s.result
+    }
+  }
+  const budgetLines = (runs) =>
+    runs.filter((r) => r.argv.at(-1) === '/proj/.factory/events.jsonl').map((r) => JSON.parse(r.init.stdin))
+
+  test('a builder past its turn ceiling is refused, and told the way out', async ($, on) => {
+    world(on, { files: cfg({ turns: 3 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($, 'factory:builder', 'C2-01 retry')
+    await steps($, 3)
+    const r = JSON.stringify(await call($, 'Bash', { command: 'npm test' }))
+    expect(r).toContain('budget full for C2-01')
+    expect(r).toContain('factory-settle C2-01 \\"budget: 3 turns, 6k tokens\\"')
+    expect(r).not.toContain('"ran"')
+  })
+
+  test('below the ceiling the same call runs', async ($, on) => {
+    world(on, { files: cfg({ turns: 3 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 2)
+    const r = JSON.stringify(await call($, 'Bash', { command: 'npm test' }))
+    expect(r).toContain('ran')
+    expect(r).not.toContain('budget full')
+  })
+
+  test('past the ceiling factory-settle, factory-block and factory-ask still run', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 1)
+    for (const command of [
+      'factory-settle T1 "budget: 1 turns, 2k tokens"',
+      "factory-block T1 'needs a decision; the budget ran out'",
+      '/opt/p/bin/factory-ask T1 "which one?"',
+    ]) {
+      expect(JSON.stringify(await call($, 'Bash', { command }))).toContain('ran')
+    }
+  })
+
+  test('a way out chained to another command is refused', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 1)
+    for (const command of [
+      'factory-settle T1 x && npm test',
+      'factory-settle T1 "$(npm test)"',
+      'factory-settle T1 x | tee log',
+      'echo factory-settle T1',
+    ]) {
+      expect(JSON.stringify(await call($, 'Bash', { command }))).toContain('budget full')
+    }
+  })
+
+  test('past the ceiling the task file and decisions.md may be read and written, nothing else', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 1)
+    expect(JSON.stringify(await call($, 'Read', { file_path: '/proj/tasks/in-progress/T1.md' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'Edit', { file_path: '/proj/tasks/in-progress/T1.md', old_string: 'a', new_string: 'b' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/decisions.md', content: '- T1: x' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'StructuredOutput', { status: 'budget' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/src/a.ts', content: 'x' }))).toContain('budget full')
+    expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/tasks/../src/a.ts', content: 'x' }))).toContain('budget full')
+    expect(JSON.stringify(await call($, 'Grep', { pattern: 'x' }))).toContain('budget full')
+  })
+
+  test('the hard blocks are judged first, past the ceiling too', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 1)
+    const r = JSON.stringify(await call($, 'Bash', { command: 'git push origin main' }))
+    expect(r).toContain('git-push')
+    expect(r).not.toContain('budget full')
+  })
+
+  test('tokens count input, output and cache writes, never cache reads', async ($, on) => {
+    world(on, { files: cfg({ turns: 1000, tokens: 5000 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 2)
+    // 2 x 2,000 = 4,000 of 5,000: past 80%, not full (cache reads would be 180k)
+    const below = await call($, 'Bash', { command: 'npm test' })
+    expect(JSON.stringify(below)).toContain('ran')
+    await steps($, 1)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('budget full')
+  })
+
+  test('at 80% the call runs and the builder is told once', async ($, on) => {
+    world(on, { files: cfg({ turns: 10 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 7)
+    const before = await call($, 'Bash', { command: 'ls' })
+    expect(before.context || []).toHaveLength(0)
+    await steps($, 1)
+    const first = await call($, 'Bash', { command: 'ls' })
+    expect(JSON.stringify(first)).toContain('ran')
+    expect(first.context).toHaveLength(1)
+    expect(first.context[0]).toContain('8 of 10 turns')
+    const second = await call($, 'Bash', { command: 'ls' })
+    expect(JSON.stringify(second)).toContain('ran')
+    expect(second.context || []).toHaveLength(0)
+  })
+
+  test('a full budget and the 80% line are each recorded in events.jsonl once', async ($, on) => {
+    const runs = world(on, { files: cfg({ turns: 5 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 4)
+    await call($, 'Bash', { command: 'ls' })
+    await call($, 'Bash', { command: 'ls' })
+    await steps($, 1)
+    await call($, 'Bash', { command: 'ls' })
+    await call($, 'Bash', { command: 'ls' })
+    const lines = budgetLines(runs)
+    expect(lines.map((l) => l.level)).toEqual(['warn', 'full'])
+    expect(lines[1]).toMatchObject({ kind: 'budget', task: 'T1', turns: 5, tokens: 10000, limit_turns: 5, limit_tokens: 3000000, epoch: NOW / 1000 })
+  })
+
+  test('a reviewer is never limited', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($, 'factory:reviewer', 'T1 review')
+    await steps($, 5)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('budget')
+  })
+
+  test('the main session is never limited', async ($, on) => {
+    world(on, { files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await steps($, 5, null)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }, null))).not.toContain('budget')
+  })
+
+  test('with no fast.budget a builder has 150 turns', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 149)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('ran')
+    await steps($, 1)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('150 of 150 turns')
+  })
+
+  test('a turn limit past maxTurns is held below it', async ($, on) => {
+    world(on, { files: cfg({ turns: 1000 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 230)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('230 of 230 turns')
+  })
+
+  test('fast.budget false lifts the budget', async ($, on) => {
+    world(on, { files: cfg(false) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 240)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('budget')
+  })
+
+  test('where the factory is not open nothing is limited', async ($, on) => {
+    world(on, { active: false, files: cfg({ turns: 1 }) })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 3)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('budget')
+  })
+
+  test('a config that cannot be read is the default budget', async ($, on) => {
+    world(on, { files: { '/proj/.factory/config.json': '{ not json' } })
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    await steps($, 150)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('150 of 150 turns')
   })
 })

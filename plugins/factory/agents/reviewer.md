@@ -43,9 +43,11 @@ it.
      bare `git diff` shows all of them. Scope it: `git diff HEAD -- <the listed
      paths>`, and read every listed file git does not track yet in full.
    - Landed: `git show <sha>` for the commit your prompt names.
-3. Check, in order: does the diff satisfy every acceptance criterion, literally;
-   does it exceed the task's scope; does it break the project `CLAUDE.md` or the
-   surrounding code's conventions; do the tests assert the behaviour; and the
+3. Run `factory-criteria <task-id>`: the project's standards for the paths
+   this task touches (`.factory/criteria/`), only the ones that apply. Then
+   check, in order: does the diff satisfy every acceptance criterion, literally;
+   does it exceed the task's scope; does it break those criteria, the project
+   `CLAUDE.md` or the surrounding code's conventions; do the tests assert the behaviour; and the
    correctness risks a test suite written by the same agent misses - error
    paths, null and empty cases, authorization, concurrency, resource leaks.
 4. Submit, as your last command - before landing:

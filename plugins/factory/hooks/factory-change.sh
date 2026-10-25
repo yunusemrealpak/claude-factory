@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Factory change archive. NOT a hook: /factory-init opens a change when the
-# developer approves its tasks; the Stop hook syncs it when a run finishes, and
-# /factory-status syncs it on demand.
+# developer approves its tasks; factory-finish syncs it at the end of every run,
+# and /factory:status syncs it on demand.
 #
 # Usage (from the project root):
 #   factory-change open <change-id> <slug> <type> <goal-file | -> [<acceptance command>]
@@ -372,8 +372,8 @@ cmd_sync() {
 }
 
 # Read-only: the same status lines, nothing written. A change whose tasks are
-# all done but that no sync has closed yet - the run ended without the Stop hook
-# getting to it - shows as "unsynced": it has no ref and a stale summary until
+# all done but that no sync has closed yet - the run ended before factory-finish
+# got to it - shows as "unsynced": it has no ref and a stale summary until
 # someone runs sync.
 cmd_list() {
   local d name id slug rows total done_n active status

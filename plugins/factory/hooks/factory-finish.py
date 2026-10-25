@@ -20,7 +20,9 @@ or the block that followed it, and a summary built from those sentences can say
 run this reads where its file is now and which commit carries it.
 
 It also collects what the builders flagged and did not fix - the "## Open
-concerns" section of each task file - and puts it first. A gap a builder noticed
+concerns" section of each task file - and puts it first, with every must-have
+a landed task's file lists that is not there (factory-musthaves: a file that
+does not exist, a wiring line nobody wrote). A gap a builder noticed
 is worth more to the developer than a table of green ticks, and in a tally of
 twelve tasks it is exactly the line that gets skipped.
 
@@ -281,6 +283,20 @@ def reviews(ids):
     return out
 
 
+def musthaves(ids):
+    """factory-musthaves over the landed tasks: what their files say must exist."""
+    if not ids:
+        return []
+    try:
+        spec = importlib.util.spec_from_file_location("factory_musthaves",
+                                                      os.path.join(HOOK_DIR, "factory-musthaves.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.check(ids)
+    except Exception:  # noqa: BLE001 - the report is still written without it
+        return []
+
+
 def main(argv):
     if not os.path.isfile(os.path.join(F, "active")):
         print(json.dumps({"error": "no .factory/active here"}) if "--json" in argv else
@@ -320,6 +336,10 @@ def main(argv):
             for f in found[:5] or ["the review failed without listing findings"]:
                 attention.append({"id": tid, "concern": "review failed: " + f})
     attention += reviews(ids)
+    must = musthaves([b["id"] for b in board if b["lane"] == "done"])
+    for r in must:
+        for miss in r["missing"]:
+            attention.append({"id": r["id"], "concern": "must-have missing: " + miss})
 
     try:
         start_head = json.loads(read(os.path.join(F, "run-start.json")) or "{}").get("head")
@@ -372,6 +392,8 @@ def main(argv):
         "halted": halted or None,
         "left": left,
         "retro": retro_state(),
+        "must_haves": {"checked": sum(r["checked"] for r in must),
+                       "missing": sum(len(r["missing"]) for r in must)},
     }
 
     lines = ["# Last run", ""]
@@ -407,6 +429,8 @@ def main(argv):
     if left:
         parts.append("%d not built" % len(left))
     parts.append("full check %s" % full["verdict"] + ("; %s" % first_bad if first_bad else ""))
+    if result["must_haves"]["missing"]:
+        parts.append("%d must-have(s) missing" % result["must_haves"]["missing"])
     if attention:
         parts.append("%d to look at" % len(attention))
     for d in delivery:
@@ -418,7 +442,12 @@ def main(argv):
         parts.append("halted: %s" % halted)
     if result["retro"].get("due"):
         parts.append("retro due")
-    print("; ".join(parts) + " - report .factory/last-run.md")
+    line = "; ".join(parts) + " - report .factory/last-run.md"
+    print(line)
+    # The developer is not watching: the run's one line goes to the desktop and,
+    # when notify.ntfy is set, to the phone (factory-notify; muted in tests).
+    run([sys.executable, os.path.join(HOOK_DIR, "factory-notify.py"),
+         "Factory: run %s" % ("halted" if halted else "finished"), line, "--tag", "finish", "--bg"])
     return 0
 
 

@@ -750,7 +750,9 @@ git init -q -b main; git config user.email t@example.invalid; git config user.na
 printf 'import sys\nsys.exit(0)\n' > src/legacy.py
 git add -A; git commit -qm base
 P="$C"
-jq -n '{min_tests:1, commands:{build:"echo built", test:"echo 3 passed", lint:"true"}}' > .factory/config.json
+# risk_builtin off: conftest.py is a built-in risk path (test harness, suite 14);
+# here factory-risk is asked only about the reasons the check found.
+jq -n '{min_tests:1, risk_builtin:false, commands:{build:"echo built", test:"echo 3 passed", lint:"true"}}' > .factory/config.json
 mktask in-progress C-01 "" "true" src/app.py src/app.js src/tool.py src/legacy.py conftest.py
 git add -f tasks; git commit -qm "approve C-01"
 put() { mkdir -p "$(dirname "$1")"; printf '%b' "$2" > "$1"; }

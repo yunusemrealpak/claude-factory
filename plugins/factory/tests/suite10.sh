@@ -73,7 +73,7 @@ out="$(nx check)"; check "an active run waits" 'printf "%s" "$out" | grep -q "^N
 echo '{"started":"x","change":"C1","state":"halted","halted":"quota"}' > .factory/run.lock
 out="$(nx check)"; check "a run that halted does not: the next one continues it" 'printf "%s" "$out" | grep -q "^NEXT GO"' "$out"
 echo '{"started":"x","change":"C1"}' > .factory/run.lock
-touch -d '3 hours ago' .factory/run.lock
+python3 -c "import os,time;t=time.time()-3*3600;os.utime('.factory/run.lock',(t,t))"
 out="$(nx check)"; check "nor does one whose lock went stale" 'printf "%s" "$out" | grep -q "^NEXT GO"' "$out"
 rm -f .factory/run.lock
 mv tasks/backlog/C1-01.md "$WORK/s10-held.md"
@@ -82,7 +82,7 @@ mv "$WORK/s10-held.md" tasks/backlog/C1-01.md
 
 echo "=== launch"
 out="$(nx launch --dry-run)"
-check "dry run names the command and runs nothing" 'printf "%s" "$out" | grep -qF -- "-p /factory:run C1 --permission-mode auto --allowedTools Workflow(factory:loop) --strict-mcp-config" && [ ! -s "$FC_LOG" ] && [ ! -d .factory/worktrees ]' "$out"
+check "dry run names the command and runs nothing" 'printf "%s" "$out" | grep -qF -- "-p /factory:run C1 --permission-mode auto --permission-prompts none --allowedTools Workflow(factory:loop) --strict-mcp-config" && [ ! -s "$FC_LOG" ] && [ ! -d .factory/worktrees ]' "$out"
 check "no --bare" '! printf "%s" "$out" | grep -q -- "--bare"' "$out"
 : > "$FC_LOG"
 out="$(nx launch)"; rc=$?
@@ -92,7 +92,7 @@ wt="$(ls -d .factory/worktrees/C1-* | head -1)"
 check "it carries the tasks and the consent" '[ -f "$wt/tasks/backlog/C1-01.md" ] && [ -f "$wt/.factory/autonomy.json" ] && [ -f "$wt/.factory/active" ]'
 check "the main tree is untouched" '[ "$(git symbolic-ref --short HEAD)" = main ] && [ -z "$(git status --porcelain)" ]'
 check "the run knows it is unattended" 'grep -q "^next: 1" "$FC_LOG" && grep -q "^root: .*/.factory/worktrees/" "$FC_LOG" && grep -q "^headless: 1" "$FC_LOG"'
-check "...and may run the loop workflow without a prompt" 'grep -qF "args: -p /factory:run C1 --permission-mode auto --allowedTools Workflow(factory:loop)" "$FC_LOG"'
+check "...and may run the loop workflow without a prompt" 'grep -qF "args: -p /factory:run C1 --permission-mode auto --permission-prompts none --allowedTools Workflow(factory:loop)" "$FC_LOG"'
 mkq "$now" 90 40
 : > "$FC_LOG"
 out="$(nx launch)"; rc=$?

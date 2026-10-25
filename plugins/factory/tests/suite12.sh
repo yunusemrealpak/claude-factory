@@ -21,13 +21,18 @@ bad() { fail=$((fail+1)); echo "FAIL $1"; [ -n "${2:-}" ] && printf '     %s\n' 
 
 # scenario -> why the engine's verdict differs from the old gate's, and why
 # that is the right one.
-declare -A EXPLAINED=(
-  [full-without-lint]="full mode: a task check requires a test command; a missing build or lint command is red in the full check (factory-check --full), which the fast lane runs last. A project in full mode under the old gate has both, or none of its tasks was ever green"
-  [acceptance-red]="the engine runs the task's acceptance command; the old gate left it to the implementer, who could report it green"
-  [cheat-exit-zero]="3.3: cheat signatures - a sys.exit(0) in product code is red"
-  [undeclared-dependency]="3.2: a dependency manifest the approved task file does not declare is red"
-  [test-config]="3.3: a change to how the tests run ([pytest] in tox.ini) is red"
-)
+# bash 3.2 (macOS) has no associative arrays: a case, and the names in a list.
+EXPLAINED_NAMES="full-without-lint acceptance-red cheat-exit-zero undeclared-dependency test-config"
+explained() {  # <scenario>
+  case "$1" in
+    full-without-lint) echo "full mode: a task check requires a test command; a missing build or lint command is red in the full check (factory-check --full), which the fast lane runs last. A project in full mode under the old gate has both, or none of its tasks was ever green" ;;
+    acceptance-red) echo "the engine runs the task's acceptance command; the old gate left it to the implementer, who could report it green" ;;
+    cheat-exit-zero) echo "3.3: cheat signatures - a sys.exit(0) in product code is red" ;;
+    undeclared-dependency) echo "3.2: a dependency manifest the approved task file does not declare is red" ;;
+    test-config) echo "3.3: a change to how the tests run ([pytest] in tox.ini) is red" ;;
+    *) echo "" ;;
+  esac
+}
 
 S="$WORK/shadow"; rm -rf "$S"; mkdir -p "$S"
 T="$S/template"; mkdir -p "$T"; cd "$T" || exit 1
@@ -89,7 +94,7 @@ scenario() {  # <name> <setup function>
       ( cd "$d" && factory-check S-01 ) > "$d.log" 2>&1; new="$(verdict $?)"
     fi
   done
-  local why="${EXPLAINED[$name]:-}"
+  local why; why="$(explained "$name")"
   if [ "$old" = "$new" ] && [ -z "$why" ]; then
     ok "$name: both $old"
   elif [ "$old" = "$new" ]; then
@@ -151,7 +156,7 @@ scenario undeclared-dependency s_dependency
 scenario test-config s_test_config
 
 echo "=== every explanation is about a scenario that ran"
-for name in "${!EXPLAINED[@]}"; do
+for name in ${EXPLAINED_NAMES}; do
   if [ -f "$S/$name.new.log" ]; then ok "EXPLAINED $name ran"; else bad "EXPLAINED names $name, which no scenario runs"; fi
 done
 

@@ -14,19 +14,32 @@ In order, each step deterministic:
      builds; at local it is a warning (a task that edits the same file commits
      those edits with its own).
   3. Task ids: factory-ids check.
-  4. The inbox. A question the developer answered sends its task back to the
-     backlog, with the answer written into the task file; an answered task that
-     was needs_human is no longer (the answer is the decision it waited for).
+  4. The inbox. A question past its deadline is answered with its default, or
+     marked expired (factory-ask expire). A question the developer answered sends
+     its task back to the backlog, with the answer written into the task file;
+     an answered task that was needs_human is no longer (the answer is the
+     decision it waited for).
   5. needs_human work goes to tasks/blocked, with its question in the inbox -
      asked once, never dispatched.
   6. Lint. A task file that does not lint is blocked and asked about: a builder
      would only be paid to refuse it.
   7. Breakers: the week's quota at level merge, commits that were never pushed.
   8. Permissions. A headless session (claude -p) without an allow rule for the
-     loop workflow is told so: it would wait on a prompt nobody answers.
-  9. The plan: the dependency graph (factory-plan), the board snapshot that
-     factory-check reads approvals from, and the run's base. An unfinished run
-     (.factory/run.lock) started again for the same change keeps its base.
+     loop workflow, or for a command the run calls (factory-allow), is told so:
+     it would wait on a prompt nobody answers, or be refused.
+  9. The plan: the dependency graph (factory-plan), the plan check
+     (factory-lint --plan: a FAIL stops the run, a concern is a warning), the
+     board snapshot that factory-check reads approvals from, and the run's base.
+     An unfinished run (.factory/run.lock) started again for the same change
+     keeps its base.
+ 10. The start check (check.start_full: auto, always or off - off by default).
+     auto runs `factory-check --full` at HEAD unless the last full check was
+     green at this very commit; always runs it every time. Red, and the run does
+     not start: whatever is broken was broken before any builder was paid, and
+     every task check after it would be judged against a broken tree. It runs
+     after the base is recorded, so it compares HEAD with HEAD - a commit the
+     developer made between runs is not mistaken for one of the run's. Run this
+     command with a long timeout (ten minutes): a full test suite takes time.
 
 Prints the minimal plan the loop consumes: the task ids with their
 dependencies and review flag, the run's limits and its base. The tasks'
@@ -160,7 +173,7 @@ def consume_answers(notes):
 
 
 def open_question(tid):
-    return any(fm.get("task") == tid and fm.get("status") == "open" for _, fm, _ in questions())
+    return any(fm.get("task") == tid and fm.get("status") in ("open", "expired") for _, fm, _ in questions())
 
 
 def block_and_ask(tid, reason, question, notes):
@@ -267,6 +280,105 @@ def headless():
     return os.environ.get("FACTORY_HEADLESS") == "1" or ep.startswith("sdk")
 
 
+def change_of(tid):
+    m = re.match(r"^(C[0-9]+)-", tid)
+    return m.group(1) if m else "C1"
+
+
+def plan_check(changes, out):
+    """factory-lint --plan for the changes this run builds: a FAIL is a problem,
+    a concern a warning."""
+    if not changes:
+        return
+    r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-plancheck.py")] + changes + ["--json"],
+                       capture_output=True, text=True, cwd=ROOT, errors="replace")
+    try:
+        res = json.loads(r.stdout or "{}")
+    except ValueError:
+        out["warnings"].append("the plan check could not run: " + ((r.stderr or r.stdout).strip().splitlines()
+                                                                    or ["no output"])[-1][:200])
+        return
+    for c in res.get("changes") or []:
+        if c.get("fail"):
+            out["problems"].append("the plan of %s fails its check (factory-lint --plan %s): %s%s" % (
+                c["change"], c["change"], "; ".join(c["fail"][:3]),
+                " (+%d more)" % (len(c["fail"]) - 3) if len(c["fail"]) > 3 else ""))
+        for w in (c.get("concerns") or [])[:3]:
+            out["warnings"].append("plan %s: %s" % (c["change"], w))
+
+
+def ask_expire(notes):
+    """Questions past their deadline: answered with their default (consumed
+    below like any answer) or marked expired, the developer told once."""
+    rc, msg = sh("factory-ask.sh", "expire")
+    for line in msg.splitlines():
+        if line.startswith(("EXPIRED", "DEFAULTED")):
+            notes.append(line)
+
+
+def allow_gap():
+    """The allow rules an unattended run needs that no settings file has
+    (factory-allow); [] when the check cannot run."""
+    try:
+        spec = importlib.util.spec_from_file_location("factory_allow", os.path.join(HOOK_DIR, "factory-allow.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        gap = mod.missing(root=ROOT)
+    except Exception:  # noqa: BLE001 - a warning, never a reason to stop
+        return []
+    home = os.path.expanduser("~")
+    for p in (os.path.join(ROOT, ".claude", "settings.local.json"), os.path.join(home, ".claude", "settings.json")):
+        try:
+            allow = ((json.loads(read(p) or "{}").get("permissions") or {}).get("allow") or [])
+        except (ValueError, AttributeError):
+            continue
+        gap = [g for g in gap if g not in allow]
+    return gap
+
+
+def full_record():
+    data = {}
+    for line in read(os.path.join(F, "full-check")).splitlines():
+        k, sep, v = line.partition("=")
+        if sep:
+            data[k.strip()] = v.strip()
+    return data
+
+
+def start_check(cfg, base, out):
+    """check.start_full: the whole tree checked at HEAD before a builder is paid.
+    Adds a problem when it is red."""
+    mode = str((cfg.get("check") or {}).get("start_full") or "off").lower()
+    if mode not in ("auto", "always"):
+        return
+    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
+    if mode == "auto":
+        last = full_record()
+        if last.get("verdict") == "green" and last.get("clean") == "yes" and head and last.get("head") == head:
+            out["notes"].append("start check skipped: the last full check was green at this commit (%s)" % head[:12])
+            return
+    r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "--full"], capture_output=True,
+                       text=True, cwd=ROOT, errors="replace")
+    lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
+    green = r.returncode == 0
+    with open(os.path.join(F, "start-check"), "w", encoding="utf-8") as fh:
+        fh.write("verdict=%s\nhead=%s\nmode=%s\n" % ("green" if green else "red", head or "unknown", mode))
+    if green:
+        out["notes"].append("start check: the full check is green at %s" % (head[:12] or "HEAD"))
+        return
+    reds = [l for l in lines if re.match(r"^\S+\s+(RED|FAIL)", l) or " FAIL " in l][:3]
+    out["problems"].append("the full check is red at HEAD before any task was built (check.start_full: %s): %s. "
+                           "Fix it first - every task check would be judged against a broken tree - or set "
+                           "check.start_full to off" % (mode, "; ".join(" ".join(l.split()) for l in reds)
+                                                        or (lines[-1] if lines else "no output")))
+    if base == "new":
+        # The run never started: its lock would only make the next one wait.
+        try:
+            os.remove(os.path.join(F, "run.lock"))
+        except OSError:
+            pass
+
+
 def preflight(change):
     out = {"ok": True, "problems": [], "warnings": [], "notes": [], "tasks": [], "held": []}
     if not os.path.isfile(os.path.join(F, "active")):
@@ -289,6 +401,7 @@ def preflight(change):
             % (" ".join(mine[:8]) + (" ..." if len(mine) > 8 else ""), level))
 
     sh("factory-sweep.sh", "run-start", ROOT)
+    ask_expire(out["notes"])
     cleared = consume_answers(out["notes"])
     route_needs_human(out["notes"])
     route_lint(out["notes"], change)
@@ -300,9 +413,16 @@ def preflight(change):
         out["warnings"].append("this session is headless and no settings file allows Workflow(%s): the loop waits on "
                                "a permission prompt nobody answers. Add the allow rule, or start with "
                                "--permission-mode auto" % LOOP)
+    if headless():
+        gap = allow_gap()
+        if gap:
+            out["warnings"].append("this session is headless and %d rule(s) an unattended run needs are not allowed "
+                                   "(e.g. %s): under --permission-prompts none those calls are refused. "
+                                   "factory-allow --apply adds them" % (len(gap), ", ".join(gap[:3])))
 
     plan = P.build(change=change)
     out["problems"] += plan["problems"]
+    plan_check(sorted({change_of(t["id"]) for t in plan["tasks"]}, key=lambda c: int(c[1:])), out)
     out["warnings"] += [w for w in plan["warnings"] if not w.startswith("uncommitted work") or level == "local"]
     out["held"] = plan["held"]
     for k in ("workers", "risk_review", "audit", "effort", "counts"):
@@ -340,6 +460,9 @@ def preflight(change):
     if out["base"] == "kept":
         out["notes"].append("an unfinished run of this change was found: its base %s is kept"
                             % (out["start_head"] or "?")[:12])
+    start_check(cfg, out["base"], out)
+    if out["problems"]:
+        out.update(ok=False, tasks=[])
     return out
 
 

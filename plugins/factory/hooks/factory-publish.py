@@ -106,14 +106,20 @@ def event(kind, **kw):
         pass
 
 
-def notify(text):
-    if os.environ.get("FACTORY_NO_NOTIFY") == "1" or not shutil.which("osascript"):
+def notify(text, tag="delivery"):
+    """Through factory-notify: the desktop, and ntfy when the project set one
+    up. It mutes and detaches (--bg); only its test log (FACTORY_NOTIFY_LOG)
+    gets past FACTORY_NO_NOTIFY."""
+    if os.environ.get("FACTORY_NO_NOTIFY") == "1" and not os.environ.get("FACTORY_NOTIFY_LOG"):
         return
-    safe = text.replace('"', "'").replace("\\", "")[:120]
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "factory-notify.py")
+    if not os.path.isfile(script):
+        return
     try:
-        subprocess.Popen(["osascript", "-e", 'display notification "%s" with title "Factory" sound name "Glass"' % safe],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
+        subprocess.run([sys.executable, script, "Factory · %s" % os.path.basename(ROOT), text, "--tag", tag, "--bg"],
+                       cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=20)
+    except (OSError, subprocess.SubprocessError):
         pass
 
 
@@ -549,7 +555,7 @@ def record_breaker(kind, st):
         with open(os.path.join(F, "autonomy-cap"), "w", encoding="utf-8") as fh:
             fh.write("pr\nbreaker: %s (%s)\n" % (why, now_iso()))
         event("breaker", reason=why)
-        notify("Factory breaker: %s. Level is pr until you say 'auto devam et'." % why)
+        notify("Factory breaker: %s. Level is pr until you say 'auto devam et'." % why, "stop")
         return why
     return None
 

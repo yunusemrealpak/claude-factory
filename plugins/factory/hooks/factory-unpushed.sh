@@ -43,8 +43,13 @@ case "${cmd}" in
       echo "UNPUSHED LIMIT: ${count} commit(s) exist only on this machine (limit ${limit}, autonomy level ${lvl:-local}). Push them (git push origin HEAD:${base}) or say 'auto devam et', then start again; raise delivery.max_unpushed to change the limit."
       if [ ! -e "${F}/unpushed-notified" ]; then
         : > "${F}/unpushed-notified" 2>/dev/null
-        if [ "${FACTORY_NO_NOTIFY:-}" != "1" ] && command -v osascript >/dev/null 2>&1; then
-          osascript -e "display notification \"${count} commits are not pushed; the factory stopped starting tasks.\" with title \"Factory\" sound name \"Glass\"" >/dev/null 2>&1 &
+        # factory-notify mutes and detaches; only its test log gets past
+        # FACTORY_NO_NOTIFY.
+        if [ "${FACTORY_NO_NOTIFY:-}" != "1" ] || [ -n "${FACTORY_NOTIFY_LOG:-}" ]; then
+          nd="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          (cd "${ROOT}" && python3 "${nd}/factory-notify.py" "Factory · $(basename "${ROOT}")" \
+            "${count} commits are not pushed; the factory stopped starting tasks." --tag stop --bg) \
+            </dev/null >/dev/null 2>&1 || true
         fi
       fi
       exit 1

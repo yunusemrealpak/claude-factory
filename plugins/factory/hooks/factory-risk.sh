@@ -20,10 +20,23 @@
 # depth. So "*/migrations/*" catches db/Migrations/001.sql, "*.sql" every SQL
 # file, and "src/Auth/*" the same directory wherever the repo nests it.
 #
-# Dependency manifests and lockfiles are always risk paths, whatever the
-# config says: a new package is code nobody on the project wrote or reviewed,
-# and a green test suite says nothing about where it came from. "risk_builtin":
-# false in the config turns that list off.
+# Some paths are always risk paths, whatever the config says - the places a
+# green check proves least, small change or not:
+#   - dependency manifests and lockfiles: a new package is code nobody on the
+#     project wrote or reviewed;
+#   - what decides what "green" means: the test harness configuration
+#     (conftest.py, pytest.ini, jest/vitest/playwright configs, ...), the CI
+#     (.github/workflows, .gitlab-ci.yml, ...) and the project's gates/ - a task
+#     can make its own tests pass by editing these;
+#   - test doubles (mocks/, __mocks__/, fakes/, stubs/, *.mock.*): a change to
+#     one can make a test pass without the code working;
+#   - migrations: they run once, against data no test holds.
+# "risk_builtin": false in the config turns all of these off.
+#
+# A large change is a reason too: review.max_lines in the config (400 by
+# default, 0 turns it off) against the lines the task's files add and remove.
+# Findings grow with the diff - a reviewer finds something in most changes of
+# a thousand lines and in few of fifty.
 #
 # A file marked linguist-generated in .gitattributes, or matching a glob in
 # "risk_exclude", is never a reason for review.
@@ -76,7 +89,9 @@ fi
 patterns="$(jq -r '.risk_paths // [] | .[]' "${ROOT}/.factory/config.json" 2>/dev/null)"
 builtin=1
 [ "$(jq -r '.risk_builtin' "${ROOT}/.factory/config.json" 2>/dev/null)" = "false" ] && builtin=0
-if [ -z "${patterns}" ] && [ "${builtin}" = 0 ]; then
+max_lines="$(jq -r '.review.max_lines // 400' "${ROOT}/.factory/config.json" 2>/dev/null)"
+case "${max_lines}" in ''|*[!0-9]*) max_lines=400 ;; esac
+if [ -z "${patterns}" ] && [ "${builtin}" = 0 ] && [ "${max_lines}" = 0 ]; then
   none "RISK none for ${TASK_ID}: .factory/config.json has no risk_paths, so nothing is checked."
 fi
 # Matched against the file name alone, at any depth.
@@ -103,6 +118,51 @@ is_manifest() {  # <path>
     [[ "${base}" == ${m} ]] && return 0
   done
   return 1
+}
+
+# The rest of the built-in list: a reason, or nothing. Case-insensitive (the
+# caller sets nocasematch, which case honours too), at any depth except gates/,
+# which is the project root's.
+builtin_reason() {  # <path>
+  local p="/$1" base="${1##*/}"
+  case "${base}" in
+    conftest.py|pytest.ini|tox.ini|noxfile.py|.coveragerc|setuptests.*|jest.config.*|jest.setup.*|vitest.config.*|\
+    vitest.setup.*|vitest.workspace.*|karma.conf.*|.mocharc*|playwright.config.*|cypress.config.*|phpunit.xml|\
+    phpunit.xml.dist|.nycrc*|codecov.yml|.codecov.yml)
+      echo "is test harness configuration - it decides what a green test run means"; return ;;
+    .gitlab-ci.yml|azure-pipelines.yml|jenkinsfile|bitbucket-pipelines.yml|.travis.yml|.drone.yml|appveyor.yml|.woodpecker.yml)
+      echo "is CI configuration - it decides what runs before a merge"; return ;;
+    *.mock.*|*.mocks.*|*_mock.*|*_mocks.*|mock_*|*.fake.*|*_fake.*|fake_*|*.stub.*|*_stub.*)
+      echo "is a test double - a change to it can make a test pass without the code working"; return ;;
+  esac
+  case "${p}" in
+    */.github/workflows/*|*/.github/actions/*|*/.circleci/*|*/.buildkite/*|*/.gitlab/ci/*|*/.woodpecker/*)
+      echo "is CI configuration - it decides what runs before a merge"; return ;;
+    /gates/*)
+      echo "is one of the project's gates - it decides what passes"; return ;;
+    */mocks/*|*/__mocks__/*|*/fakes/*|*/stubs/*)
+      echo "is a test double - a change to it can make a test pass without the code working"; return ;;
+    */migrations/*|*/migration/*|*/migrate/*|*/alembic/*|*/flyway/*|*/liquibase/*)
+      echo "is a migration - it runs once, against data no test holds"; return ;;
+  esac
+}
+
+# The lines the task's files add and remove: against HEAD for what git tracks
+# (staged or not), the whole file for what is new and untracked. A binary file
+# counts nothing.
+diff_lines() {  # <path>...
+  local total=0 a d rest n p
+  while IFS=$'\t' read -r a d rest; do
+    case "${a}${d}" in ''|*[!0-9]*) continue ;; esac
+    total=$((total + a + d))
+  done < <(git -C "${ROOT}" diff --numstat HEAD -- "$@" 2>/dev/null)
+  while IFS= read -r p; do
+    [ -f "${ROOT}/${p}" ] || continue
+    n="$(wc -l < "${ROOT}/${p}" 2>/dev/null | tr -d ' ')"
+    case "${n}" in ''|*[!0-9]*) n=0 ;; esac
+    total=$((total + n))
+  done < <(git -C "${ROOT}" ls-files --others --exclude-standard -- "$@" 2>/dev/null)
+  echo "${total}"
 }
 
 # Same parser as factory-commit.sh: "- path" lines (backticks allowed) under
@@ -144,6 +204,7 @@ matches_any() {  # <path> <newline-separated globs>
 
 shopt -s nocasematch
 hits=""
+counted=()
 while IFS= read -r p; do
   [ -n "${p}" ] || continue
   if [ "$(git -C "${ROOT}" check-attr linguist-generated -- "${p}" 2>/dev/null | awk -F': ' '{print $3}')" = "true" ] \
@@ -151,11 +212,13 @@ while IFS= read -r p; do
     generated="${generated} ${p}"
     continue
   fi
+  counted+=("${p}")
   if [ "${builtin}" = 1 ] && is_manifest "${p}"; then
     hits="${hits}RISK ${TASK_ID}: ${p} is a dependency manifest - what it pulls in is code nobody here reviewed
 "
     continue
   fi
+  matched=0
   while IFS= read -r pat; do
     [ -n "${pat}" ] || continue
     case "${pat}" in
@@ -166,11 +229,24 @@ while IFS= read -r p; do
     if [[ "/${p}" == ${glob} ]]; then
       hits="${hits}RISK ${TASK_ID}: ${p} matches \"${pat}\"
 "
+      matched=1
       break
     fi
   done <<< "${patterns}"
+  if [ "${matched}" = 0 ] && [ "${builtin}" = 1 ]; then
+    why="$(builtin_reason "${p}")"
+    [ -n "${why}" ] && hits="${hits}RISK ${TASK_ID}: ${p} ${why}
+"
+  fi
 done <<< "${listed}"
 shopt -u nocasematch
+if [ "${max_lines}" -gt 0 ] && [ "${#counted[@]}" -gt 0 ]; then
+  size="$(diff_lines "${counted[@]}")"
+  if [ "${size}" -gt "${max_lines}" ]; then
+    hits="${hits}RISK ${TASK_ID}: the change is ${size} lines (review.max_lines is ${max_lines}) - the larger the diff, the more a green check leaves unjudged
+"
+  fi
+fi
 hits="${checked}${hits}"
 
 [ -n "${generated}" ] && echo "RISK skipped for ${TASK_ID}: generated or excluded:${generated}"
@@ -178,5 +254,8 @@ if [ -n "${hits}" ]; then
   printf '%s' "${hits}"
   echo "RISK ${TASK_ID}: review before commit - the gate cannot judge what is listed above."
   exit 1
+fi
+if [ -z "${patterns}" ] && [ "${builtin}" = 0 ]; then
+  none "RISK none for ${TASK_ID}: $(printf '%s\n' "${listed}" | grep -c .) file(s); no risk_paths and the built-in list off, so only the size was checked."
 fi
 none "RISK none for ${TASK_ID}: $(printf '%s\n' "${listed}" | grep -c .) file(s), none on a risk path."

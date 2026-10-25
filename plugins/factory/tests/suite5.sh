@@ -168,13 +168,21 @@ jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers
   fast:{workers:4,risk_review:"after",audit:true,effort_build:"medium",effort_escalate:"high",effort_review:"high",effort_audit:"high"},
   check:{claude_md_max_lines:200,untracked_guard:true},
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/run.lock\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/reviews/\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit/\n.factory/attempts/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/waiting/\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n' > .gitignore
+printf '.factory/verified/\n.factory/run.lock\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/reviews/\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit/\n.factory/attempts/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/waiting/\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n.factory/schedule/\n' > .gitignore
 FACTORY_ROOT="$C" bash "$H/factory-deny.sh" --apply >/dev/null
+FACTORY_ROOT="$C" python3 "$H/factory-allow.py" --apply >/dev/null
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
 check "a current project reports nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"
 check "and says nothing in the session brief" '[ -z "$(bash "$H/factory-upgrade.sh" --brief)" ]'
 check "a project whose gate is the shim reports no gate gap" '! printf "%s" "$out" | grep -q "gates/verify.sh"' "$out"
+A="$WORK/allowgap"; rm -rf "$A"; cp -R "$C" "$A"; cd "$A" || exit 1
+jq '.permissions.allow -= ["Bash(factory-settle *)"]' .claude/settings.json > "$WORK/allowgap.json" && mv "$WORK/allowgap.json" .claude/settings.json
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
+check "a rule an unattended run needs, missing, is a gap" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "missing the rules an unattended run needs in: permissions.allow"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "...that apply closes, the deny rules kept" 'printf "%s" "$out" | grep -q "ALLOW APPLIED: 1 rule(s)" && FACTORY_ROOT="$A" python3 "$H/factory-allow.py" >/dev/null 2>&1 && FACTORY_ROOT="$A" bash "$H/factory-deny.sh" >/dev/null 2>&1' "$out"
+cd "$C" || exit 1
 
 echo "=== 3.3: the gate becomes the shim"
 M="$WORK/migrate"; rm -rf "$M"; cp -R "$C" "$M"; cd "$M" || exit 1
