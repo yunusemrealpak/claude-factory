@@ -343,7 +343,8 @@ const usedText = (b) =>
 // or factory-ask run on their own, the task file and decisions.md, and its
 // structured answer.
 const EXIT_CMD = /^\s*([^\s]*\/)?factory-(settle|block|ask)(\.py|\.sh)?(\s|$)/
-const EXIT_FILE = /^(\.\/)?(tasks\/.+\.md|decisions\.md)$/i
+// A builder in its own checkout (fast.isolation) writes there.
+const EXIT_FILE = /^(\.\/)?(\.factory-worktrees\/task-[^/]+\/)?(tasks\/.+\.md|decisions\.md)$/i
 
 // The command with every quoted span emptied, or null when a span runs a
 // command ($( ) or backticks inside double quotes) or a quote does not close.
@@ -495,7 +496,7 @@ const VOLATILE = [
   [/\b0x[0-9a-f]+\b/gi, '<addr>'],
 ]
 const FACTORY_CMD = /^\s*([^\s;&|]*\/)?factory-[A-Za-z0-9_-]+(\.sh|\.py)?(\s|$)/
-const RULE_FREE_FILE = /^(\.\/)?(tasks\/.*|decisions\.md)$/i
+const RULE_FREE_FILE = /^(\.\/)?(\.factory-worktrees\/task-[^/]+\/)?(tasks\/.*|decisions\.md)$/i
 const RULE_FILE = /^[a-z0-9][a-z0-9-]*\.rule$/
 
 const squash = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim()

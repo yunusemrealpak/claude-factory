@@ -256,7 +256,7 @@ async function settleBy(t, r) {
   const why = shq((r && r.status === 'budget' && !/^budget\b/i.test(said) ? 'budget: ' + said : said).slice(0, 300))
   const how = r && r.status === 'refused' ? `--refused ${why}` : r && r.status === 'spec_conflict' ? `--conflict ${why}` : why
   const s = await run1(
-    `From the project root run exactly: factory-settle ${t.id} ${how}\nReturn ok=true if its last line starts with SETTLED, and that last line.`,
+    `From the project root run exactly, with a 10-minute Bash timeout (with fast.isolation it checks the project tree again): factory-settle ${t.id} ${how}\nReturn ok=true if its last line starts with SETTLED, and that last line.`,
     t.id + ' settle',
   )
   return s ? verdict(s.line) : null

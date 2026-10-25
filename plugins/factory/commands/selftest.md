@@ -34,6 +34,11 @@ What it covers:
 | 14 | the 3.5 plan check and what a run is judged by: `factory-lint --plan` (an uncovered requirement, a cycle, an open question, a watch-mode or cannot-fail acceptance, scope ceilings, a small change held to less), the built-in review triggers and `review.max_lines`, criteria files chosen by path, must-haves at the end of a run, the preflight's plan check and start check |
 | 15 | unattended permissions and scheduling: `factory-allow` (report, apply, a second apply adds nothing, the developer's rules kept), `factory-next schtasks` (the wrapper written with this machine's paths and parsed by PowerShell), `--permission-prompts none` on the night launch |
 | 16 | escalation: `factory-notify` (mute, the test log, ntfy to a local server), question deadlines and defaults, `factory-ask expire`, notifications from the breakers and the publisher |
+| 17 | opt-in checks: `check.security` (gitleaks red, semgrep a review reason, a missing tool a note, full scans to `.factory/scans/`) and `check.mutation` (survivors listed, never red, skipped on a red full check), the `mechanisms` counts in metrics |
+| 18 | `plan.ears` concerns, `area` in the plan, the cheat monitor's filter (a quote not in the diff dropped, a cheat verdict blocks and asks), settle's MONITOR hint |
+| 19 | lessons with a category and `retire_when`, the overlap check, `factory-lesson update` and `check`, rules applied by `factory-retro-apply` |
+| 20 | the spec ledger: a delta seeded and validated, merged on close all or nothing, drift lines |
+| 21 | untrusted sections framed by `factory-start`; `fast.isolation: worktree` - a checkout per task, a green task integrated, a conflict or a red after integration a retry with the tree untouched |
 
 Report:
 

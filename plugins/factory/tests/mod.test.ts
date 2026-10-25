@@ -506,6 +506,9 @@ describe('builder budget', () => {
     expect(JSON.stringify(await call($, 'Read', { file_path: '/proj/tasks/in-progress/T1.md' }))).toContain('ran')
     expect(JSON.stringify(await call($, 'Edit', { file_path: '/proj/tasks/in-progress/T1.md', old_string: 'a', new_string: 'b' }))).toContain('ran')
     expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/decisions.md', content: '- T1: x' }))).toContain('ran')
+    // A builder in its own checkout (fast.isolation) has its task file there.
+    expect(JSON.stringify(await call($, 'Edit', { file_path: '/proj/.factory-worktrees/task-T1/tasks/in-progress/T1.md', old_string: 'a', new_string: 'b' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/.factory-worktrees/task-T1/src/a.ts', content: 'x' }))).toContain('budget full')
     expect(JSON.stringify(await call($, 'StructuredOutput', { status: 'budget' }))).toContain('ran')
     expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/src/a.ts', content: 'x' }))).toContain('budget full')
     expect(JSON.stringify(await call($, 'Write', { file_path: '/proj/tasks/../src/a.ts', content: 'x' }))).toContain('budget full')

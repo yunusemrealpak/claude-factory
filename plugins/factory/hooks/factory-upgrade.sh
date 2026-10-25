@@ -81,7 +81,7 @@ done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/" ".factory/schedule/"; do
+  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/" ".factory/schedule/" ".factory/start-check" ".factory/rules/" ".factory/monitor/" ".factory/mutation/" ".factory/scans/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi

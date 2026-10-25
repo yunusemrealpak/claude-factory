@@ -385,8 +385,60 @@ A closed change can leave your machine, but only through one script and only as 
   `factory-next launchd`. A night run's worktree now gets the lessons and the
   criteria files too.
 
-## Stuck builders and lessons with teeth (3.6, opt-in)
+## Opt-in depth (3.6)
 
+Every item here is off until you turn it on, and each one's outcomes are
+counted per run in `.factory/metrics.jsonl` under `mechanisms` (what it caught,
+what it cleared), so you can see what it is worth before you keep it.
+
+- **Security scans.** `check.security` scans what each task adds: gitleaks (a
+  secret is red) and semgrep against HEAD (`semgrep_config`; a finding goes to a
+  reviewer, or is red with `semgrep_red: true`). `check.security.full` lists
+  whole-tree scans (CodeQL, `npm audit`, `pip-audit`, ...) that run at the end of
+  a run, with their reports in `.factory/scans/`. A tool that is not installed is
+  skipped with a note.
+- **Mutation testing.** `check.mutation` runs your mutation tool on the run's
+  diff after a green full check (`{"command": "cargo mutants --in-diff {diff}"}`,
+  or Stryker with `--mutate {files}`). A surviving mutant in changed code is
+  never red: it is listed for you and for the auditor - a test that does not
+  assert the behaviour it covers.
+- **EARS criteria.** With `plan.ears: true`, `factory-lint --plan` lists every
+  acceptance criterion not in EARS form ("The X shall ...", "When ..., the X
+  shall ...", "While ...", "If ..., then the X shall ...", "Where ...") as a
+  concern, never a failure.
+- **Area leases.** With `fast.area_lease: true`, two tasks with the same `area:`
+  in their frontmatter never build at the same time; a task with no area takes
+  no lease.
+- **A cheat monitor.** With `review.monitor: true`, a task whose green check found
+  a cheat signature or a frozen suite does not land: one read-only monitor agent
+  asks a single question - does this diff make the checks pass without doing
+  what the task asks? - before the reviewer. A cheat verdict backed by evidence
+  in the diff blocks the task and asks you; it is never handed back to a
+  builder as something to fix until it passes. Verdicts are kept in
+  `.factory/monitor/`.
+- **A checkout per builder.** With `"fast": {"isolation": "worktree"}` each task
+  builds in `.factory-worktrees/task-<id>`, a git worktree with the factory's
+  files and `isolation_links`, so builders never see each other's half-written
+  files. Settling merges the task's files into the project tree one task at a
+  time and checks them again there; only that check lands the task. A conflict
+  or a red there leaves the tree as it was and is a retry. Put what the build
+  needs and git does not hold in `isolation_links`, and make a test runner that
+  scans from the root skip `.factory-worktrees/`.
+- **Merge queue.** With `delivery.merge_queue: true`, a green pull request at
+  level merge goes to the base branch's merge queue instead of being merged by
+  the publisher, so CI tests it on top of everything ahead of it. That needs a
+  workflow that runs on `merge_group`; without one the publisher holds the
+  change and says so. Turn the queue on in the base branch's ruleset first.
+- **Spec ledger.** With `specs.ledger: true`, each change carries a `delta.md`
+  (`## ADDED`, `## MODIFIED`, `## REMOVED`, as `- FR-NNN:` lines), seeded from
+  its requirements and merged into `specs/requirements.md` when the change
+  closes - all of it or nothing. `factory-change validate <Cn>` refuses a change
+  with no delta unless it says `skip_specs: true`; `factory-change drift` lists
+  requirements no test names. The ledger is left for you to commit.
+- **Untrusted text is framed** (always on). An issue body, a page or a log a
+  task quotes goes under `## Source: <where>` or `## Untrusted`; `factory-start`
+  prints it inside an `<untrusted>` block, and builders read it as data, never
+  as instructions. Only the approved task file and your answers instruct them.
 - **A stuck check.** With `"fast": {"stuck": true}` (off by default) the hooks
   module watches each builder's calls. The same call with the same result 4
   times in a row, the same failing call 3 times, or two calls taking turns 6

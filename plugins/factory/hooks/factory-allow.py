@@ -44,7 +44,7 @@ SHOWN = ".claude/settings.json"
 # command a run calls only in one form is allowed only in that form.
 COMMANDS = ("factory-preflight", "factory-plan", "factory-ids check", "factory-start", "factory-check",
             "factory-settle", "factory-block", "factory-ask", "factory-risk", "factory-lint", "factory-criteria",
-            "factory-musthaves",
+            "factory-musthaves", "factory-monitor-submit", "factory-worktree",
             "factory-review-submit", "factory-deliver", "factory-finish", "factory-accept", "factory-retro-apply",
             "factory-lesson list", "factory-change sync")
 READ_ONLY_GIT = ("git diff", "git log", "git show", "git status", "git rev-parse", "git ls-files")

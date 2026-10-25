@@ -204,10 +204,17 @@ doubles (`mocks/`, `__mocks__/`, `fakes/`, `stubs/`, `*.mock.*`) and
 migrations - the places where a green check proves least, because a task can
 make its own tests pass by changing them. `"risk_builtin": false` turns that
 list off. A change of more lines than `review.max_lines` (default 400, `0`
-turns it off) is reviewed too: `"review": {"max_lines": 400}`.
+turns it off) is reviewed too: `"review": {"max_lines": 400}`. `review.monitor`
+(default `false`): with `true`, a task whose green check found a cheat signature
+or a frozen suite does not land until one read-only monitor agent has asked
+whether the diff makes the checks pass without doing the work; a cheat verdict
+with evidence in the diff blocks the task and asks me.
 
 Three more optional blocks, written only when I ask or the default is wrong:
-`plan` (`max_criteria`, default 8, and `max_files`, default 15: the most
+`plan` (`ears`, default `false`: with `true` every acceptance criterion not
+written in EARS form - "The X shall ...", "When ..., the X shall ...",
+"While ...", "If ..., then the X shall ...", "Where ..." - is a concern, and you
+write the criteria that way; `max_criteria`, default 8, and `max_files`, default 15: the most
 acceptance criteria and named paths one task may have before the plan check
 says split it; `small_change`, default 3: a change of that many tasks or fewer
 is never failed on scope or coverage), `notify` (`"ntfy":
@@ -231,7 +238,13 @@ makes the same call with the same result 4 times, the same failing call 3
 times, or takes turns between two calls 6 times is told to change its
 approach, and the second time may only settle the task as `no_progress`;
 waiting and looking around - `sleep`, `git status`, `git log`, `ls` - never
-count). The top-level `retry_limit` (default 2)
+count), `area_lease` (default `false`: with `true`, two tasks with the same
+`area:` never build at once) and `isolation` (`"worktree"`, or leave it out: a
+checkout per builder under `.factory-worktrees/`, its work merged into the
+project tree and checked again there on settle - worth it with more than one
+worker when builds share output folders or caches; it needs a first commit,
+`isolation_links` for what the build needs and git does not hold, and a test
+runner that ignores `.factory-worktrees/`). The top-level `retry_limit` (default 2)
 is how many attempts a red task gets in total, the first included.
 
 `check` is optional too, and it is how the loop judges one task without
@@ -265,6 +278,13 @@ the project's own tools already express:
   `commands.test`. Split only where the suite is big enough to be worth it -
   every unit's test command pays the runner's start-up again, and on a small
   project one suite run is faster than two unit runs.
+- **security** and **mutation** are off unless I ask. `"security":
+  {"semgrep_config": "p/default"}` scans what each task adds - gitleaks (a
+  secret is red) and semgrep (a finding goes to a reviewer) - and its `full`
+  list runs whole-tree scans at the end of a run. `"mutation": {"command":
+  "cargo mutants --in-diff {diff}"}` runs a mutation tool on the run's diff after
+  a green full check; a surviving mutant is listed, never red. A tool that is
+  not installed is skipped with a note.
 - **claude_md_max_lines** (default 200, `0` turns it off): a CLAUDE.md a task
   touches, or any tracked one at the full check, that is longer is red. Every
   agent loads it on every turn, so its size is a per-token cost of the run.
@@ -294,7 +314,7 @@ Show the `check` block in the approval table in Step 5, as one line per key.
 runs in a clean worktree: a task's check holds HEAD plus the task's own files
 (exactly what its commit will hold - a file missing from its list is a red
 build, a neighbour's half-written file is not there), and the full check holds
-HEAD. `isolation_links` is only read then: directories or files the build needs but git does not track, to be
+HEAD. `isolation_links` is only read then (and by `fast.isolation`): directories or files the build needs but git does not track, to be
 symlinked rather than rebuilt - `["node_modules"]` for a Node project, a
 `.venv` for Python, an untracked local settings file. Never a build output
 directory.
@@ -406,6 +426,10 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/retro/
 .factory/lessons/
 .factory/rules/
+.factory/monitor/
+.factory/mutation/
+.factory/scans/
+/.factory-worktrees/
 .factory/events.jsonl
 .factory/dashboard.html
 .factory/statusline.txt
@@ -521,6 +545,7 @@ in incremental mode) with this frontmatter:
 id: T-014
 title: Order module public contract
 module: orders
+area: orders
 depends_on: [P0-03, P0-04]
 covers: [FR-002]
 acceptance: dotnet test tests/Orders.Contracts.Tests
@@ -577,6 +602,10 @@ Rules:
   last attempt's knowledge instead of from zero; the first green after a red
   adds what finally fixed it, which is what `/factory:retro` turns into lessons.
 
+- `area:` is one lower-case word for the part of the code the task works in -
+  the module or folder most of its files are under (`api`, `db`, `ui`). Give
+  tasks that edit the same files the same area, and leave it empty for a task
+  that spans the tree. It is read only when `fast.area_lease` is on.
 - `covers:` names the requirements the task builds, by their `FR-` ids. Every
   requirement is covered by at least one task, and every task covers at least
   one requirement - Phase 0 (`P0-*`) excepted, since the ground is not a
@@ -673,6 +702,13 @@ builds, a task that covers nothing, two tasks waiting on each other, an open
 question, a task too big for one builder, an acceptance command that never
 exits or cannot fail. Fix every one and run it again; `factory-preflight` will
 not start a run on a plan that fails. A `CONCERN` you may leave, and I see it.
+
+With `specs.ledger` on (off by default), once the change is open (step 2 below)
+read `.factory/changes/<change-id>-<slug>/delta.md`: move every requirement that
+changes one already in `specs/requirements.md` from ADDED to MODIFIED under its
+ledger id, list what the change removes under REMOVED, and run
+`factory-change validate <change-id>` until it prints `SPECS OK` - or
+`SPECS SKIPPED` for a change that adds nothing to the specs.
 
 Head it with the change these tasks form: `Change C2 · <slug> · <type>` (`C1` on
 the first run). The slug is a short name of lowercase ASCII words joined by
