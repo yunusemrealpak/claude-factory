@@ -163,7 +163,9 @@ Session id: ${session_id:-unknown}. /factory:status for detail."
   exit 0
 fi
 
-brief="$(cat <<BRIEF
+# read, not "$(cat <<BRIEF ...)": bash 3.2 (macOS) scans a heredoc inside $( )
+# as if it were code, and one apostrophe in the text breaks the whole script.
+IFS= read -r -d '' brief <<BRIEF || true
 FACTORY ACTIVE in this project (.factory/active present).
 
 Task counts: backlog=${backlog}  in-progress=${in_progress}  done=${done_count}  blocked=${blocked}  proposed=${proposed} (awaiting approval, never dispatched)
@@ -204,7 +206,7 @@ Session id: ${session_id:-unknown}
 Rules in force: a task enters tasks/done only through factory-settle or factory-land, after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. /factory:status for detail, /factory:run to build.
 While /factory:run's loop runs: do not attach a Monitor, a poll or a progress message to it. Every wake-up of this session re-reads its whole context; the workflow reports once, when it is done.
 BRIEF
-)"
+brief="$(printf '%s' "$brief")"  # without the trailing newline, as before
 
 jq -n --arg ctx "$brief" \
   '{hookSpecificOutput: {hookEventName: "SessionStart", additionalContext: $ctx}}'
