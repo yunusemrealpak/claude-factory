@@ -3,6 +3,7 @@
 # status line segment, end-of-run message. Never touches a real project.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 EXTRACT="$BASE/extract.py"
 # Sandboxes are built under here, never beside the suite itself.
@@ -116,8 +117,10 @@ check "dashboard was not rebuilt while the stamp was fresh" '[ ! -f "$E/.factory
 
 rm -f "$E/.factory/.dash-stamp"
 post "bash gates/verify.sh C2-08" "GATE RESULT: GREEN for C2-08"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$E/.factory/dashboard.html" ] && break; done
-check "an event rebuilds the dashboard" '[ -f "$E/.factory/dashboard.html" ] || { sleep 2; [ -f "$E/.factory/dashboard.html" ]; }'
+# The rebuild runs in the background; a slow host (Git Bash starts processes
+# slowly) gets up to 20 seconds.
+for _ in $(seq 1 40); do [ -f "$E/.factory/dashboard.html" ] && break; sleep 0.5; done
+check "an event rebuilds the dashboard" '[ -f "$E/.factory/dashboard.html" ]'
 check "the debounce stamp is written" '[ -s "$E/.factory/.dash-stamp" ]'
 
 echo "=== question inbox"
@@ -248,12 +251,14 @@ seg_name() {  # <change-name> - the name as the status line renders it
 }
 long="C12-refactor-the-entire-payment-pipeline"
 name="$(seg_name "$long")"
-check "a long change name is cut to fit" '[ "${#name}" -le 18 ] && printf "%s" "$name" | grep -q "…"' "$name"
+# Width in characters whatever the locale: the ellipsis is one.
+width() { local n="${1//…/.}"; printf '%s' "${#n}"; }
+check "a long change name is cut to fit" '[ "$(width "$name")" -le 18 ] && printf "%s" "$name" | grep -q "…"' "$name"
 check "the cut keeps the change id, which is the head" 'printf "%s" "$name" | grep -q "^C12-"' "$name"
 name="$(seg_name "C2-invoice-export")"
 check "a name that already fits is left alone" '[ "$name" = "C2-invoice-export" ]' "$name"
 name="$(FACTORY_STATUSLINE_MAX=8 seg_name "C2-invoice-export")"
-check "the limit can be tightened" '[ "${#name}" -le 8 ]' "$name"
+check "the limit can be tightened" '[ "$(width "$name")" -le 8 ]' "$name"
 
 echo "=== end of run"
 cd "$D" || exit 1

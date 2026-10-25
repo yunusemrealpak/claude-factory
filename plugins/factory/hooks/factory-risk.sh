@@ -26,6 +26,7 @@
 # Exit: 0 nothing risky touched; 1 review needed (the output says why);
 #       2 usage error.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 TASK_ID="${1:-}"
 if [ -z "${TASK_ID}" ]; then

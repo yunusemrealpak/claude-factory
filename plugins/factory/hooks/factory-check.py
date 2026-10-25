@@ -78,6 +78,8 @@ import time
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import bash, npath, strip_root  # noqa: E402
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
 
@@ -175,7 +177,7 @@ def files_touched(text):
             if m:
                 word = m.group(1).replace("`", "").split()
                 if word:
-                    out.append(os.path.normpath(word[0][2:] if word[0].startswith("./") else word[0]))
+                    out.append(npath(word[0][2:] if word[0].startswith("./") else word[0]))
     return sorted(set(out))
 
 
@@ -252,7 +254,7 @@ def load_units(check):
         return None, None
     if isinstance(spec, str):
         try:
-            r = subprocess.run(["bash", "-c", spec], cwd=ROOT, capture_output=True, text=True)
+            r = subprocess.run([bash(), "-c", spec], cwd=ROOT, capture_output=True, text=True)
             spec = json.loads(r.stdout)
         except (OSError, ValueError) as err:
             return None, "check.units did not print a JSON list (%s)" % err
@@ -264,7 +266,7 @@ def load_units(check):
         if not isinstance(u, dict):
             continue
         raw = u.get("paths") or ([u["path"]] if u.get("path") else [])
-        paths = [os.path.normpath(p) for p in raw if p]
+        paths = [npath(p) for p in raw if p]
         if not paths:
             continue
         name = u.get("name") or paths[0]
@@ -282,7 +284,7 @@ def owner(path, units):
     best, best_len = None, -1
     for u in units:
         for p in u["paths"]:
-            if p == "." or path == p or path.startswith(p + os.sep):
+            if p == "." or path == p or path.startswith(p + "/"):
                 length = 0 if p == "." else len(p)
                 if length > best_len:
                     best, best_len = u, length
@@ -361,9 +363,9 @@ def task_census(listed, fm, check):
     tf, skip_re = census_regexes(check)
     removed, added = [], 0
     for p in listed:
-        if not tf.search(p.replace(os.sep, "/")):
+        if not tf.search(p):
             continue
-        rc, before = git("show", "HEAD:./" + p.replace(os.sep, "/"))
+        rc, before = git("show", "HEAD:./" + p)
         existed = rc == 0
         now = os.path.join(ROOT, p)
         if existed and not os.path.exists(now):
@@ -385,9 +387,9 @@ def changed_assertions(listed, check):
     rx = re.compile(check["assertion"]) if check.get("assertion") else ASSERTION
     out = {}
     for p in listed:
-        if not tf.search(p.replace(os.sep, "/")):
+        if not tf.search(p):
             continue
-        rc, _ = git("cat-file", "-e", "HEAD:./" + p.replace(os.sep, "/"))
+        rc, _ = git("cat-file", "-e", "HEAD:./" + p)
         if rc != 0:
             continue
         rc, diff = git("diff", "HEAD", "-U0", "--", p)
@@ -440,7 +442,7 @@ class Run:
         n = 1
         while os.path.exists(os.path.join(F, "logs", "%s.%d.log" % (label, n))):
             n += 1
-        self.log_rel = os.path.join(".factory", "logs", "%s.%d.log" % (label, n))
+        self.log_rel = ".factory/logs/%s.%d.log" % (label, n)
         self.log = open(os.path.join(ROOT, self.log_rel), "w", encoding="utf-8")
         self.lines, self.failed, self.sig_text, self.raw = [], [], [], []
 
@@ -449,7 +451,7 @@ class Run:
         self.log.flush()
         started = time.time()
         try:
-            r = subprocess.run(["bash", "-c", cmd], cwd=ROOT, capture_output=True, text=True, errors="replace")
+            r = subprocess.run([bash(), "-c", cmd], cwd=ROOT, capture_output=True, text=True, errors="replace")
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
         except OSError as err:
             out, rc = str(err), 127
@@ -579,7 +581,7 @@ def record_failure(task_id, text):
 
 def tree_hash():
     try:
-        r = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-gate-skip.sh"), "hash", ROOT],
+        r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-gate-skip.sh"), "hash", ROOT],
                            capture_output=True, text=True)
         return r.stdout.strip() or "unknown"
     except OSError:
@@ -636,14 +638,14 @@ def dirty_paths():
             i += 1
         if prefix and path.startswith(prefix):
             path = path[len(prefix):]
-        paths.add(os.path.normpath(path))
+        paths.add(npath(path))
     return paths
 
 
 def untracked_paths():
     """Project-relative paths git does not track and does not ignore."""
     rc, out = git("ls-files", "--others", "--exclude-standard", "-z", "--", ".")
-    return [os.path.normpath(p) for p in out.split("\0") if p] if rc == 0 else []
+    return [npath(p) for p in out.split("\0") if p] if rc == 0 else []
 
 
 def stray_untracked(task_id, listed, units, check):
@@ -653,11 +655,11 @@ def stray_untracked(task_id, listed, units, check):
     progress lists are that task's. Returns (strays, open_listing): open_listing
     is true when another task in progress has listed nothing yet, so a stray
     could be its work and cannot be blamed on this one."""
-    mine = {owner(os.path.normpath(p), units)["name"] for p in listed if owner(os.path.normpath(p), units)}
+    mine = {owner(npath(p), units)["name"] for p in listed if owner(npath(p), units)}
     if not mine:
         return [], False
     ignore = check.get("ignore") or DEFAULT_IGNORE
-    claimed = {os.path.normpath(p) for p in listed}
+    claimed = {npath(p) for p in listed}
     open_listing = False
     d = os.path.join(ROOT, "tasks", "in-progress")
     for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
@@ -665,10 +667,10 @@ def stray_untracked(task_id, listed, units, check):
             continue
         other = files_touched(read(os.path.join(d, name)))
         open_listing = open_listing or not other
-        claimed.update(os.path.normpath(p) for p in other)
+        claimed.update(npath(p) for p in other)
     strays = []
     for p in untracked_paths():
-        if p in claimed or ignored(p, ignore) or p == "decisions.md" or p.split(os.sep)[0] in (".factory", "tasks"):
+        if p in claimed or ignored(p, ignore) or p == "decisions.md" or p.split("/")[0] in (".factory", "tasks"):
             continue
         u = owner(p, units)
         if u and u["name"] in mine:
@@ -689,7 +691,8 @@ def claude_md_over(paths, limit):
 
 
 ERROR_LINE = re.compile(r"(?i)\b(error|errors|failed|failure|exception|fatal)\b|\[E\]")
-PATH_TOKEN = re.compile(r"[\w@+.\-/\\]+\.\w{1,10}")
+# A Windows tool prints C:\p\lib\a.cs: the drive is part of the token.
+PATH_TOKEN = re.compile(r"(?:(?<!\w)[A-Za-z]:[\\/])?[\w@+.\-/\\]+\.\w{1,10}")
 
 
 def first_repo_file(line):
@@ -697,14 +700,14 @@ def first_repo_file(line):
     linters and test runners all put the location of a problem there."""
     real = os.path.realpath(ROOT)
     for m in PATH_TOKEN.finditer(line):
-        tok = m.group(0).strip("'\"()[],:")
-        for base in (real, ROOT):
-            if tok.startswith(base + os.sep):
-                tok = tok[len(base) + 1:]
+        tok = m.group(0).strip("'\"()[],:").replace("\\", "/")
+        inside = strip_root(tok, (real, ROOT))
+        if inside is not None:
+            tok = inside
         if tok.startswith("./"):
             tok = tok[2:]
         if tok and not os.path.isabs(tok) and os.path.isfile(os.path.join(ROOT, tok)):
-            return os.path.normpath(tok)
+            return npath(tok)
     return None
 
 
@@ -1013,7 +1016,7 @@ def check_full():
             p, _ = task_file(tid)
             text = read(p) if p else ""
             if frontmatter(text).get("allow_test_removal", "").lower() == "true":
-                allowed.update(f.replace(os.sep, "/") for f in files_touched(text))
+                allowed.update(files_touched(text))
         before, after = start.get("files") or {}, now["files"]
         lost = sorted(f for f in before if f not in after and f not in allowed)
         skipped = sorted(f for f in after if after[f] > before.get(f, 0) and f not in allowed)
@@ -1076,7 +1079,7 @@ def main(argv):
         if units is None:
             print("ALL no units declared in check.units")
             return 0
-        reached, why = reach([os.path.normpath(p) for p in argv[1:]], units, check.get("ignore") or DEFAULT_IGNORE)
+        reached, why = reach([npath(p) for p in argv[1:]], units, check.get("ignore") or DEFAULT_IGNORE)
         if reached is None:
             print("ALL " + why)
         else:

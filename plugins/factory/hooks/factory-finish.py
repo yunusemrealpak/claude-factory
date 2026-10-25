@@ -35,6 +35,8 @@ import time
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import bash  # noqa: E402
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
 LANES = ("done", "blocked", "in-progress", "backlog")
@@ -77,7 +79,7 @@ def deliver_closed(ids):
         try:
             if not os.path.exists(os.path.join(pub, cid + ".json")):
                 open(os.path.join(pub, cid + ".pending"), "w").close()
-            subprocess.Popen(["python3", os.path.join(HOOK_DIR, "factory-publish.py"), cid], cwd=ROOT,
+            subprocess.Popen([sys.executable, os.path.join(HOOK_DIR, "factory-publish.py"), cid], cwd=ROOT,
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              start_new_session=True)
         except OSError:
@@ -196,7 +198,7 @@ def retro_state():
     written either way (the brief shows it); `retro.mode: full` is the only
     setting under which the workflow runs the retro agent unasked."""
     try:
-        r = subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-retro-apply.py"), "due"],
+        r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-retro-apply.py"), "due"],
                            capture_output=True, text=True, cwd=ROOT, errors="replace")
         due = r.returncode == 0
     except OSError:
@@ -248,24 +250,24 @@ def main(argv):
 
     full = {"verdict": "skipped", "output": "nothing landed, so there was nothing new to judge"}
     if "--no-full" not in argv and any(b["lane"] == "done" for b in board):
-        rc, out = run(["python3", os.path.join(HOOK_DIR, "factory-check.py"), "--full"])
+        rc, out = run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "--full"])
         lines = out.splitlines()
         full = {"verdict": "green" if rc == 0 else "red",
                 "output": "\n".join(lines[-60:] if rc else [l for l in lines if l.startswith("  ") or "FULL" in l])}
 
-    _, sync = run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
+    _, sync = run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
     acceptance = []
     closed_now = re.findall(r"^CLOSED-NOW\s+(C[0-9]+)-", sync, re.M)
     for name in re.findall(r"^unverified\s+(\S+)", sync, re.M):
         cid = name.split("-")[0]
-        _, out = run(["bash", os.path.join(HOOK_DIR, "factory-accept.sh"), cid])
+        _, out = run([bash(), os.path.join(HOOK_DIR, "factory-accept.sh"), cid])
         verdict = next((l for l in out.splitlines() if re.match(r"ACCEPT (GREEN|RED|NONE)", l)), "ACCEPT ? " + cid)
         acceptance.append({"change": cid, "result": verdict})
     if acceptance:
-        _, sync = run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
+        _, sync = run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
         closed_now += re.findall(r"^CLOSED-NOW\s+(C[0-9]+)-", sync, re.M)
     deliver_closed(sorted(set(closed_now)))
-    run(["bash", os.path.join(HOOK_DIR, "factory-dash.sh")])
+    run([bash(), os.path.join(HOOK_DIR, "factory-dash.sh")])
 
     started = 0
     try:

@@ -10,6 +10,7 @@
 # reading this, with a human approving the result. The split matters - a
 # collector that also guessed would put its guesses in the evidence.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 # `factory-retro evaluate` (and ledger, due) belong to the validator: measure
 # what an applied change did, and undo what did not help.

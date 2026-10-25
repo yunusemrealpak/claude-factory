@@ -41,6 +41,8 @@ import time
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import argv as runnable, bash, npath, rel  # noqa: E402
 ROOT = os.path.abspath(os.environ.get("FACTORY_ROOT") or os.getcwd())
 F = os.path.join(ROOT, ".factory")
 CLAUDE = os.environ.get("FACTORY_CLAUDE", "claude")
@@ -67,12 +69,12 @@ def decide():
     if os.path.exists(os.path.join(F, "STOP")):
         return False, "STOP is set", None
     env = dict(os.environ, FACTORY_ROOT=ROOT)
-    r = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")], cwd=ROOT, env=env,
+    r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")], cwd=ROOT, env=env,
                        capture_output=True, text=True, errors="replace")
     level = (r.stdout or "").strip().splitlines()[-1:] or ["local"]
     if level[0] != "merge":
         return False, "autonomy level is %s, not merge" % level[0], None
-    rc, out = sh(["bash", os.path.join(HOOK_DIR, "factory-quota.sh"), "check"])
+    rc, out = sh([bash(), os.path.join(HOOK_DIR, "factory-quota.sh"), "check"])
     if rc != 0:
         return False, out.splitlines()[-1] if out else "no quota reading", None
     for p in glob.glob(os.path.join(F, "publish", "*.json")):
@@ -82,7 +84,7 @@ def decide():
                                                   " (held)" if st.get("held") else ""), None
     if glob.glob(os.path.join(F, "inflight", "*")) or glob.glob(os.path.join(ROOT, "tasks", "in-progress", "*.md")):
         return False, "a run is active", None
-    rc, out = sh(["python3", os.path.join(HOOK_DIR, "factory-plan.py"), "--json"])
+    rc, out = sh([sys.executable, os.path.join(HOOK_DIR, "factory-plan.py"), "--json"])
     try:
         plan = json.loads(out[out.index("{"):])
     except (ValueError, ImportError):
@@ -154,11 +156,12 @@ def cmd_launch(argv):
     logdir = os.path.join(F, "logs")
     os.makedirs(logdir, exist_ok=True)
     log = os.path.join(logdir, "next-%s.log" % time.strftime("%Y%m%d-%H%M", time.gmtime()))
-    env = dict(os.environ, FACTORY_ROOT=path, FACTORY_NEXT="1")
+    # Forward slashes: bash compares and strips this root as text.
+    env = dict(os.environ, FACTORY_ROOT=npath(path), FACTORY_NEXT="1")
     env.pop("CLAUDE_PROJECT_DIR", None)
     with open(log, "w", encoding="utf-8") as fh:
-        r = subprocess.run(argv_cmd, cwd=path, env=env, stdout=fh, stderr=subprocess.STDOUT)
-    print("NEXT RAN %s in %s (exit %d, log %s)" % (text, os.path.relpath(path, ROOT), r.returncode, os.path.relpath(log, ROOT)))
+        r = subprocess.run(runnable(argv_cmd), cwd=path, env=env, stdout=fh, stderr=subprocess.STDOUT)
+    print("NEXT RAN %s in %s (exit %d, log %s)" % (text, rel(path, ROOT), r.returncode, rel(log, ROOT)))
     return 0 if r.returncode == 0 else 1
 
 

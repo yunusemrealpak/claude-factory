@@ -39,7 +39,10 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import argv, bash, pid_alive  # noqa: E402
 ROOT = os.path.abspath(os.environ.get("FACTORY_ROOT") or os.getcwd())
 F = os.path.join(ROOT, ".factory")
 P = os.path.join(F, "publish")
@@ -65,7 +68,7 @@ def run(cmd, check_env=None, timeout=None, stdin=None):
     if check_env:
         env.update(check_env)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, env=env, timeout=timeout, input=stdin)
+        r = subprocess.run(argv(cmd), capture_output=True, text=True, cwd=ROOT, env=env, timeout=timeout, input=stdin)
         return r.returncode, r.stdout, r.stderr
     except FileNotFoundError as e:
         return 127, "", str(e)
@@ -118,7 +121,7 @@ def config():
 
 
 def level():
-    rc, out, _ = run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")], timeout=30)
+    rc, out, _ = run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")], timeout=30)
     word = (out.split() or ["local"])[0]
     return word if word in ("local", "pr", "merge") else "local"
 
@@ -155,14 +158,6 @@ def hold(st, reason):
     st["held"] = reason
     say(st, "PUBLISH HELD %s at %s: %s" % (st["change"], st["state"], reason))
     return 1
-
-
-def pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
 
 
 def take_lock(cid):
@@ -508,7 +503,7 @@ def sync_local(st):
     git("branch", "-D", st["branch"])
     git("push", "-q", "origin", "--delete", st["branch"])
     st.pop("sync_pending", None)
-    run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync", st["change"]])
+    run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync", st["change"]])
 
 
 def step_after_merge(st):
@@ -703,7 +698,7 @@ def deliver(cid):
         st["pid"] = None
         save(st)
         try:
-            subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-digest.py")], cwd=ROOT, capture_output=True,
+            subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-digest.py")], cwd=ROOT, capture_output=True,
                            env=dict(os.environ, FACTORY_ROOT=ROOT), timeout=60)
         except (OSError, subprocess.SubprocessError):
             pass

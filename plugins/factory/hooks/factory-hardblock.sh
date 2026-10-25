@@ -24,6 +24,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/factory-compat.sh"
 RULES="${FACTORY_HARD_BLOCKS:-${HERE}/hard-blocks.txt}"
 
 [ -r "${RULES}" ] || { echo "hard-blocks.txt unreadable: ${RULES}" >&2; exit 4; }

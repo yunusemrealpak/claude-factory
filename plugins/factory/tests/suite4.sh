@@ -3,6 +3,7 @@
 # run, the pre-dispatch task lint, the deterministic ready set.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 EXTRACT="$BASE/extract.py"
 # Sandboxes are built under here, never beside the suite itself.

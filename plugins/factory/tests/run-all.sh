@@ -23,6 +23,7 @@ set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
 export FACTORY_NO_NOTIFY=1
+. "$HERE/../hooks/factory-compat.sh"
 
 want="${1:-all}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/factory-selftest.XXXXXX")"

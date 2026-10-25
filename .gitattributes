@@ -1,0 +1,7 @@
+# Every text file is LF on every checkout. The scripts are run by bash and the
+# rule lists are read line by line: a CR left on a line becomes part of the
+# last field, and a hard-block rule ending in CR matches nothing.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary

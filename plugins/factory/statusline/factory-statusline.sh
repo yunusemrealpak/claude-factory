@@ -20,6 +20,10 @@
 # your own settings at.
 set -uo pipefail
 
+# A native jq.exe under Git Bash writes CRLF; -b keeps it to LF (the same
+# fix hooks/factory-compat.sh carries - this file is installed on its own).
+case "${OSTYPE:-}" in msys*|cygwin*|win32*) command jq -b -n 1 >/dev/null 2>&1 && jq() { command jq -b "$@"; } ;; esac
+
 INPUT=$(cat)
 RESET=$'\033[0m'
 DIM=$'\033[38;5;240m'

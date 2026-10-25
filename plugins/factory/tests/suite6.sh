@@ -10,6 +10,7 @@
 # check must work for any project whose config says how to build and test it.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 PLUGIN="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${FACTORY_TEST_DIR:-$(mktemp -d)}"
 export PATH="${PLUGIN}/bin:$PATH"

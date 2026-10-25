@@ -267,7 +267,9 @@ async function loadRules($) {
   if (rules) return rules
   const text = await $.fs.read($.plugin.root + '/hooks/hard-blocks.txt')
   const out = { bash: [], path: [], groups: {} }
-  for (const line of text.split('\n')) {
+  // A checkout with CRLF line ends must not leave a CR at the end of every
+  // rule: a regex ending in CR matches nothing.
+  for (const line of text.split(/\r?\n/)) {
     const f = line.split(' ## ')
     if (f[0] === 'member' && f.length === 4 && f[2] !== 'deny') (out.groups[f[1]] = out.groups[f[1]] || []).push(f[3])
     if (f[0] === 'bash' && f.length === 3) out.bash.push({ name: f[1], re: new RegExp(js(f[2])) })

@@ -20,6 +20,10 @@ const RULES = [
   'deny ## Bash(git push *)',
 ].join('\n')
 
+// The engine hands a file noun the path in the host's own spelling: on Windows
+// /proj/x arrives as C:\proj\x. The mocks compare it in one spelling.
+const P = (p) => String(p).replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
+
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
 function world(on, { active = true, runFails = false, files = {}, level = '', limits = [] } = {}) {
@@ -29,8 +33,8 @@ function world(on, { active = true, runFails = false, files = {}, level = '', li
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('clock.now', () => ({ value: NOW }))
   on('env.get', () => ({ value: '/home/u' }))
-  on('fs.exists', (_$, e) => ({ value: e.path.endsWith('/.factory/active') ? active : e.path in files }))
-  on('fs.read', (_$, e) => ({ value: e.path.endsWith('/hard-blocks.txt') ? RULES : files[e.path] }))
+  on('fs.exists', (_$, e) => ({ value: P(e.path).endsWith('/.factory/active') ? active : P(e.path) in files }))
+  on('fs.read', (_$, e) => ({ value: P(e.path).endsWith('/hard-blocks.txt') ? RULES : files[P(e.path)] }))
   on('fs.list', () => ({ value: [{ name: 'T1.md', kind: 'file', size: 1, isLink: false }] }))
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 's1' }))

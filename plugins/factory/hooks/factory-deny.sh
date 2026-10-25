@@ -18,6 +18,7 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 ROOT="${FACTORY_ROOT:-$PWD}"
 FILE="${ROOT}/.claude/settings.json"
 apply=0

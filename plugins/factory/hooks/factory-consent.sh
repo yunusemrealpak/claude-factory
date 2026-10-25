@@ -19,6 +19,7 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 input="$(cat)"
 
 prompt="$(printf '%s' "${input}" | jq -r '.prompt // empty' 2>/dev/null)"

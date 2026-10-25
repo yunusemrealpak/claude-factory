@@ -14,6 +14,7 @@
 #
 # Precondition: inert unless <project>/.factory/active exists.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 input="$(cat)"
 

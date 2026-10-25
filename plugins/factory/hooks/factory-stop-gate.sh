@@ -16,6 +16,7 @@ set -uo pipefail
 # toolkit works from any install path - a plugin directory changes on
 # every update.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 
 input="$(cat)"
 

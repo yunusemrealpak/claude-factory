@@ -14,6 +14,7 @@
 # Exit: 0 OK; 1 OVER, STALE or NONE. Callers decide whether the level they run
 # at is one where that matters (merge and above).
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 ROOT="${FACTORY_ROOT:-$PWD}"
 FILE="${FACTORY_QUOTA_FILE:-${HOME}/.claude/.factory-quota.json}"

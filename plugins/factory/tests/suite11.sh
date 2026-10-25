@@ -4,6 +4,7 @@
 # retrospective is not locked out, and an unclassified gate result keeps a hint.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 PLUGIN="$(cd "$H/.." && pwd)"
 WORK="${FACTORY_TEST_DIR:-$(mktemp -d)}"
 export PATH="${PLUGIN}/bin:$PATH"

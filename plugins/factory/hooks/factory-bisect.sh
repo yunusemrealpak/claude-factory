@@ -21,6 +21,7 @@
 # The command runs log2(N)+2 times, which is the whole cost. Nothing is written
 # to the repository, and no branch, ref or index is touched.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 ROOT="$PWD"
 CONFIG="${ROOT}/.factory/config.json"

@@ -43,6 +43,8 @@ import time
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import bash, rel  # noqa: E402
 ROOT = os.path.abspath(os.environ.get("FACTORY_ROOT") or os.getcwd())
 F = os.path.join(ROOT, ".factory")
 RETRO = os.path.join(F, "retro")
@@ -316,7 +318,7 @@ def apply_one(p, date, applied_before):
         module, text, ev = str(p.get("module") or ""), str(p.get("text") or ""), str(p.get("evidence") or "")
         if BAD_RULE.search(text):
             return {"status": "rejected", "reason": "a lesson may not tell an agent to bypass the gate"}
-        rc, out = sh(["bash", os.path.join(HOOK_DIR, "factory-lesson.sh"), "add", module, ev, text])
+        rc, out = sh([bash(), os.path.join(HOOK_DIR, "factory-lesson.sh"), "add", module, ev, text])
         if rc != 0:
             return {"status": "rejected", "reason": out.strip().splitlines()[-1] if out.strip() else "factory-lesson refused"}
         base.update({"status": "applied", "undo": {"kind": "lesson", "module": module, "text": text}, "commit": None})
@@ -341,7 +343,7 @@ def apply_one(p, date, applied_before):
             if why:
                 return {"status": "rejected", "reason": why}
             keys[k] = {"before": old, "had": old is not None}
-        ok, note = tracked_and_clean(os.path.relpath(CONFIG, ROOT))
+        ok, note = tracked_and_clean(rel(CONFIG, ROOT))
         if ok is None:
             return {"status": "rejected", "reason": note}
         for k, v in flat.items():
@@ -351,7 +353,7 @@ def apply_one(p, date, applied_before):
             json.dump(cfg, fh, indent=2)
             fh.write("\n")
         os.replace(tmp, CONFIG)
-        sha = commit_file(os.path.relpath(CONFIG, ROOT), "retro: %s" % ", ".join(sorted(flat)), trailer) if ok else None
+        sha = commit_file(rel(CONFIG, ROOT), "retro: %s" % ", ".join(sorted(flat)), trailer) if ok else None
         base.update({"status": "applied", "undo": undo_for_config(keys), "commit": sha})
         return base
 
@@ -421,7 +423,7 @@ def undo(rec):
             json.dump(cfg, fh, indent=2)
             fh.write("\n")
         if rec.get("commit"):
-            commit_file(os.path.relpath(CONFIG, ROOT), "retro: revert %s" % rec["id"], trailer)
+            commit_file(rel(CONFIG, ROOT), "retro: revert %s" % rec["id"], trailer)
         return True
     if kind == "claude_md":
         path = os.path.join(ROOT, "CLAUDE.md")

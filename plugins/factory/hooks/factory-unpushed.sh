@@ -15,6 +15,7 @@
 #
 # Exit: 0 below the limit or nothing to count; 1 over the limit.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 ROOT="${FACTORY_ROOT:-$PWD}"
 F="${ROOT}/.factory"

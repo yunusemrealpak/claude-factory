@@ -30,6 +30,8 @@ import sys
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import bash  # noqa: E402
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
 FACTORY_PATHS = ("tasks/", "decisions.md", ".factory/", "gates/", "specs/", "CLAUDE.md", ".gitignore", ".claude/")
@@ -102,7 +104,7 @@ def build(proposed=False, change=None):
                      "review": fast.get("effort_review") or "high",
                      "audit": fast.get("effort_audit") or "high"}
 
-    ids = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
+    ids = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
                          capture_output=True, text=True)
     if ids.returncode != 0:
         out["problems"] += [l for l in ids.stdout.splitlines() if l.strip()] or ["factory-ids check failed"]
@@ -252,7 +254,7 @@ def build(proposed=False, change=None):
 def record_start(plan):
     """The test census of HEAD before anything lands. Each task's check can only
     see its own files; this is what lets the end of the run see all of them."""
-    r = subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
+    r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
                        capture_output=True, text=True, cwd=ROOT)
     try:
         census = json.loads(r.stdout)
@@ -270,18 +272,18 @@ def delivery_gate(change):
     problems = []
     level = "local"
     try:
-        r = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")],
+        r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")],
                            capture_output=True, text=True, cwd=ROOT, timeout=20)
         level = (r.stdout.strip() or "local").split()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         pass
     if change:
-        b = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-branch.sh"), change],
+        b = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-branch.sh"), change],
                            capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if b.returncode != 0:
             problems.append((b.stdout.strip() or b.stderr.strip() or "factory-branch refused").splitlines()[0])
     if level == "merge":
-        q = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
+        q = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
                            capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if q.returncode != 0:
             problems.append((q.stdout.strip() or "quota check failed").splitlines()[0]

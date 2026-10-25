@@ -5,6 +5,7 @@
 # that moved). Nothing here touches a network or a real remote.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 PLUGIN="$(cd "$H/.." && pwd)"
 WORK="${FACTORY_TEST_DIR:-$(mktemp -d)}"
 export PATH="${PLUGIN}/bin:$PATH"
@@ -256,7 +257,10 @@ touch "$S/checks_sleep"
 python3 "$H/factory-publish.py" C2 >/dev/null 2>&1 &
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ "$(state state C2)" = pr_open ] && break; sleep 0.5; done
 pid="$(state pid C2)"
-kill -9 "$pid" 2>/dev/null; pkill -9 -f "$FG/gh pr checks" 2>/dev/null; sleep 0.3
+# The pid is the one Python recorded: a Windows pid under Git Bash, which
+# bash's kill does not know.
+kill -9 "$pid" 2>/dev/null || taskkill //F //PID "$pid" >/dev/null 2>&1
+pkill -9 -f "$FG/gh pr checks" 2>/dev/null; sleep 0.3
 check "the record survives with the step it reached" '[ "$(state state C2)" = pr_open ] && [ "$(state pid C2)" = "$pid" ]'
 rm -f "$S/checks_sleep"
 out="$(pub C2)"
