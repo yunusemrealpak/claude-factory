@@ -1,0 +1,7 @@
+# Every gates/verify.sh template /factory:init ever wrote, by sha256 of its
+# text normalised (CRLF -> LF, trailing blanks stripped, blank lines at either
+# end dropped, one final newline, "\$N" read as "$N"). factory-upgrade replaces
+# a gate that matches one of these with the shim, and never one that does not.
+# <sha256> <factory versions that wrote it>
+036a37822083e4039f1c4367834abe18211745b3687e669498e95c99af693f04 2.5-3.2
+b0f14fdb6b3e94a089d9ca815733fb77fb9057062a9b347c335edcf6f3f3ddc6 2.2-2.4

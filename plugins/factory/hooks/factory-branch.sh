@@ -18,6 +18,7 @@
 #
 # Exit: 0 ready; 1 refused; 2 usage.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 ROOT="${FACTORY_ROOT:-$PWD}"
 F="${ROOT}/.factory"

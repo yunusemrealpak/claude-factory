@@ -20,12 +20,21 @@ while a run is active.
 Levels (factory-autonomy): local - nothing happens; pr - the branch is pushed
 and the pull request opened, then it stops; merge - the rest.
 
+With "delivery": {"merge_queue": true} a green pull request is not merged by
+the publisher: it is handed to the base branch's merge queue (gh pr merge
+--auto, pinned to the tested head), and the publisher waits for GitHub to merge
+it (delivery.queue_wait_min, 60; past that, --resume-all carries on). The
+queue tests the pull request on top of everything queued ahead of it, but only
+with a workflow that runs on merge_group: without one the queue would merge
+untested, so the publisher holds instead.
+
 Risk classes decide what merging needs:
     C  migrations, workflows, release config, CODEOWNERS, CLAUDE.md, a major
        dependency bump          -> the pull request only, a person merges it
     B  a file matches risk_paths -> `risk_review: before` and no failed review
     A  everything else
-A high-severity finding in .factory/audit.md holds any class until acknowledged.
+A high-severity finding in the change's audit (.factory/audit/<id>.md) holds any
+class until acknowledged.
 
 Exit: 0 delivered or deliberately stopped; 1 held (the output says why);
       2 usage or not a factory project.
@@ -39,7 +48,10 @@ import subprocess
 import sys
 import time
 
+sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import argv, bash, pid_alive  # noqa: E402
 ROOT = os.path.abspath(os.environ.get("FACTORY_ROOT") or os.getcwd())
 F = os.path.join(ROOT, ".factory")
 P = os.path.join(F, "publish")
@@ -65,7 +77,7 @@ def run(cmd, check_env=None, timeout=None, stdin=None):
     if check_env:
         env.update(check_env)
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, env=env, timeout=timeout, input=stdin)
+        r = subprocess.run(argv(cmd), capture_output=True, text=True, cwd=ROOT, env=env, timeout=timeout, input=stdin)
         return r.returncode, r.stdout, r.stderr
     except FileNotFoundError as e:
         return 127, "", str(e)
@@ -102,14 +114,20 @@ def event(kind, **kw):
         pass
 
 
-def notify(text):
-    if os.environ.get("FACTORY_NO_NOTIFY") == "1" or not shutil.which("osascript"):
+def notify(text, tag="delivery"):
+    """Through factory-notify: the desktop, and ntfy when the project set one
+    up. It mutes and detaches (--bg); only its test log (FACTORY_NOTIFY_LOG)
+    gets past FACTORY_NO_NOTIFY."""
+    if os.environ.get("FACTORY_NO_NOTIFY") == "1" and not os.environ.get("FACTORY_NOTIFY_LOG"):
         return
-    safe = text.replace('"', "'").replace("\\", "")[:120]
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "factory-notify.py")
+    if not os.path.isfile(script):
+        return
     try:
-        subprocess.Popen(["osascript", "-e", 'display notification "%s" with title "Factory" sound name "Glass"' % safe],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
+        subprocess.run([sys.executable, script, "Factory · %s" % os.path.basename(ROOT), text, "--tag", tag, "--bg"],
+                       cwd=ROOT, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=20)
+    except (OSError, subprocess.SubprocessError):
         pass
 
 
@@ -118,7 +136,7 @@ def config():
 
 
 def level():
-    rc, out, _ = run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")], timeout=30)
+    rc, out, _ = run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")], timeout=30)
     word = (out.split() or ["local"])[0]
     return word if word in ("local", "pr", "merge") else "local"
 
@@ -157,14 +175,6 @@ def hold(st, reason):
     return 1
 
 
-def pid_alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
-        return False
-
-
 def take_lock(cid):
     os.makedirs(P, exist_ok=True)
     lock = os.path.join(P, cid + ".lock")
@@ -199,16 +209,17 @@ def change_dir(cid):
 
 
 def run_active():
-    inflight = os.path.join(F, "inflight")
+    """A run holds .factory/run.lock from its preflight to its finish, and its
+    checks keep the file's time fresh. A lock untouched for two hours is a run
+    that died: the next preflight takes over its base, and nothing waits on it."""
+    lock = os.path.join(F, "run.lock")
     try:
-        if any(not n.startswith(".") for n in os.listdir(inflight)):
-            return True
-    except OSError:
-        pass
-    try:
-        return any(n.endswith(".md") for n in os.listdir(os.path.join(ROOT, "tasks", "in-progress")))
-    except OSError:
-        return False
+        if time.time() - os.path.getmtime(lock) >= 2 * 3600:
+            return False
+        rec = json.load(open(lock, encoding="utf-8"))
+    except (OSError, ValueError):
+        return os.path.exists(lock)
+    return not (isinstance(rec, dict) and rec.get("state") == "halted")
 
 
 def tree_clean():
@@ -246,10 +257,12 @@ def major_bumps(base, sha, files):
 
 
 def audit_highs(cid):
+    """The high findings of this change's own audit. Never another change's, and
+    never a file an earlier run left: .factory/audit/<C>.md is the change's."""
     if os.path.exists(os.path.join(P, cid + ".ack")):
         return []
     try:
-        text = open(os.path.join(F, "audit.md"), encoding="utf-8").read()
+        text = open(os.path.join(F, "audit", cid + ".md"), encoding="utf-8").read()
     except OSError:
         return []
     return re.findall(r"^##\s*high\b[^\n]*", text, re.I | re.M)
@@ -268,6 +281,13 @@ def failed_reviews(cid):
         if not tid or (re.match(r"^C[0-9]+-", tid) and not tid.startswith(cid + "-")):
             continue
         if not re.match(r"^C[0-9]+-", tid) and cid != "C1":
+            continue
+        try:
+            rec = json.load(open(os.path.join(F, "reviews", tid + ".json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            rec = {}
+        if isinstance(rec, dict) and rec.get("verdict") == "fail":
+            out.append(tid)
             continue
         try:
             verdicts = re.findall(r"^verdict:\s*(pass|fail)", open(os.path.join(d, n), encoding="utf-8").read(), re.M)
@@ -321,7 +341,7 @@ def pr_body(st, d):
         except OSError:
             pass
     try:
-        audit = open(os.path.join(F, "audit.md"), encoding="utf-8").read()[:4000]
+        audit = open(os.path.join(F, "audit", st["change"] + ".md"), encoding="utf-8").read()[:4000]
         parts.append("## Audit\n\n" + audit)
     except OSError:
         pass
@@ -455,6 +475,8 @@ def step_merge(st):
     deliv = config().get("delivery") or {}
     method = "--squash" if deliv.get("merge_method") == "squash" else "--rebase"
     trailers = "\n".join(["Factory-Change: " + st["change"]] + ["Factory-Task: " + t for t in st.get("tasks", [])])
+    if deliv.get("merge_queue") is True:
+        return enqueue(st, method, trailers)
     for attempt in (method, "--squash" if method == "--rebase" else None):
         if attempt is None:
             break
@@ -479,6 +501,122 @@ def step_merge(st):
     st["held"] = None
     say(st, "PUBLISH %s #%s merged (%s)" % (st["change"], st["pr"], st.get("method")))
     return None
+
+
+def queue_workflows(st):
+    """The workflow files that run on merge_group, at the tested commit or at
+    the base: the queue's merge commit is the one on top of the other."""
+    hits = []
+    for ref in (st["sha"], "origin/" + st["base"]):
+        rc, out, _ = git("ls-tree", "-r", "--name-only", ref, "--", ".github/workflows")
+        for path in out.splitlines() if rc == 0 else []:
+            if path in hits or not path.lower().endswith((".yml", ".yaml")):
+                continue
+            rc, text, _ = git("show", "%s:%s" % (ref, path))
+            body = "\n".join(l.split("#", 1)[0] for l in text.splitlines()) if rc == 0 else ""
+            if re.search(r"(^|[^A-Za-z0-9_-])merge_group([^A-Za-z0-9_-]|$)", body):
+                hits.append(path)
+    return hits
+
+
+def enqueue(st, method, trailers):
+    """delivery.merge_queue: hand the green, gate-passed pull request to GitHub's
+    merge queue instead of merging it. --auto queues it once its required
+    checks pass (at once when they have); --match-head-commit keeps the queue
+    to the commit the factory tested."""
+    hits = queue_workflows(st)
+    if not hits:
+        event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="held", reason="no merge_group workflow")
+        if not st.get("queue_held_notified"):
+            st["queue_held_notified"] = now_iso()
+            notify("%s: PR #%s not queued - no workflow runs on merge_group" % (st["change"], st["pr"]))
+        return hold(st, "merge_queue is on but no workflow runs on merge_group - the queue would merge untested "
+                        "(add merge_group to the on: of the workflow that checks pull requests)")
+    for attempt in (method, "--squash" if method == "--rebase" else None):
+        if attempt is None:
+            return hold(st, "merge refused by the repository settings")
+        args = [GH, "pr", "merge", str(st["pr"]), "--auto", attempt, "--match-head-commit", st["sha"]]
+        if attempt == "--squash":
+            args += ["--body", trailers]
+        rc, out, err = run(args)
+        text = out + "\n" + err
+        if rc == 0:
+            st["method"] = attempt.lstrip("-")
+            break
+        if "not allowed" in text.lower() and attempt == "--rebase":
+            continue
+        if is_auth_error(text):
+            return hold(st, "gh is not authenticated at the merge queue: " + text.strip()[-160:])
+        event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="refused", reason=text.strip()[-200:])
+        return hold(st, "the merge queue refused #%s: %s" % (st["pr"], text.strip()[-220:]))
+    st["state"] = "queued"
+    st["queued_at"] = now_iso()
+    st["held"] = None
+    st.pop("queue_dropped", None)
+    st.pop("queue_held_notified", None)
+    event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="queued", workflows=hits[:5])
+    say(st, "PUBLISH %s #%s handed to the merge queue (%s; merge_group runs in %s)" % (
+        st["change"], st["pr"], st["method"], ", ".join(hits[:3])))
+    return None
+
+
+def in_queue(st):
+    """GitHub's isInMergeQueue for the pull request: True, False, or None when
+    gh cannot say."""
+    rc, out, _ = run([GH, "pr", "view", str(st["pr"]), "--json", "id", "-q", ".id"])
+    node = out.strip()
+    if rc != 0 or not node:
+        return None
+    q = "query($id:ID!){node(id:$id){... on PullRequest{isInMergeQueue}}}"
+    rc, out, _ = run([GH, "api", "graphql", "-f", "query=" + q, "-f", "id=" + node, "-q", ".data.node.isInMergeQueue"])
+    v = out.strip().lower() if rc == 0 else ""
+    return True if v == "true" else False if v == "false" else None
+
+
+def step_queued(st):
+    """Waits for the merge queue to merge the pull request. A merged pull request
+    went through the queue's merge_group checks; one that is open, out of the
+    queue and without auto-merge was dropped by it - red checks on the merge
+    group, a push, or a person - and waits for a person."""
+    try:
+        wait_s = 60 * float((config().get("delivery") or {}).get("queue_wait_min") or 60)
+    except (TypeError, ValueError):
+        wait_s = 3600.0
+    polls = max(1, int(wait_s / POLL_S)) if POLL_S > 0 else max(1, CI_WAIT_POLLS)
+    for i in range(polls):
+        if i:
+            time.sleep(POLL_S)
+        rc, out, err = run([GH, "pr", "view", str(st["pr"]), "--json", "state,headRefOid,mergeCommit,autoMergeRequest"])
+        try:
+            view = json.loads(out)
+        except ValueError:
+            view = None
+        if not isinstance(view, dict):
+            if is_auth_error(out + err):
+                return hold(st, "gh is not authenticated while waiting on the merge queue: " + (out + err).strip()[-160:])
+            continue
+        if view.get("state") == "MERGED":
+            st["merge_sha"] = (view.get("mergeCommit") or {}).get("oid")
+            st["state"] = "merged"
+            st["held"] = None
+            st.pop("queue_dropped", None)
+            event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="merged")
+            say(st, "PUBLISH %s #%s merged by the merge queue" % (st["change"], st["pr"]))
+            return None
+        if view.get("state") == "CLOSED":
+            st["state"] = "abandoned"
+            return hold(st, "pull request #%s was closed while in the merge queue" % st["pr"])
+        if not view.get("autoMergeRequest") and in_queue(st) is False:
+            if not st.get("queue_dropped"):
+                st["queue_dropped"] = now_iso()
+                event("merge_queue", change=st["change"], pr=st.get("pr"), outcome="dropped")
+                notify("%s: PR #%s left the merge queue without being merged" % (st["change"], st["pr"]))
+            return hold(st, "pull request #%s left the merge queue without being merged - its merge_group checks "
+                            "failed, its head moved, or someone took it out. Queue it again on GitHub and run "
+                            "factory-publish %s, or close it" % (st["pr"], st["change"]))
+    say(st, "PUBLISH WAITING %s: #%s is still in the merge queue; factory-publish --resume-all carries on" % (
+        st["change"], st["pr"]))
+    return 0
 
 
 def sync_local(st):
@@ -508,7 +646,7 @@ def sync_local(st):
     git("branch", "-D", st["branch"])
     git("push", "-q", "origin", "--delete", st["branch"])
     st.pop("sync_pending", None)
-    run(["bash", os.path.join(HOOK_DIR, "factory-change.sh"), "sync", st["change"]])
+    run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync", st["change"]])
 
 
 def step_after_merge(st):
@@ -543,7 +681,7 @@ def record_breaker(kind, st):
         with open(os.path.join(F, "autonomy-cap"), "w", encoding="utf-8") as fh:
             fh.write("pr\nbreaker: %s (%s)\n" % (why, now_iso()))
         event("breaker", reason=why)
-        notify("Factory breaker: %s. Level is pr until you say 'auto devam et'." % why)
+        notify("Factory breaker: %s. Level is pr until you say 'auto devam et'." % why, "stop")
         return why
     return None
 
@@ -692,6 +830,8 @@ def deliver(cid):
                     r = 0
                 else:
                     r = step_merge(st)
+            elif s == "queued":
+                r = step_queued(st)
             elif s == "merged":
                 r = step_after_merge(st)
             elif s == "main_ci":
@@ -703,7 +843,7 @@ def deliver(cid):
         st["pid"] = None
         save(st)
         try:
-            subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-digest.py")], cwd=ROOT, capture_output=True,
+            subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-digest.py")], cwd=ROOT, capture_output=True,
                            env=dict(os.environ, FACTORY_ROOT=ROOT), timeout=60)
         except (OSError, subprocess.SubprocessError):
             pass

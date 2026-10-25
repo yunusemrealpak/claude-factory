@@ -19,6 +19,7 @@
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 input="$(cat)"
 
 prompt="$(printf '%s' "${input}" | jq -r '.prompt // empty' 2>/dev/null)"
@@ -47,10 +48,11 @@ else
   exit 0
 fi
 
-notify() {  # <body>
-  [ "${FACTORY_NO_NOTIFY:-0}" = "1" ] && return 0
-  command -v osascript >/dev/null 2>&1 || return 0
-  osascript -e "display notification \"${1//\"/}\" with title \"Factory\"" >/dev/null 2>&1 &
+notify() {  # <body>: through factory-notify, which mutes and detaches; only
+  # its test log (FACTORY_NOTIFY_LOG) gets past FACTORY_NO_NOTIFY.
+  [ "${FACTORY_NO_NOTIFY:-0}" = "1" ] && [ -z "${FACTORY_NOTIFY_LOG:-}" ] && return 0
+  (cd "${cwd}" && python3 "${HOOK_DIR}/factory-notify.py" "Factory" "$1" --tag autonomy --bg) \
+    </dev/null >/dev/null 2>&1 || true
 }
 
 now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"

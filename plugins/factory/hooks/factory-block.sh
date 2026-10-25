@@ -18,6 +18,7 @@
 # task in progress also lists is left alone, because it holds that task's work
 # too.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 ROOT="$PWD"
 T="${ROOT}/tasks"

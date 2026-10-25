@@ -14,16 +14,21 @@
 #   factory-hardblock.sh lifted-deny <root>           deny lines of allowed groups
 #   factory-hardblock.sh check <root> bash  < command the command text on stdin
 #   factory-hardblock.sh check <root> path  < path    one file path on stdin
+#   factory-hardblock.sh tests <root> <kind> < text   only the read-only tests
 #   factory-hardblock.sh trip <root> <rule> <tool> <agent>
 #                                                     the breaker: .factory/STOP,
 #                                                     an event, a notification
 #
-# check: prints the rule's name and exits 3 on a hit; exits 0 on a clean call.
-# A rules file that cannot be read exits 4 - callers treat that as a hit
-# (fail closed): a missing rule list is not permission.
+# check: prints the rule's name and exits 3 on a hit (refuse, halt the run) or
+# 5 on a soft one (refuse this call only), or prints "head-tests <path>" and
+# exits 6 for a write to a test HEAD has that no task in progress may change
+# (refuse this call only); exits 0 on a clean call. A rules
+# file that cannot be read exits 4 - callers treat that as a hit (fail closed):
+# a missing rule list is not permission.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/factory-compat.sh"
 RULES="${FACTORY_HARD_BLOCKS:-${HERE}/hard-blocks.txt}"
 
 [ -r "${RULES}" ] || { echo "hard-blocks.txt unreadable: ${RULES}" >&2; exit 4; }
@@ -102,12 +107,17 @@ case "${1:-}" in
     jq -cn --arg ts "${now}" --argjson epoch "$(date +%s)" --arg rule "${rule}" --arg tool "${tool}" --arg agent "${agent}" \
       '{ts: $ts, epoch: $epoch, kind: "hard_block", rule: $rule, tool: $tool, agent_id: $agent}' \
       >> "${root}/.factory/events.jsonl" 2>/dev/null
-    if [ "${FACTORY_NO_NOTIFY:-0}" != "1" ] && command -v osascript >/dev/null 2>&1; then
-      osascript -e "display notification \"hard block ${rule}: run stopped\" with title \"Factory\" sound name \"Glass\"" >/dev/null 2>&1 &
+    # Wherever the developer is: the desktop, and ntfy when the project set
+    # one up. factory-notify mutes and detaches; only its test log
+    # (FACTORY_NOTIFY_LOG) gets past FACTORY_NO_NOTIFY.
+    if [ "${FACTORY_NO_NOTIFY:-0}" != "1" ] || [ -n "${FACTORY_NOTIFY_LOG:-}" ]; then
+      (cd "${root}" && python3 "${HERE}/factory-notify.py" "Factory · $(basename "${root}")" \
+        "hard block ${rule}: the run stopped. Read .factory/STOP, then remove it." --tag stop --bg) \
+        </dev/null >/dev/null 2>&1 || true
     fi
     exit 0
     ;;
-  check) ;;
+  check|tests) ;;
   *)
     echo "usage: factory-hardblock.sh version|deny-rules|check <root> bash|path|trip ..." >&2
     exit 2
@@ -116,64 +126,16 @@ esac
 
 ROOT="${2:-}"
 KIND="${3:-}"
-text="$(cat)"
-
-# Same normalisation as register.js: a continued line is one line, every
-# remaining newline separates commands, and the project root is spelled
-# relative, so an absolute path cannot hide a root-relative rule.
-if [ "${KIND}" = "bash" ]; then
-  text="$(printf '%s\n' "${text}" | sed -e :a -e '/\\$/N; s/\\\n//; ta' | tr '\n' ';')"
-fi
-if [ -n "${ROOT}" ]; then
-  rootpre="${ROOT%/}/"
-  text="${text//"${rootpre}"/}"
-fi
-
-LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
-hit() {
-  if [ -n "${LIFTED}" ] && printf '%s\n' "${LIFTED}" | grep -qxF -- "$1"; then return 0; fi
-  printf '%s\n' "$1"; exit 3
-}
-matches() { printf '%s' "$2" | grep -Eq -- "$1"; }
-
-T='([[:space:];&|)"'"'"'>]|$)'
-
-if [ "${KIND}" = "bash" ]; then
-  while IFS=$'\t' read -r name re; do
-    [ -n "${name}" ] || continue
-    matches "${re}" "${text}" && hit "${name}"
-  done < <(fields bash)
-  while IFS=$'\t' read -r name anchor x; do
-    [ -n "${name}" ] || continue
-    if [ "${anchor}" = "root" ]; then
-      lead='(\./)?'
-      pre='[[:space:]"'"'"'=<>]'
-      vlead='(\./)?'
-    else
-      lead='([^[:space:];&|"'"'"']*/)?'
-      pre='[[:space:]/"'"'"'=<>]'
-      vlead=''
-    fi
-    verbs='(^|[^[:alnum:]_.-])(tee|cp|mv|install|ln|rm|rsync|truncate|touch|chmod|chown|dd|shred|unlink|(sed|perl)[[:space:]]+([^;&|]*[[:space:]])?-[A-Za-z]*i)'
-    redirect=">>?[|]?[[:space:]]*[\"']?${lead}(${x})${T}"
-    verb="${verbs}[[:space:]]+([^;&|]*${pre})?${vlead}(${x})${T}"
-    matches "${redirect}" "${text}" && hit "${name}"
-    matches "${verb}" "${text}" && hit "${name}"
-  done < <(fields path)
-  exit 0
-fi
-
-if [ "${KIND}" = "path" ]; then
-  while IFS=$'\t' read -r name anchor x; do
-    [ -n "${name}" ] || continue
-    if [ "${anchor}" = "root" ]; then
-      matches "^(\./)?(${x})\$" "${text}" && hit "${name}"
-    else
-      matches "(^|/)(${x})\$" "${text}" && hit "${name}"
-    fi
-  done < <(fields path)
-  exit 0
-fi
-
-echo "unknown kind: ${KIND}" >&2
-exit 2
+# The judge is factory-hardblock.py: the same algorithm as register.js, in a
+# language with the same regular expressions. The rule names the project's
+# allowed groups lift go with it. No Python, no judge: the call is refused.
+command -v python3 >/dev/null 2>&1 || { echo "python3 not found: the hard blocks cannot be judged" >&2; exit 4; }
+# The root goes in on the first line of stdin: under MSYS an argument that looks
+# like a path is rewritten on its way to a Windows program, and the root has to
+# arrive in the spelling the command uses.
+HB_LIFTED="$(members "${ROOT}" bash; members "${ROOT}" path)"
+HB_NATIVE_ROOT="$(factory_native_path "${ROOT}")"
+export HB_LIFTED HB_NATIVE_ROOT
+ONLY=""
+[ "$1" = tests ] && ONLY=tests
+{ printf '%s\n' "${ROOT}"; cat; } | python3 -I "${HERE}/factory-hardblock.py" "${RULES}" "${KIND}" ${ONLY}

@@ -10,6 +10,7 @@
 # reading this, with a human approving the result. The split matters - a
 # collector that also guessed would put its guesses in the evidence.
 set -uo pipefail
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-compat.sh"
 
 # `factory-retro evaluate` (and ledger, due) belong to the validator: measure
 # what an applied change did, and undo what did not help.
@@ -129,7 +130,7 @@ fi
 
 # --- what fixed the tasks that went green -------------------------------------
 # The raw material for lessons: a task that failed, then passed, and a line from
-# the implementer saying what made the difference.
+# the builder saying what made the difference.
 section "Red tasks that went green, and what fixed them"
 if ls "${F}"/failures/resolved/*.log >/dev/null 2>&1; then
   for lf in "${F}"/failures/resolved/*.log; do
@@ -212,6 +213,41 @@ if ls "${F}"/lessons/*.md >/dev/null 2>&1; then
   done
 else
   echo "(none yet)"
+fi
+
+# A lesson whose retire_when is gone holds for nothing any more: propose its
+# retirement (kind lesson_retire), not a rewording.
+section "Lessons to retire"
+if ls "${F}"/lessons/*.md >/dev/null 2>&1; then
+  (cd "${ROOT}" && bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-lesson.sh" check 2>&1)
+else
+  echo "(no lessons)"
+fi
+
+# Rules: lessons the hooks module enforces on builders' calls. How often each
+# one fired says whether it is in the way or doing its job.
+section "Rules in force"
+if ls "${F}"/rules/*.rule >/dev/null 2>&1; then
+  for rf in "${F}"/rules/*.rule; do
+    rn="$(basename "${rf}" .rule)"
+    printf -- '- %s: %s %s /%s/ - %s [evidence: %s; added: %s]\n' "${rn}" \
+      "$(sed -n 's/^action: //p' "${rf}" | head -1)" "$(sed -n 's/^match: //p' "${rf}" | head -1)" \
+      "$(sed -n 's/^pattern: //p' "${rf}" | head -1)" "$(sed -n 's/^message: //p' "${rf}" | head -1)" \
+      "$(sed -n 's/^evidence: //p' "${rf}" | head -1)" "$(sed -n 's/^added: //p' "${rf}" | head -1)"
+    if [ -f "${F}/events.jsonl" ]; then
+      printf '    fired: %s warn, %s block\n' \
+        "$(grep '"kind":"lesson_rule"' "${F}/events.jsonl" | grep -F "\"rule\":\"${rn}\"" | grep -c '"outcome":"warn"')" \
+        "$(grep '"kind":"lesson_rule"' "${F}/events.jsonl" | grep -F "\"rule\":\"${rn}\"" | grep -c '"outcome":"block"')"
+    fi
+  done
+  echo "($(ls "${F}"/rules/*.rule | wc -l | tr -d ' ')/10 rules)"
+else
+  echo "(none)"
+fi
+if [ -f "${F}/events.jsonl" ] && grep -q '"kind":"stuck"' "${F}/events.jsonl"; then
+  echo
+  echo "Builders caught going round in circles (fast.stuck):"
+  grep '"kind":"stuck"' "${F}/events.jsonl" | jq -r '"  \(.ts) \(.task) \(.outcome): \(.what)"' 2>/dev/null | tail -20
 fi
 
 # --- decisions ------------------------------------------------------------

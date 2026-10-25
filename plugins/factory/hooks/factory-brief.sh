@@ -14,6 +14,7 @@ set -uo pipefail
 # toolkit works from any install path - a plugin directory changes on
 # every update.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 
 input="$(cat)"
 
@@ -66,9 +67,8 @@ changes="$(cd "$project_dir" && bash "${HOOK_DIR}/factory-change.sh" list 2>/dev
 # themselves; what /factory-init wrote into the project does not.
 upgrade="$(cd "$project_dir" && bash "${HOOK_DIR}/factory-upgrade.sh" --brief 2>/dev/null)"
 
-# What could be dispatched right now, worked out from disk rather than by the
-# lead reading the whole board again after a compaction.
-ready="$(cd "$project_dir" && bash "${HOOK_DIR}/factory-ready.sh" 2>/dev/null | grep -E '^(READY|STALL)' | sed 's/^/  - /')"
+# What a run would start right now, worked out from disk.
+ready="$(cd "$project_dir" && python3 "${HOOK_DIR}/factory-plan.py" --ready 2>/dev/null | grep -E '^(READY|STALL)' | sed 's/^/  - /')"
 [ -n "$ready" ] || ready="(nothing ready)"
 
 # The inbox. An answered question that nobody acts on is worse than not asking.
@@ -82,36 +82,35 @@ fi
 
 verify_cmd="$(jq -r '.verify // "gates/verify.sh"' "$project_dir/.factory/config.json" 2>/dev/null || printf 'gates/verify.sh')"
 
-# The Stop hook only holds the session that claimed the run. /factory-run claims
-# it through factory-claim.sh; this only reports who holds it now.
 session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
-run_owner="(unclaimed - no session is running the loop)"
-ro=""
-if [ -s "$project_dir/.factory/run-owner" ]; then
-  ro="$(tr -d '[:space:]' < "$project_dir/.factory/run-owner")"
-  if [ "$ro" = "$session_id" ]; then
-    run_owner="this session"
+
+# A run in progress holds .factory/run.lock and keeps it fresh; one that halted
+# marks it so, and the next /factory:run continues from its base.
+run_state=""
+if [ -f "$project_dir/.factory/run.lock" ]; then
+  if grep -q '"state": *"halted"' "$project_dir/.factory/run.lock" 2>/dev/null; then
+    run_state="the last run halted ($(jq -r '.halted // "unknown"' "$project_dir/.factory/run.lock" 2>/dev/null)) - /factory:run continues it from the same base"
+  elif [ -n "$(find "$project_dir/.factory/run.lock" -mmin -120 2>/dev/null)" ]; then
+    run_state="a run is in progress (another session) - do not start a second one"
   else
-    run_owner="another session (${ro})"
+    run_state="a run stopped without finishing - /factory:run continues it from the same base"
   fi
 fi
 
 # Agents die with the session that dispatched them, silently: no SubagentStop
-# arrives, so their concurrency slots stay held and the dashboard keeps showing
-# them at work. A session that is starting or resuming is a new process, so
-# nothing it finds in flight can be alive - unless another session owns the run,
-# which is the one case where those agents may be somebody else's and live.
-#
-# "compact" is excluded deliberately: that is this same process continuing, and
-# its agents are still running.
+# arrives, so the dashboard keeps showing them at work. A session that is
+# starting or resuming is a new process, so nothing it finds in flight can be
+# alive - unless a run is in progress in another session.
+# "compact" is excluded deliberately: that is this same process continuing.
 source="$(printf '%s' "$input" | jq -r '.source // empty' 2>/dev/null)"
 swept=""
 case "$source" in
   compact) ;;
   *)
-    if [ -z "$ro" ] || [ "$ro" = "$session_id" ]; then
-      swept="$(bash "${HOOK_DIR}/factory-sweep.sh" "session-${source:-start}" "$project_dir" 2>/dev/null)"
-    fi
+    case "$run_state" in
+      "a run is in progress"*) ;;
+      *) swept="$(bash "${HOOK_DIR}/factory-sweep.sh" "session-${source:-start}" "$project_dir" 2>/dev/null)" ;;
+    esac
     ;;
 esac
 
@@ -123,13 +122,6 @@ if [ -n "$swept" ] && [ -d "$project_dir/tasks/in-progress" ]; then
   [ -n "$st" ] && stranded="$st"
 fi
 
-
-# Written by the PreCompact hook. On the SessionStart that fires with source
-# "compact", this is how the lead's pre-summary state re-enters context.
-lead_state=""
-if [ -f "$project_dir/.factory/lead-state.md" ]; then
-  lead_state="$(cat "$project_dir/.factory/lead-state.md")"
-fi
 
 # Delivery (2.8): a change that stopped half-way - a sleeping laptop, an expired
 # gh login - is picked up again here, detached so the session never waits. The
@@ -161,7 +153,7 @@ retro=""
 # An empty board with nothing open anywhere is two lines: the full briefing
 # would only spend tokens on "(none)" in every session of an idle project.
 if [ "$((backlog + in_progress + blocked + proposed))" -eq 0 ] \
-   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$lead_state" ] && [ -z "$delivery" ] && [ -z "$retro" ] \
+   && [ -z "$id_issues" ] && [ -z "$upgrade" ] && [ -z "$swept" ] && [ -z "$run_state" ] && [ -z "$delivery" ] && [ -z "$retro" ] \
    && [ "$stalled" = "(none)" ] && [ "$changes" = "(none open)" ] \
    && { [ "$questions" = "(none)" ] || [ "$questions" = "  - (no questions)" ]; }; then
   brief="FACTORY ACTIVE in this project: the board is empty (done=${done_count}), nothing is open or waiting.
@@ -194,10 +186,11 @@ ${changes}
 ${delivery:+DELIVERY: ${delivery} (.factory/digest/, factory-publish --status)
 }${retro:+RETRO DUE: ${retro}. Run /factory:retro, or set retro.mode to full in .factory/config.json to let a run do it.
 }${upgrade:+FACTORY VERSION: ${upgrade}
+}${run_state:+RUN: ${run_state}
 }${swept:+PREVIOUS RUN ENDED MID-FLIGHT: ${swept}
-}${stranded:+  Tasks left in tasks/in-progress by that run: ${stranded}. No agent is alive for them. Re-dispatch each one to a fresh agent, or move it back to tasks/backlog with owner cleared and stage: queued - do not assume work is still going on.
+}${stranded:+  Tasks left in tasks/in-progress by that run: ${stranded}. No agent is alive for them; the next /factory:run takes them over as they are.
 }
-Ready to dispatch now:
+Ready to build now:
 ${ready}
 
 Questions waiting for the developer:
@@ -206,16 +199,10 @@ ${questions}
 Last decisions (decisions.md):
 ${decisions}
 
-${lead_state:+
---- STATE CARRIED OVER FROM BEFORE THE LAST COMPACTION ---
-${lead_state}
---- end carried state ---
-}
 Session id: ${session_id:-unknown}
-Run owner: ${run_owner}
 
-Rules in force: a task enters tasks/done only after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. The Stop hook keeps the session running while actionable tasks remain. Run /factory-status for detail, /factory-run to continue the loop.
-While /factory:fast runs: do not attach a Monitor, a poll or a progress message to it. Every builder result that wakes this session re-reads its whole context; the workflow reports once, when it is done.
+Rules in force: a task enters tasks/done only through factory-settle or factory-land, after "${verify_cmd} <task-id>" wrote .factory/verified/<task-id>; the PreToolUse gate rejects any other move. /factory:status for detail, /factory:run to build.
+While /factory:run's loop runs: do not attach a Monitor, a poll or a progress message to it. Every wake-up of this session re-reads its whole context; the workflow reports once, when it is done.
 BRIEF
 )"
 

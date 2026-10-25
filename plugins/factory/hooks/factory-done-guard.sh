@@ -9,22 +9,35 @@
 #
 # Two jobs, both needing what only a hook sees:
 #
-#   1. The done gate. Rejects any attempt to move a task into tasks/done unless
-#      .factory/verified/<task-id> exists, i.e. unless gates/verify.sh went green.
-#   2. The run claim. A Bash call to factory-claim.sh is where a session asks to
-#      own the run; the session id is in this hook's input and nowhere a Bash
-#      command can read it. See factory-claim.sh for the two-step handshake.
+#   1. The hard blocks (hooks/hard-blocks.txt), for a subagent's call.
+#   2. The done gate. Rejects any attempt to move a task into tasks/done unless
+#      .factory/verified/<task-id> exists, i.e. unless the task's check went
+#      green. factory-land is the one way in, and it checks the same marker.
 #
 # Precondition: this hook is inert unless <project>/.factory/active exists.
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 input="$(cat)"
 
 project_dir="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
 [ -z "$project_dir" ] && project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 
-[ -f "$project_dir/.factory/active" ] || exit 0
+# The call's cwd is wherever the agent last cd'd to. The factory is the nearest
+# folder above it that has .factory/active - a cd into src/ must not turn the
+# guard off.
+factory_root() {  # <dir>
+  local d
+  d="$(factory_posix_path "$1")"; d="${d%/}"
+  while [ -n "$d" ]; do
+    [ -f "$d/.factory/active" ] && { printf '%s' "$d"; return 0; }
+    case "$d" in */*) d="${d%/*}" ;; *) break ;; esac
+  done
+  return 1
+}
+found="$(factory_root "$project_dir")" || found="$(factory_root "${CLAUDE_PROJECT_DIR:-}")" || exit 0
+project_dir="$found"
 
 tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
 
@@ -32,28 +45,6 @@ deny() {
   jq -n --arg reason "$1" \
     '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
   exit 0
-}
-
-# Stages this session's id for factory-claim.sh to promote. Refuses when a
-# different session already owns the run, unless the command says --take-over:
-# two leads on one board duplicate dispatches, race on the same task files and
-# run competing gates.
-stage_claim() {
-  local line="$1" session_id owner_file current
-  session_id="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)"
-  [ -n "$session_id" ] || deny "Factory claim: this tool call carries no session id, so there is nothing to claim the run with. The Stop hook will not hold this session; run the loop without it and tell the developer."
-  owner_file="$project_dir/.factory/run-owner"
-  # A redirect from a missing file fails in the shell before tr runs, so the
-  # existence check has to come first.
-  current=""
-  [ -f "$owner_file" ] && current="$(tr -d '[:space:]' < "$owner_file")"
-  if [ -n "$current" ] && [ "$current" != "$session_id" ]; then
-    case "$line" in
-      *--take-over*) ;;
-      *) deny "Factory claim: the run is already owned by session ${current}. Do not start a second lead on the same board. Tell the developer; only if they confirm that session is gone, run: factory-claim --take-over" ;;
-    esac
-  fi
-  printf '%s\n' "$session_id" > "$owner_file.pending"
 }
 
 # The hard blocks (hooks/hard-blocks.txt), second layer. register.js holds the
@@ -65,12 +56,23 @@ if [ -n "$agent_id" ]; then
   hb_kind=""; hb_text=""
   case "$tool_name" in
     Bash) hb_kind=bash; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" ;;
-    Write|Edit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)" ;;
+    PowerShell) hb_kind=powershell; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)" ;;
+    Write|Edit|MultiEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)" ;;
     NotebookEdit) hb_kind=path; hb_text="$(printf '%s' "$input" | jq -r '.tool_input.notebook_path // empty' 2>/dev/null)" ;;
   esac
   if [ -n "$hb_kind" ] && [ -n "$hb_text" ]; then
-    hb_rule="$(printf '%s' "$hb_text" | bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
+    hb_cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+    hb_rule="$(printf '%s' "$hb_text" | HB_CWD="$hb_cwd" bash "$HOOK_DIR/factory-hardblock.sh" check "$project_dir" "$hb_kind" 2>/dev/null)"
     hb_rc=$?
+    # 6: a test HEAD has, which no task in progress was approved to change.
+    if [ "$hb_rc" -eq 6 ]; then
+      deny "Factory: ${hb_rule#head-tests } is a test the project already has, and existing tests are read-only for this task - a test that was green is the evidence the code works. Write a new test file for what the task adds. If the task truly has to change this test, do not get around it: say so in your result; the developer approves it with modifies_tests in the task file. The run goes on."
+    fi
+    # 5: inline code that writes and names a protected path - a guess, so only
+    # this call is refused and the run goes on.
+    if [ "$hb_rc" -eq 5 ]; then
+      deny "Factory: inline code that writes files and names a protected path (${hb_rule}) is refused - the factory cannot tell what it writes. Read protected files with the Read tool; if the task has to change one, say so in your result. The run goes on."
+    fi
     if [ "$hb_rc" -ne 0 ]; then
       [ "$hb_rc" -eq 3 ] || hb_rule="rule-list-unreadable"
       bash "$HOOK_DIR/factory-hardblock.sh" trip "$project_dir" "$hb_rule" "$tool_name" "$agent_id" >/dev/null 2>&1
@@ -80,41 +82,25 @@ if [ -n "$agent_id" ]; then
 fi
 
 case "$tool_name" in
-  Bash)
+  Bash|PowerShell)
     payload="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
     # Join backslash continuations first, so a move written across two lines is
     # still one line by the time it is examined.
     payload="$(printf '%s\n' "$payload" | sed -e :a -e '/\\$/N; s/\\\n//; ta')"
-    # Only an invocation counts as a claim - "factory-claim" (the plugin's bin
-    # wrapper, the way /factory:run spells it) or "bash <path>/factory-claim.sh"
-    # at the start of a command - so reading, grepping or editing the script from
-    # a factory project does not quietly make that session the run owner.
-    claim="$(printf '%s\n' "$payload" \
-      | grep -E '(^|[;&|(])[[:space:]]*((bash|sh)[[:space:]]+[^[:space:];&|]*factory-claim\.sh|factory-claim)([[:space:];&|)]|$)' \
-      | head -1)"
-    [ -n "$claim" ] && stage_claim "$claim"
     # A move is a single command. Only a line where a moving verb and the done
     # directory appear TOGETHER is a move; a comment, a heredoc body, or an
     # unrelated move elsewhere in the same script is prose and must not be
     # blocked. Narrowing the payload to those lines also keeps the task-id scan
     # below from claiming every other .md file the command happens to name.
-    moves="$(printf '%s\n' "$payload" \
-      | grep -E '(^|[|;&(]|[[:space:]])(mv|cp|rsync|ln|install)([[:space:]]|$)|git[[:space:]]+mv|>[[:space:]]*[^[:space:]]*tasks/done' \
-      | grep 'tasks/done')"
-    # A gate run is about to start: fingerprint the tree it will see. The event
-    # hook compares this with the tree when the run went green, and only when
-    # the two match does it write the fingerprint into the marker - which is what
-    # lets the integrator skip testing the same bytes twice, for a gate too old
-    # to write the fingerprint itself.
-    gate_id="$(printf '%s\n' "$payload" | sed -n -E 's#.*verify\.sh[[:space:]]+([A-Za-z0-9._][A-Za-z0-9._-]*).*#\1#p' | head -1)"
-    if [ -n "$gate_id" ]; then
-      mkdir -p "$project_dir/.factory/gate-start" 2>/dev/null
-      bash "$HOOK_DIR/factory-gate-skip.sh" hash "$project_dir" > "$project_dir/.factory/gate-start/$gate_id" 2>/dev/null
-    fi
+    # PowerShell moves with Move-Item / Copy-Item and their aliases, in any
+    # letter case.
+    moves="$(printf '%s\n' "$payload" | tr '\\' '/' \
+      | grep -Ei '(^|[|;&(]|[[:space:]])(mv|cp|rsync|ln|install|move-item|copy-item|mi|cpi|move|copy)([[:space:]]|$)|git[[:space:]]+mv|>[[:space:]]*[^[:space:]]*tasks/done' \
+      | grep -i 'tasks/done')"
     [ -n "$moves" ] || exit 0
     payload="$moves"
     ;;
-  Write|Edit|NotebookEdit)
+  Write|Edit|MultiEdit|NotebookEdit)
     payload="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)"
     case "$payload" in
       *tasks/done*) ;;
@@ -135,7 +121,7 @@ if [ -z "$task_ids" ]; then
 fi
 
 if [ -z "$task_ids" ]; then
-  deny "Factory gate: this operation writes into tasks/done without naming a task file, so the verification gate cannot be checked. Move exactly one task at a time and spell out its file, e.g. mv tasks/in-progress/<task-id>.md tasks/done/<task-id>.md, after gates/verify.sh <task-id> went green."
+  deny "Factory gate: this operation writes into tasks/done without naming a task file, so the verification gate cannot be checked. A task lands through factory-settle <task-id> (or factory-land <task-id>), after factory-check <task-id> went green - never by a hand-written move."
 fi
 
 # An id collision, caught at the point where it would do its damage. When the
@@ -161,7 +147,7 @@ for id in $task_ids; do
 done
 
 if [ -n "$missing" ]; then
-  deny "Factory gate: no verification marker for:${missing}. A task may not enter tasks/done before its gate is green. Run: bash gates/verify.sh <task-id> from the project root. It writes .factory/verified/<task-id> only when build, tests, architecture tests and lint all pass. If it fails, append the failing output to the task file, increment retries and hand the task back to an implementer."
+  deny "Factory gate: no verification marker for:${missing}. A task may not enter tasks/done before its check is green. Run factory-check <task-id> from the project root: it writes .factory/verified/<task-id> only when the build, the tests, the architecture rules and the linters pass. Then factory-settle <task-id> lands it."
 fi
 
 # All named tasks are verified: stay silent so the normal permission flow applies.

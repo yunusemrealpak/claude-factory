@@ -4,6 +4,10 @@
 # Usage (from the project root):
 #   factory-lint <task-id>
 #   factory-lint --all      every task not yet done
+#   factory-lint --plan [<Cn>...] [--json]
+#                           the plan the task files add up to: requirements
+#                           covered, no dependency cycle, no open question, a
+#                           scope one builder can hold (factory-plancheck.py)
 #
 # A malformed task is found the expensive way: an agent is dispatched, works
 # from a template placeholder or a dependency that does not exist, and the turn
@@ -14,6 +18,7 @@
 set -uo pipefail
 
 ROOT="$PWD"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 T="${ROOT}/tasks"
 problems=0
 
@@ -67,8 +72,9 @@ lint_one() {  # <file>
     case "${val}" in
       *"<"*) say "acceptance: still holds a template placeholder: ${val}" ;;
     esac
-    if printf '%s' "${val}" | grep -qE '(decisions\.md|tasks/)' \
-       && ! printf '%s' "${val}" | grep -qE '(test|verify|build|lint|run|pytest|jest|gradle|dotnet|npm|yarn|pnpm|make|cargo|go )'; then
+    # One rule, the check's own: every command only reads text, and it names a
+    # markdown file.
+    if python3 "${HERE}/factory-check.py" selfcert "${val}"; then
       say "acceptance: its only evidence is a markdown file (${val}) - the gate rejects those"
     fi
   fi
@@ -89,13 +95,16 @@ lint_one() {  # <file>
     grep -qF "${sec}" "${f}" || say "the ${sec} section is missing"
   done
   grep -qE '^- \[[ xX]\] ' "${f}" || say "## Acceptance criteria lists no checkable criterion"
-  grep -qE '^<(what must be true|files/modules|filled in by|appended by|the files a builder)' "${f}" \
+  grep -qE '^<(what must be true|files/modules|filled in by|appended by|the files a builder)|^- (truth|artifact|link): <' "${f}" \
     && say "template placeholder text is still in the body"
 
   [ "${bad}" -eq 0 ] && echo "LINT OK ${id}"
 }
 
 case "${1:-}" in
+  --plan)
+    shift
+    exec python3 "${HERE}/factory-plancheck.py" "$@" ;;
   --all)
     for col in proposed backlog in-progress; do
       for f in "${T}/${col}"/*.md; do
@@ -105,7 +114,7 @@ case "${1:-}" in
     done
     ;;
   '')
-    echo "usage: factory-lint.sh <task-id> | --all" >&2; exit 2 ;;
+    echo "usage: factory-lint.sh <task-id> | --all | --plan [<Cn>...]" >&2; exit 2 ;;
   *)
     file="$(find "${T}" -maxdepth 2 -name "${1}.md" -type f 2>/dev/null | head -1)"
     [ -n "${file}" ] || { echo "factory-lint: no task file for ${1} under tasks/" >&2; exit 2; }

@@ -1,6 +1,6 @@
 ---
 name: retro
-description: Factory retro agent. Reads the failure evidence, proposes at most five harness changes in a proposals file and hands it to factory-retro-apply, which alone decides what may change. Dispatched by /factory:fast only when the project set retro.mode to full.
+description: Factory retro agent. Reads the failure evidence, proposes at most five harness changes in a proposals file and hands it to factory-retro-apply, which alone decides what may change. Dispatched by the factory loop workflow (/factory:run) only when the project set retro.mode to full.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 effort: high
@@ -19,9 +19,27 @@ You run the factory's retrospective. You diagnose; a script applies.
    thin: zero proposals is a valid result.
 4. Write `.factory/retro/<YYYY-MM-DD>.md` (the report, as `/factory:retro`
    describes) and `.factory/retro/<YYYY-MM-DD>.proposals.json`:
-   `{"proposals":[{"id":"P1","kind":"lesson|config|claude_md|plugin", ...}]}`.
+   `{"proposals":[{"id":"P1","kind":"lesson|lesson_retire|rule|config|claude_md|plugin", ...}]}`.
    - `lesson`: `module`, `evidence` (task ids and `sig-<hash>` that exist),
-     `text` (one imperative line, at most 200 characters).
+     `text` (one imperative line, at most 200 characters), and `category`
+     (`build`, `test`, `tooling`, `convention`, `environment` or
+     `dependency`). `retire_when`: a path the lesson depends on, or a commit
+     sha, when there is one. A lesson that overlaps one already in force is
+     refused: reword that one instead, with `replaces` set to its text.
+   - `lesson_retire`: `module`, `text` - only a lesson listed under "Lessons to
+     retire" (what its `retire_when` names is gone). No metric.
+   - `rule`: a lesson with teeth, for a mistake builders kept making after a
+     lesson said not to. `name` (lower case, dashes), `match` (`bash`: the
+     shell command; `path`: the file a write tool writes, from the root;
+     `content`: what it writes), `pattern` (a regex Python and JavaScript read
+     alike: `\s`, not `[[:space:]]`; no inline flags; case is ignored),
+     `action` (`warn` adds `message` to the call's result; `block` refuses
+     the call - only for what is never right in this project), `message`
+     (one line), `evidence`. At most two per retrospective, ten in all. A
+     rule never applies to the factory's own commands or the task files, and
+     a pattern that matches them, or matches everything, is refused. Check
+     "Rules in force" first: a rule that fired often and changed nothing is
+     one to propose taking back (`plugin` kind, for the developer).
    - `config`: `patch`. Allowed: `gate_isolation` on, `isolation_links` gained,
      `risk_paths` widened, `min_tests` raised, `retry_limit` lowered,
      `fast.risk_review` before, `fast.audit` on. Nothing else, ever.

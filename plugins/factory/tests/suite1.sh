@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Sandbox tests for factory-commit / factory-change / factory-claim / done-guard
-# claim / stop-gate close / ids. Never touches a real project.
+# Sandbox tests for factory-commit / factory-change / done-guard / ids, and the
+# brief's changes block. Never touches a real project.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 EXTRACT="$BASE/extract.py"
 # Sandboxes are built under here, never beside the suite itself.
@@ -143,38 +144,12 @@ check "second sync reports closed, not closed-now" 'printf "%s" "$out" | grep -q
 check "C3 still open in list" 'bash $H/factory-change.sh list | grep -q "^open C3-from-file done=0/1 type=bugfix"'
 check "refs/factory is not pushed by --tags/--follow-tags (namespace check)" '[ -z "$(git for-each-ref refs/tags refs/heads | grep factory)" ]'
 
-echo "=== claim via done-guard"
+echo "=== done-guard regressions"
 hook() {  # <session> <command>
   jq -n --arg s "$1" --arg c "$2" --arg cwd "$P" \
     '{session_id: $s, cwd: $cwd, hook_event_name: "PreToolUse", tool_name: "Bash", tool_input: {command: $c}}' \
     | bash $H/factory-done-guard.sh
 }
-rm -f .factory/run-owner .factory/run-owner.pending
-out="$(hook s1 'bash ~/.claude/hooks/factory-claim.sh')"
-check "unowned claim is staged, not denied" '[ -z "$out" ] && [ "$(cat .factory/run-owner.pending)" = s1 ] && [ ! -e .factory/run-owner ]' "$out"
-out="$(bash $H/factory-claim.sh)"; rc=$?
-check "claim script promotes the pending id" '[ $rc -eq 0 ] && [ "$(cat .factory/run-owner)" = s1 ] && [ ! -e .factory/run-owner.pending ]' "$out"
-out="$(bash $H/factory-claim.sh)"; rc=$?
-check "claim script without a pending claim fails loudly" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "CLAIM FAILED"' "$out"
-out="$(hook s2 'bash ~/.claude/hooks/factory-claim.sh')"
-check "second session is denied" 'printf "%s" "$out" | jq -e ".hookSpecificOutput.permissionDecision==\"deny\"" >/dev/null && [ ! -e .factory/run-owner.pending ]' "$out"
-out="$(hook s2 'bash ~/.claude/hooks/factory-claim.sh --take-over')"
-check "take-over is staged" '[ -z "$out" ] && [ "$(cat .factory/run-owner.pending)" = s2 ]' "$out"
-rm -f .factory/run-owner.pending
-out="$(hook s1 'bash ~/.claude/hooks/factory-claim.sh')"
-check "owner re-claiming itself is fine" '[ -z "$out" ] && [ "$(cat .factory/run-owner.pending)" = s1 ]' "$out"
-rm -f .factory/run-owner.pending
-for cmd in 'cat ~/.claude/hooks/factory-claim.sh' 'grep -n take-over ~/.claude/hooks/factory-claim.sh' 'vim factory-claim.sh' 'echo bash factory-claim.sh'; do
-  out="$(hook s3 "$cmd")"
-  check "not a claim: $cmd" '[ -z "$out" ] && [ ! -e .factory/run-owner.pending ]' "$out"
-done
-out="$(hook s3 'cd sub; bash /x/factory-claim.sh --take-over')"
-check "claim after a separator is recognised" '[ -z "$out" ] && [ "$(cat .factory/run-owner.pending 2>/dev/null)" = s3 ]' "$out"
-rm -f .factory/run-owner.pending
-out="$(jq -n --arg cwd "$P" '{cwd: $cwd, tool_name: "Bash", tool_input: {command: "bash ~/.claude/hooks/factory-claim.sh"}}' | bash $H/factory-done-guard.sh)"
-check "no session id is denied" 'printf "%s" "$out" | grep -q "no session id"' "$out"
-
-echo "=== done-guard regressions"
 task in-progress C3-01 "c3 task" "" src/c.txt; rm -f tasks/backlog/C3-01.md
 out="$(hook s1 "mv tasks/in-progress/C3-01.md tasks/$(printf done)/C3-01.md")"
 check "move without marker denied" 'printf "%s" "$out" | grep -q "no verification marker"' "$out"
@@ -182,26 +157,17 @@ touch .factory/verified/C3-01
 out="$(hook s1 "mv tasks/in-progress/C3-01.md tasks/$(printf done)/C3-01.md")"
 check "move with marker allowed" '[ -z "$out" ]' "$out"
 
-echo "=== stop-gate close"
-stop() { jq -n --arg s "$1" --arg cwd "$P" '{session_id: $s, cwd: $cwd, hook_event_name: "Stop", stop_hook_active: false, background_tasks: []}' | bash $H/factory-stop-gate.sh; }
-printf 's1\n' > .factory/run-owner
-out="$(stop s1)"
-check "unfinished board blocks the owner" 'printf "%s" "$out" | jq -e ".decision==\"block\"" >/dev/null' "$out"
-out="$(stop s9)"
-check "non-owner is left alone" '[ -z "$out" ]' "$out"
-mv tasks/in-progress/C3-01.md tasks/done/C3-01.md
-printf 'c\n' > src/c.txt; bash $H/factory-commit.sh C3-01 >/dev/null 2>&1
-out="$(stop s1)"
-check "finished run prints a systemMessage naming the closed change" 'printf "%s" "$out" | jq -e ".systemMessage|test(\"Closed: C3-from-file\")" >/dev/null' "$out"
-check "finished run has no decision field" 'printf "%s" "$out" | jq -e "has(\"decision\")|not" >/dev/null'
-check "claim released" '[ ! -e .factory/run-owner ]'
-check "C3 ref created" 'git rev-parse -q --verify refs/factory/C3-from-file >/dev/null'
-out="$(stop s1)"
-check "after release the gate is silent" '[ -z "$out" ]' "$out"
-
 echo "=== brief"
 out="$(jq -n --arg cwd "$P" '{session_id: "s1", cwd: $cwd, source: "startup"}' | bash $H/factory-brief.sh | jq -r .hookSpecificOutput.additionalContext)"
 check "brief has the changes block" 'printf "%s" "$out" | grep -q "Changes in flight"' "$out"
+check "brief has no run claim any more" '! printf "%s" "$out" | grep -q "Run owner"' "$out"
+
+echo "=== change close"
+mv tasks/in-progress/C3-01.md tasks/done/C3-01.md
+printf 'c\n' > src/c.txt; bash $H/factory-commit.sh C3-01 >/dev/null 2>&1
+out="$(bash $H/factory-change.sh sync)"
+check "the change closes once its last task has landed" 'printf "%s" "$out" | grep -q "^CLOSED-NOW C3-from-file done=1/1"' "$out"
+check "C3 ref created" 'git rev-parse -q --verify refs/factory/C3-from-file >/dev/null'
 
 echo "=== commit outside git"
 NG="$WORK/nogit"; rm -rf "$NG"; mkdir -p "$NG/tasks/done" "$NG/.factory"

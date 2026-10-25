@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Factory: land one task. NOT a hook: a builder runs it once its check is green.
+# Factory: land one task. NOT a hook: factory-settle and factory-review-submit
+# run it once the task's check is green (and its review passed).
 #
 # Usage (from the project root):
 #   factory-land <task-id>
 #
 # Moves the task into tasks/done and records it as one commit of exactly its own
-# files (factory-commit.sh). This is the integrator's whole job, and every step
-# of it was deterministic: it no longer costs an agent, its start-up and a second
-# run of the test suite. Whether the tasks work together is what
+# files (factory-commit.sh). Every step of it is deterministic: it costs no
+# agent, no start-up and no second run of the test suite. Whether the tasks work together is what
 # factory-check --full answers, once, when the board is built.
 #
 # The done-guard hook cannot see a move made inside a script, so the marker is
@@ -16,11 +16,16 @@
 # Two builders can finish at the same moment. Git's index takes one writer, so
 # lands are serialised with a lock.
 #
-# Exit: 0 landed (even when the commit itself was refused - the task is done,
-# its check is green, and the output says why it is uncommitted); 1 refused.
+# The last line says how it went: LANDED <id> <sha>, LAND SKIPPED (already in
+# tasks/done and committed), LAND UNCOMMITTED (in tasks/done, check green, but
+# no commit has it - its dependents cannot start), LAND REFUSED.
+#
+# Exit: 0 landed, skipped or uncommitted (the task is done either way); 1
+# refused.
 set -uo pipefail
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 
 TASK_ID="${1:-}"
 if [ -z "${TASK_ID}" ]; then
@@ -31,8 +36,19 @@ ROOT="$PWD"
 T="${ROOT}/tasks"
 F="${ROOT}/.factory"
 [ -f "${F}/active" ] || { echo "LAND REFUSED for ${TASK_ID}: ${ROOT} has no .factory/active."; exit 1; }
+# fast.isolation "worktree": a task's own checkout lands nothing itself. Its
+# work reaches the project tree through factory-settle, run from there, which
+# checks it again on that tree first.
+if [ -f "${F}/worktree" ]; then
+  echo "LAND REFUSED for ${TASK_ID}: ${ROOT} is a task's own checkout (fast.isolation: worktree) - run factory-settle ${TASK_ID} from the project root."
+  exit 1
+fi
 
 if [ -f "${T}/done/${TASK_ID}.md" ]; then
+  if git -C "${ROOT}" rev-parse -q --verify HEAD >/dev/null 2>&1      && ! git -C "${ROOT}" check-ignore -q "tasks/done/${TASK_ID}.md" 2>/dev/null      && ! git -C "${ROOT}" cat-file -e "HEAD:./tasks/done/${TASK_ID}.md" 2>/dev/null; then
+    echo "LAND UNCOMMITTED ${TASK_ID}: it is in tasks/done, but no commit has it - its dependents cannot start until it is committed."
+    exit 0
+  fi
   echo "LAND SKIPPED for ${TASK_ID}: it is already in tasks/done."
   exit 0
 fi
@@ -44,6 +60,16 @@ done
 if [ ! -f "${F}/verified/${TASK_ID}" ]; then
   echo "LAND REFUSED for ${TASK_ID}: no green check. Run factory-check ${TASK_ID} and land only after it prints CHECK RESULT: GREEN."
   exit 1
+fi
+# The marker holds a digest of the task's files as the check saw them. A file
+# edited after the green check would be committed as checked: it is not.
+want="$(sed -n 's/^files=//p' "${F}/verified/${TASK_ID}" 2>/dev/null | tr -d '\r' | head -1)"
+if [ -n "${want}" ]; then
+  now="$(python3 "${HOOK_DIR}/factory-check.py" fingerprint "${TASK_ID}" 2>/dev/null | tr -d '\r')"
+  if [ "${now}" != "${want}" ]; then
+    echo "LAND REFUSED for ${TASK_ID}: its files changed after the green check (or its list did). Run factory-check ${TASK_ID} again and land only after it is green."
+    exit 1
+  fi
 fi
 
 lock="${F}/locks/land"
@@ -73,7 +99,7 @@ printf '%s\n' "${out}"
 sha="$(printf '%s\n' "${out}" | sed -n -E 's#^COMMIT ([0-9a-f]+) .*#\1#p' | head -1)"
 emit commit "$(jq -cn --arg id "${TASK_ID}" --arg s "${sha:-none}" '{task: $id, sha: $s}')"
 if [ "${rc}" -ne 0 ]; then
-  echo "LANDED ${TASK_ID} uncommitted - the task is done and its check is green, but the commit was refused (above)."
+  echo "LAND UNCOMMITTED ${TASK_ID}: the task is done and its check is green, but the commit was refused (above) - its dependents cannot start until it is committed."
   exit 0
 fi
 echo "LANDED ${TASK_ID} ${sha:-(nothing to commit)}"

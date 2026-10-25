@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Factory per-task commit. NOT a hook: the factory-integrator runs it once a
-# task's post-integration gate is green and its file sits in tasks/done.
+# Factory per-task commit. NOT a hook: factory-land runs it once a task's check
+# is green and its file sits in tasks/done.
 #
 # Usage: factory-commit <task-id>      (from the project root)
 #
@@ -84,7 +84,7 @@ while IFS= read -r p; do
   fi
 done <<< "${listed}"
 
-[ "${#paths[@]}" -gt 0 ] || refuse "the task file has no usable \"## Files touched\" entries${skipped:+ (skipped:${skipped})}. The implementer records one repo-relative path per line there; without it this script cannot tell the task's changes from everything else in the tree. Report it to the lead; do not commit by hand."
+[ "${#paths[@]}" -gt 0 ] || refuse "the task file has no usable \"## Files touched\" entries${skipped:+ (skipped:${skipped})}. The builder records one repo-relative path per line there; without it this script cannot tell the task's changes from everything else in the tree. Say so in your result; do not commit by hand."
 
 # --- shared files -------------------------------------------------------------
 # A file that another in-flight task also lists holds that task's edits too. It
@@ -145,7 +145,7 @@ fi
 msg_trailers="$(printf 'Factory-Task: %s\nFactory-Change: %s' "${TASK_ID}" "${change}")"
 if ! out="$(git -C "${ROOT}" commit -q -m "${TASK_ID}: ${title}" -m "${msg_trailers}" -- "${paths[@]}" 2>&1)"; then
   printf '%s\n' "${out}"
-  refuse "git commit failed (output above). If a project commit hook rejected it, that is a finding for the lead, not something to route around: never --no-verify."
+  refuse "git commit failed (output above). If a project commit hook rejected it, that is a finding for the run's report, not something to route around: never --no-verify."
 fi
 
 sha="$(git -C "${ROOT}" rev-parse --short HEAD)"

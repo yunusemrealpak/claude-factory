@@ -7,22 +7,36 @@
 #   FACTORY_KEEP=1 bash .../run-all.sh             keep the sandboxes to look at
 #
 # What each suite covers:
-#   1  ids, change open/sync/close, per-task commit, claim, done-guard, stop gate
+#   1  ids, change open/sync/close, per-task commit, done-guard
 #   2  risk routing, lessons, attempts-safe parsing, retro sections, gate isolation
-#   3  event log, dashboard, question inbox, status line, end-of-run message
-#   4  duplicate-gate skip, task lint, ready set
+#   3  event log, sweep and run.lock in the brief, dashboard, question inbox, status line
+#   4  task lint, the ready set (factory-plan --ready)
 #   5  change-level acceptance, commit bisect, the version/upgrade check
-#   6  the fast lane: factory-check, plan, start/land/block, /factory:fast scheduling
+#   6  factory-check, plan, start/land/block, finish
 #   7  hard bans, autonomy consent, deny merge, STOP
 #   8  delivery: per-change branch, publisher state machine against a fake gh,
 #      classes, breakers, quota line
 #   9  the retrospective: due marker, validator, ledger, evaluate
 #  10  the outer loop: factory-next gates, worktree launch, launchd plist, modifies_tests
 #  11  3.1: the unpushed breaker, the upgrade commits its config, unclassified gate results
+#  12  shadow mode: the pre-3.3 gate template and the engine, verdict for verdict
+#  13  the one loop: the workflow's schedule (loop-cases.mjs), preflight, settle,
+#      review-submit, deliver
+#  14  the plan and what a run is judged by: factory-lint --plan, built-in review
+#      triggers, criteria files, must-haves, the preflight's start check
+#  15  unattended permissions and scheduling: factory-allow, factory-next schtasks
+#  16  escalation: factory-notify, question deadlines, defaults and expiry
+#  17  3.6: security scans (gitleaks, semgrep, full scans) and mutation testing
+#  18  3.6: EARS concerns, area leases in the plan, the cheat monitor
+#  19  3.6: lessons (category, retire_when, the overlap check, update, check),
+#      rules through factory-retro-apply, the retro digest's view of both
+#  20  3.6: the spec ledger: delta seed and validate, merge on close (all or nothing), drift
+#  21  3.6: untrusted input framed, a checkout per builder and its integration
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
 export FACTORY_NO_NOTIFY=1
+. "$HERE/../hooks/factory-compat.sh"
 
 want="${1:-all}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/factory-selftest.XXXXXX")"
@@ -36,7 +50,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5 6 7 8 9 10 11; do
+for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"

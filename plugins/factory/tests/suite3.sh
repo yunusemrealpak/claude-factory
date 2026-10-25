@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Sandbox tests: the observability layer - event log, dashboard, question inbox,
-# status line segment, end-of-run message. Never touches a real project.
+# status line segment, session brief, the sweep of agents that died with their
+# session. Never touches a real project.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 EXTRACT="$BASE/extract.py"
 # Sandboxes are built under here, never beside the suite itself.
@@ -50,12 +52,12 @@ E="$WORK/events"; rm -rf "$E"; mkdir -p "$E/.factory"; cd "$E" || exit 1
 LOG="$E/.factory/events.jsonl"
 
 # Inert until the factory is open in that project.
-ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStart", agent_type:"factory-implementer", agent_id:"a1"}')"
+ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStart", agent_type:"factory-builder", agent_id:"a1"}')"
 check "no .factory/active: nothing is recorded" '[ ! -f "$LOG" ]'
 
 : > "$E/.factory/active"; freeze_dash "$E"
-ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStart", agent_type:"factory-implementer", agent_id:"a1"}')"
-check "SubagentStart writes agent_start" 'jq -e "select(.kind==\"agent_start\" and .agent==\"factory-implementer\" and .agent_id==\"a1\")" "$LOG" >/dev/null' "$(cat "$LOG" 2>/dev/null)"
+ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStart", agent_type:"factory-builder", agent_id:"a1"}')"
+check "SubagentStart writes agent_start" 'jq -e "select(.kind==\"agent_start\" and .agent==\"factory-builder\" and .agent_id==\"a1\")" "$LOG" >/dev/null' "$(cat "$LOG" 2>/dev/null)"
 check "every line carries ts/epoch/kind" 'jq -e "has(\"ts\") and has(\"epoch\") and has(\"kind\")" "$LOG" >/dev/null'
 
 # A start two minutes old, so the pairing has something to measure.
@@ -63,7 +65,7 @@ jq -cn --argjson e "$(( $(date +%s) - 120 ))" '{ts:"x", epoch:$e, kind:"agent_st
 ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStop", agent_type:"factory-reviewer", agent_id:"a2", last_assistant_message:"done"}')"
 secs="$(jq -r 'select(.kind=="agent_stop" and .agent_id=="a2") | .seconds' "$LOG")"
 check "SubagentStop pairs on agent_id and computes duration" '[ "$secs" -ge 119 ] && [ "$secs" -le 125 ]' "seconds=$secs"
-ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStop", agent_type:"factory-lead", agent_id:"zz"}')"
+ev_in "$(jq -cn --arg c "$E" '{cwd:$c, hook_event_name:"SubagentStop", agent_type:"factory-runner", agent_id:"zz"}')"
 check "stop with no matching start records seconds=-1" '[ "$(jq -r "select(.kind==\"agent_stop\" and .agent_id==\"zz\") | .seconds" "$LOG")" = "-1" ]'
 
 post() {  # <command> <output>
@@ -96,14 +98,12 @@ post "bash ~/.claude/hooks/factory-commit.sh C2-01" "COMMIT 9f3ab12 C2-01 (C2): 
 check "commit records the sha" 'jq -e "select(.kind==\"commit\" and .task==\"C2-01\" and .sha==\"9f3ab12\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-commit.sh C2-09" "COMMIT SKIPPED for C2-09: none of its files differ from HEAD - nothing to commit."
 check "a skipped commit records sha=none" 'jq -e "select(.kind==\"commit\" and .task==\"C2-09\" and .sha==\"none\")" "$LOG" >/dev/null'
-post "bash ~/.claude/hooks/factory-risk.sh C2-03" "RISK C2-03: review before commit - the gate cannot judge these files."
+post "bash ~/.claude/hooks/factory-risk.sh C2-03" "RISK C2-03: review before commit - the gate cannot judge what is listed above."
 check "risk hit is recorded" 'jq -e "select(.kind==\"risk\" and .task==\"C2-03\" and .review_needed==\"yes\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-risk.sh C2-04" "RISK none for C2-04: 2 file(s), none on a risk path."
 check "clean risk check is recorded too" 'jq -e "select(.kind==\"risk\" and .task==\"C2-04\" and .review_needed==\"no\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-change.sh open C3 login-fix fix -" "OPENED C3-login-fix: 4 task(s), base abc123def456, summary at .factory/changes/C3-login-fix/summary.md"
 check "opening a change is recorded" 'jq -e "select(.kind==\"change_open\" and .change==\"C3-login-fix\")" "$LOG" >/dev/null'
-post "bash ~/.claude/hooks/factory-claim.sh" "CLAIMED: this run is owned by session abc."
-check "claiming the run is recorded" 'jq -e "select(.kind==\"claim\")" "$LOG" >/dev/null'
 post "bash ~/.claude/hooks/factory-ask.sh ask C2-06 \"x\"" "ASKED Q2 for C2-06: written to .factory/questions/Q2.md"
 check "a question is recorded" 'jq -e "select(.kind==\"question\" and .question==\"Q2\")" "$LOG" >/dev/null'
 
@@ -116,8 +116,10 @@ check "dashboard was not rebuilt while the stamp was fresh" '[ ! -f "$E/.factory
 
 rm -f "$E/.factory/.dash-stamp"
 post "bash gates/verify.sh C2-08" "GATE RESULT: GREEN for C2-08"
-for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$E/.factory/dashboard.html" ] && break; done
-check "an event rebuilds the dashboard" '[ -f "$E/.factory/dashboard.html" ] || { sleep 2; [ -f "$E/.factory/dashboard.html" ]; }'
+# The rebuild runs in the background; a slow host (Git Bash starts processes
+# slowly) gets up to 20 seconds.
+for _ in $(seq 1 40); do [ -f "$E/.factory/dashboard.html" ] && break; sleep 0.5; done
+check "an event rebuilds the dashboard" '[ -f "$E/.factory/dashboard.html" ]'
 check "the debounce stamp is written" '[ -s "$E/.factory/.dash-stamp" ]'
 
 echo "=== question inbox"
@@ -131,7 +133,7 @@ out="$(bash "$H/factory-ask.sh" ask C2-01 "Ödeme sağlayıcısı Stripe mi kals
 check "ask writes Q1 and says so" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^ASKED Q1 for C2-01" && [ -f .factory/questions/Q1.md ]' "$out"
 check "the question file carries frontmatter" 'grep -q "^id: Q1" .factory/questions/Q1.md && grep -q "^task: C2-01" .factory/questions/Q1.md && grep -q "^status: open" .factory/questions/Q1.md'
 check "options and recommendation are sections" 'grep -q "^- Stripe$" .factory/questions/Q1.md && grep -q "^## Öneri" .factory/questions/Q1.md'
-check "ask tells the lead not to wait" 'printf "%s" "$out" | grep -q "Do not wait for the answer"' "$out"
+check "ask tells the caller not to wait" 'printf "%s" "$out" | grep -q "Do not wait for the answer"' "$out"
 bash "$H/factory-ask.sh" ask C2-02 "İkinci soru" >/dev/null 2>&1
 check "the second question is Q2, not Q1 again" '[ -f .factory/questions/Q2.md ]'
 out="$(bash "$H/factory-ask.sh" list open)"
@@ -166,8 +168,8 @@ S=$(( $(date +%s) - 1800 ))
 {
   jq -cn --argjson e "$S"           '{ts:"x", epoch:$e, kind:"move", task:"C2-03", from:"backlog", to:"in-progress"}'
   jq -cn --argjson e "$(( S+600 ))" '{ts:"x", epoch:$e, kind:"move", task:"C2-03", from:"in-progress", to:"done"}'
-  jq -cn --argjson e "$S"           '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-implementer", agent_id:"a1"}'
-  jq -cn --argjson e "$(( S+300 ))" '{ts:"x", epoch:$e, kind:"agent_stop", agent:"factory-implementer", agent_id:"a1", seconds:300}'
+  jq -cn --argjson e "$S"           '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:"a1"}'
+  jq -cn --argjson e "$(( S+300 ))" '{ts:"x", epoch:$e, kind:"agent_stop", agent:"factory-builder", agent_id:"a1", seconds:300}'
   jq -cn --argjson e "$(( S+310 ))" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-reviewer", agent_id:"a2"}'
   jq -cn --argjson e "$(( S+320 ))" '{ts:"x", epoch:$e, kind:"gate", task:"C2-03", verdict:"green"}'
   jq -cn --argjson e "$(( S+330 ))" '{ts:"x", epoch:$e, kind:"gate", task:"C2-02", verdict:"red"}'
@@ -191,7 +193,7 @@ check "the needs-human task says so" 'printf "%s" "$html" | grep -q "C2-04 · sa
 check "the stalled task is in Zorlananlar with its signature" 'printf "%s" "$html" | grep -q "aynı hataya iki kez takıldı" && printf "%s" "$html" | grep -q "abc123 rc=1"'
 check "a retried task is in Zorlananlar too" 'printf "%s" "$html" | grep -q "2 kez geri döndü"'
 check "the change is shown with progress" 'printf "%s" "$html" | grep -q "C2-kasa-akisi" && printf "%s" "$html" | grep -q "feature"'
-check "agent time is totalled per role" 'printf "%s" "$html" | grep -q "factory-implementer" && printf "%s" "$html" | grep -q "5 dk"'
+check "agent time is totalled per role" 'printf "%s" "$html" | grep -q "factory-builder" && printf "%s" "$html" | grep -q "5 dk"'
 check "the feed reads in Turkish" 'printf "%s" "$html" | grep -q "in-progress → done" && printf "%s" "$html" | grep -q "kapı green"'
 check "it says whether the run is live" 'printf "%s" "$html" | grep -qE "canlı · son hareket|son hareket"'
 
@@ -200,6 +202,19 @@ mktask "$D" in-progress C2-05 "owner:x" "stage:queued" "stage_since:$now_iso"
 sed -i.bak 's|^title: t C2-05$|title: <img src=x onerror=alert(1)> \& "quoted"|' tasks/in-progress/C2-05.md && rm -f tasks/in-progress/C2-05.md.bak
 bash "$H/factory-dash.sh"
 check "a task title cannot inject markup" 'grep -q "&lt;img src=x" .factory/dashboard.html && ! grep -q "<img src=x" .factory/dashboard.html'
+
+check "with no run lock the dashboard says no run is going" 'grep -q "koşu yok" .factory/dashboard.html'
+printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0}\n' > .factory/run.lock
+bash "$H/factory-dash.sh"
+check "a fresh run lock reads as a run in progress" 'grep -q "koşu sürüyor" .factory/dashboard.html'
+printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0, "state": "halted", "halted": "infra"}\n' > .factory/run.lock
+bash "$H/factory-dash.sh"
+check "a halted run lock reads as a run that stopped" 'grep -q "koşu durdu" .factory/dashboard.html'
+printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0}\n' > .factory/run.lock
+touch -t 202001010000 .factory/run.lock
+bash "$H/factory-dash.sh"
+check "a run lock nobody kept fresh reads as a run left half-way" 'grep -q "koşu yarım kaldı" .factory/dashboard.html'
+rm -f .factory/run.lock; bash "$H/factory-dash.sh"
 
 check "statusline cache is written with the keys the status line reads" '
   grep -q "^change=C2-kasa-akisi$" .factory/statusline.txt &&
@@ -248,34 +263,14 @@ seg_name() {  # <change-name> - the name as the status line renders it
 }
 long="C12-refactor-the-entire-payment-pipeline"
 name="$(seg_name "$long")"
-check "a long change name is cut to fit" '[ "${#name}" -le 18 ] && printf "%s" "$name" | grep -q "…"' "$name"
+# Width in characters whatever the locale: the ellipsis is one.
+width() { local n="${1//…/.}"; printf '%s' "${#n}"; }
+check "a long change name is cut to fit" '[ "$(width "$name")" -le 18 ] && printf "%s" "$name" | grep -q "…"' "$name"
 check "the cut keeps the change id, which is the head" 'printf "%s" "$name" | grep -q "^C12-"' "$name"
 name="$(seg_name "C2-invoice-export")"
 check "a name that already fits is left alone" '[ "$name" = "C2-invoice-export" ]' "$name"
 name="$(FACTORY_STATUSLINE_MAX=8 seg_name "C2-invoice-export")"
-check "the limit can be tightened" '[ "${#name}" -le 8 ]' "$name"
-
-echo "=== end of run"
-cd "$D" || exit 1
-stop_in() { jq -cn --arg c "$D" --arg s "${1:-s1}" '{cwd:$c, session_id:$s, hook_event_name:"Stop", stop_hook_active:false}'; }
-printf 's1' > .factory/run-owner
-out="$(stop_in s-other | bash "$H/factory-stop-gate.sh")"
-check "a session that does not own the run is left alone" '[ -z "$out" ]' "$out"
-# Backlog work left: the run must be held open, and no summary printed.
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "work left in backlog holds the session" 'printf "%s" "$out" | jq -e ".decision==\"block\"" >/dev/null' "$out"
-# Clear the board down to blocked-only, which is what ends a run.
-mv tasks/backlog/C2-02.md tasks/done/ 2>/dev/null
-rm -f tasks/in-progress/C2-01.md tasks/in-progress/C2-05.md
-rm -f .factory/dashboard.html
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "only blocked work left: the run is allowed to stop" '! printf "%s" "$out" | jq -e ".decision" >/dev/null 2>&1' "$out"
-check "the developer is told the run finished" 'printf "%s" "$out" | jq -r ".systemMessage" | grep -q "Factory run finished"' "$out"
-check "the open question is named in the end-of-run message" 'printf "%s" "$out" | jq -r ".systemMessage" | grep -q "1 question(s) are waiting for you"' "$out"
-check "it points at the dashboard and the answer command" 'printf "%s" "$out" | jq -r ".systemMessage" | grep -q "dashboard.html" && printf "%s" "$out" | jq -r ".systemMessage" | grep -q "factory-ask answer"'
-check "the dashboard is rebuilt one last time" '[ -s .factory/dashboard.html ]'
-check "the claim is released" '[ ! -s .factory/run-owner ]'
-check "the change was synced at the end of the run" 'grep -q "C2-03" .factory/changes/C2-kasa-akisi/summary.md'
+check "the limit can be tightened" '[ "$(width "$name")" -le 8 ]' "$name"
 
 echo "=== session brief"
 out="$(jq -cn --arg c "$D" '{cwd:$c, session_id:"s1", hook_event_name:"SessionStart", source:"startup"}' | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
@@ -286,81 +281,77 @@ check "the brief names the stalled task" 'printf "%s" "$out" | grep -q "Stalled"
 echo "=== agents that died with their session"
 W="$WORK/sweep"; rm -rf "$W"; mkdir -p "$W/.factory/inflight" "$W/tasks/in-progress"; cd "$W" || exit 1
 : > .factory/active
-jq -n '{max_concurrent_agents:3, agent_stale_after_min:45}' > .factory/config.json
-mktask "$W" in-progress C2-01 "owner:impl-1" "stage:implementing"
+jq -n '{agent_stale_after_min:45}' > .factory/config.json
+mktask "$W" in-progress C2-01 "owner:builder" "stage:implementing"
 S2=$(( $(date +%s) - 600 ))
 {
-  jq -cn --argjson e "$S2"          '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-implementer", agent_id:"dead1"}'
+  jq -cn --argjson e "$S2"          '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:"dead1"}'
   jq -cn --argjson e "$(( S2+10 ))" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-reviewer", agent_id:"dead2"}'
 } > .factory/events.jsonl
+# Concurrency markers an older version left behind.
 : > .factory/inflight/tool-a; : > .factory/inflight/tool-b
 bash "$H/factory-dash.sh"
 check "before the sweep the dead agents look like work in flight" 'grep -q "^running=2$" .factory/statusline.txt' "$(cat .factory/statusline.txt)"
 
 out="$(bash "$H/factory-sweep.sh" test-reason "$W")"
-check "the sweep reports what it cleared" 'printf "%s" "$out" | grep -q "^SWEPT 2 agent(s) and 2 concurrency slot(s)"' "$out"
-check "the concurrency slots are released" '[ "$(find .factory/inflight -type f | wc -l | tr -d " ")" = "0" ]'
-check "a sweep line is written to the log" 'jq -e "select(.kind==\"sweep\" and .reason==\"test-reason\" and .agents==2)" .factory/events.jsonl >/dev/null'
+check "the sweep reports what it cleared" 'printf "%s" "$out" | grep -qx "SWEPT 2 agent(s) left behind by a session that ended (test-reason)."' "$out"
+check "the concurrency markers of an older version are removed" '[ ! -e .factory/inflight ]'
+check "a sweep line is written to the log" 'jq -e "select(.kind==\"sweep\" and .reason==\"test-reason\" and .agents==2 and (has(\"markers\")|not))" .factory/events.jsonl >/dev/null'
 check "the dashboard stops counting them" 'grep -q "^running=0$" .factory/statusline.txt' "$(cat .factory/statusline.txt)"
 check "the feed says why they disappeared" 'grep -q "önceki oturumdan kalma" .factory/dashboard.html'
 out="$(bash "$H/factory-sweep.sh" again "$W")"
 check "a second sweep with nothing to clear is silent" '[ -z "$out" ] && [ "$(grep -c sweep .factory/events.jsonl)" = "1" ]' "$out"
 
 # An agent dispatched after the sweep is live again.
-jq -cn --argjson e "$(date +%s)" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-implementer", agent_id:"live1"}' >> .factory/events.jsonl
+jq -cn --argjson e "$(date +%s)" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:"live1"}' >> .factory/events.jsonl
 bash "$H/factory-dash.sh"
 check "an agent started after the sweep does count" 'grep -q "^running=1$" .factory/statusline.txt' "$(cat .factory/statusline.txt)"
 
 # Age backstop: no sweep at all, but a start older than the cutoff.
 O="$WORK/sweep-age"; rm -rf "$O"; mkdir -p "$O/.factory"; cd "$O" || exit 1
 : > .factory/active; jq -n '{agent_stale_after_min:45}' > .factory/config.json
-jq -cn --argjson e "$(( $(date +%s) - 4000 ))" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-implementer", agent_id:"old1"}' > .factory/events.jsonl
-jq -cn --argjson e "$(( $(date +%s) - 300 ))"  '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-implementer", agent_id:"new1"}' >> .factory/events.jsonl
+jq -cn --argjson e "$(( $(date +%s) - 4000 ))" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:"old1"}' > .factory/events.jsonl
+jq -cn --argjson e "$(( $(date +%s) - 300 ))"  '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:"new1"}' >> .factory/events.jsonl
 bash "$H/factory-dash.sh"
 check "a start older than the cutoff is not counted, even with no sweep" 'grep -q "^running=1$" .factory/statusline.txt' "$(cat .factory/statusline.txt)"
 
 echo "=== who is allowed to sweep"
 cd "$W" || exit 1
 brief_in() { jq -cn --arg c "$W" --arg s "$1" --arg src "$2" '{cwd:$c, session_id:$s, source:$src, hook_event_name:"SessionStart"}'; }
-: > .factory/inflight/tool-c
-rm -f .factory/run-owner
+ghost() { jq -cn --argjson e "$(date +%s)" --arg id "$1" '{ts:"x", epoch:$e, kind:"agent_start", agent:"factory-builder", agent_id:$id}' >> .factory/events.jsonl; }
+sweeps() { grep -c '"kind":"sweep"' .factory/events.jsonl; }
+rm -f .factory/run.lock
 out="$(brief_in sA startup | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
-check "a session starting on an unowned run sweeps" 'printf "%s" "$out" | grep -q "PREVIOUS RUN ENDED MID-FLIGHT" && [ "$(find .factory/inflight -type f | wc -l | tr -d " ")" = "0" ]' "$out"
+check "a session starting with no run in progress sweeps" 'printf "%s" "$out" | grep -q "PREVIOUS RUN ENDED MID-FLIGHT"' "$out"
 check "and names the tasks the dead run left in flight" 'printf "%s" "$out" | grep -q "Tasks left in tasks/in-progress by that run: C2-01"' "$out"
+check "a brief with no run lock has no RUN line" '! printf "%s" "$out" | grep -q "^RUN:"' "$out"
 
-: > .factory/inflight/tool-d
-printf 'sA' > .factory/run-owner
-out="$(brief_in sA resume | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
-check "resuming the session that owns the run sweeps its own ghosts" '[ "$(find .factory/inflight -type f | wc -l | tr -d " ")" = "0" ]' "$out"
+ghost g1; printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0}\n' > .factory/run.lock; n="$(sweeps)"
+out="$(brief_in sNEW startup | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "a run in progress in another session is never swept" '[ "$(sweeps)" = "$n" ] && ! printf "%s" "$out" | grep -q "PREVIOUS RUN ENDED"' "$out"
+check "and the brief says a run is in progress" 'printf "%s" "$out" | grep -q "^RUN: a run is in progress (another session) - do not start a second one"' "$out"
 
-: > .factory/inflight/tool-e
-printf 'sA' > .factory/run-owner
-out="$(brief_in sA compact | bash "$H/factory-brief.sh" >/dev/null; find .factory/inflight -type f | wc -l | tr -d ' ')"
-check "a compaction is the same process continuing, so it never sweeps" '[ "$out" = "1" ]' "$out"
+printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0, "state": "halted", "halted": "infra"}\n' > .factory/run.lock
+out="$(brief_in sA startup | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "a halted run is named, with how to continue it" 'printf "%s" "$out" | grep -q "^RUN: the last run halted (infra) - /factory:run continues it from the same base"' "$out"
+check "and what it left behind is swept" '[ "$(sweeps)" = "$((n + 1))" ]' "$(sweeps) sweep line(s), $n before"
 
-printf 'sOTHER' > .factory/run-owner
-out="$(brief_in sNEW startup | bash "$H/factory-brief.sh" >/dev/null; find .factory/inflight -type f | wc -l | tr -d ' ')"
-check "a bystander session never sweeps a run somebody else owns" '[ "$out" = "1" ]' "$out"
+ghost g2; printf '{"started": "x", "start_head": "abc", "tasks": [], "restarts": 0}\n' > .factory/run.lock
+touch -t 202001010000 .factory/run.lock; n="$(sweeps)"
+out="$(brief_in sA startup | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "a run lock nobody kept fresh reads as a run that stopped, and is swept" 'printf "%s" "$out" | grep -q "^RUN: a run stopped without finishing - /factory:run continues it" && [ "$(sweeps)" = "$((n + 1))" ]' "$out"
 
-echo "=== claiming a run clears what the last one left"
-rm -f .factory/run-owner
-printf 'sZ' > .factory/run-owner.pending
-out="$(bash "$H/factory-claim.sh")"
-check "the claim succeeds and reports the sweep" 'printf "%s" "$out" | grep -q "^CLAIMED" && printf "%s" "$out" | grep -q "SWEPT"' "$out"
-check "the slots are free for the new run" '[ "$(find .factory/inflight -type f | wc -l | tr -d " ")" = "0" ]'
+ghost g3; rm -f .factory/run.lock; n="$(sweeps)"
+brief_in sA compact | bash "$H/factory-brief.sh" >/dev/null
+check "a compaction is the same process continuing, so it never sweeps" '[ "$(sweeps)" = "$n" ]' "$(sweeps) sweep line(s), $n before"
 
-echo "=== the concurrency ceiling itself"
-L="$WORK/limit"; rm -rf "$L"; mkdir -p "$L/.factory/inflight"; cd "$L" || exit 1
-: > .factory/active; jq -n '{max_concurrent_agents:2, agent_stale_after_min:45}' > .factory/config.json
-limit_in() { jq -cn --arg c "$L" --arg id "$1" '{cwd:$c, hook_event_name:"PreToolUse", tool_name:"Agent", tool_use_id:$id, tool_input:{prompt:"x"}}'; }
-limit_in t1 | bash "$H/factory-agent-limit.sh" >/dev/null
-limit_in t2 | bash "$H/factory-agent-limit.sh" >/dev/null
-check "each approved dispatch takes a slot" '[ "$(find .factory/inflight -type f | wc -l | tr -d " ")" = "2" ]'
-out="$(limit_in t3 | bash "$H/factory-agent-limit.sh")"
-check "the ceiling denies the next one" 'printf "%s" "$out" | jq -e ".hookSpecificOutput.permissionDecision==\"deny\"" >/dev/null' "$out"
-touch -t 202001010000 .factory/inflight/t1 .factory/inflight/t2
-out="$(limit_in t4 | bash "$H/factory-agent-limit.sh")"
-check "markers too old to be agents stop holding the ceiling" '[ -z "$out" ] && [ -f .factory/inflight/t4 ] && [ ! -f .factory/inflight/t1 ]' "$out"
+echo "=== the brief carries no state across a compaction"
+printf 'LEAD-STATE-MARK: dispatching T-7\n' > .factory/lead-state.md
+out="$(brief_in sA compact | bash "$H/factory-brief.sh" | jq -r '.hookSpecificOutput.additionalContext')"
+check "a lead-state.md from before 3.4 is not carried into the brief" '! printf "%s" "$out" | grep -q "LEAD-STATE-MARK"' "$out"
+rm -f .factory/lead-state.md
+check "the brief names the plugin's commands" 'grep -q "/factory:status for detail, /factory:run" "$H/factory-brief.sh" && ! grep -Eq "/factory-(status|run|retro|fast)" "$H/factory-brief.sh"'
+check "the brief says how a task enters done" 'printf "%s" "$out" | grep -q "only through factory-settle or factory-land"' "$out"
 
 echo
 echo "passed=$pass failed=$fail"

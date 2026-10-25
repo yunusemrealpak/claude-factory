@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Factory: the board as a build plan. NOT a hook: the /factory:fast workflow
-reads it before it starts anything.
+"""Factory: the board as a build plan. NOT a hook: factory-preflight builds the
+run's plan with it, and /factory:init measures a task list with it.
 
 Usage (from the project root):
   factory-plan            human-readable
-  factory-plan --json     one JSON object, what the workflow consumes
+  factory-plan --json     one JSON object
+  factory-plan --ready    the ready set: READY / WAIT / HOLD / STALL per backlog task
   add --proposed to plan tasks/proposed as well - how /factory:init measures a
   task list before it is approved; nothing is ever dispatched from there
   add --start to record the run's starting point in .factory/run-start.json:
-  HEAD and its test census, which the full check at the end compares against
+  HEAD and its test census, which the full check at the end compares against.
+  factory-preflight does this for /factory:run; --start is kept for scripts.
+
+The starting point belongs to a run, not to a start. .factory/run.lock marks a
+run that has not finished (factory-finish removes it): a run started again for
+the same change keeps the base it had, so the audit range and the run's test
+census still cover everything it landed before it was interrupted.
 
 Every task in tasks/backlog or tasks/in-progress that an agent may work on,
 with the dependencies it still has to wait for - only ones that are themselves
@@ -30,6 +37,8 @@ import sys
 
 sys.dont_write_bytecode = True
 HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HOOK_DIR)
+from factory_compat import bash  # noqa: E402
 ROOT = os.getcwd()
 F = os.path.join(ROOT, ".factory")
 FACTORY_PATHS = ("tasks/", "decisions.md", ".factory/", "gates/", "specs/", "CLAUDE.md", ".gitignore", ".claude/")
@@ -95,6 +104,10 @@ def build(proposed=False, change=None):
     out["workers"] = int(fast.get("workers") or 4)
     out["risk_review"] = fast.get("risk_review") or "after"
     out["audit"] = fast.get("audit", True) is not False
+    # Opt-in: two tasks of one area never build at once (fast.area_lease), and a
+    # cheat-type reason is put to a monitor before the reviewer (review.monitor).
+    out["area_lease"] = fast.get("area_lease") is True
+    out["monitor"] = (cfg.get("review") or {}).get("monitor") is True
     # retry_limit counts attempts at a task, the first included.
     out["retry_limit"] = max(1, int(cfg.get("retry_limit") or 2))
     out["effort"] = {"build": fast.get("effort_build") or "medium",
@@ -102,7 +115,7 @@ def build(proposed=False, change=None):
                      "review": fast.get("effort_review") or "high",
                      "audit": fast.get("effort_audit") or "high"}
 
-    ids = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
+    ids = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
                          capture_output=True, text=True)
     if ids.returncode != 0:
         out["problems"] += [l for l in ids.stdout.splitlines() if l.strip()] or ["factory-ids check failed"]
@@ -188,7 +201,8 @@ def build(proposed=False, change=None):
         fm = active[t]["fm"]
         out["tasks"].append({"id": t, "title": (fm.get("title") or t)[:60], "deps": active[t]["deps"],
                              "review": fm.get("review", "").lower() == "always",
-                             "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true"})
+                             "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true",
+                             "area": fm.get("area", "").strip().strip("\"'").lower()})
     out["held"] = [{"id": t, "reason": r} for t, r in sorted(held.items())]
 
     # The shape of the graph bounds the run more than any worker count does:
@@ -249,19 +263,151 @@ def build(proposed=False, change=None):
     return out
 
 
-def record_start(plan):
+# What a task's approval is (factory-check.py APPROVED_KEYS holds the same).
+APPROVED_KEYS = ("acceptance", "needs_human", "untested_ok", "allow_test_removal", "modifies_tests", "dependencies")
+
+
+def git(*args):
+    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def committed_task(tid):
+    """(path, frontmatter) of the task file as HEAD has it, in any lane; None
+    when HEAD has none."""
+    rc, out, _ = git("ls-tree", "-r", "--name-only", "HEAD", "--", "tasks")
+    for p in out.splitlines() if rc == 0 else []:
+        if p.rsplit("/", 1)[-1] == tid + ".md":
+            rc, text, _ = git("show", "HEAD:./" + p)
+            if rc == 0:
+                fm = {}
+                lines = text.splitlines()
+                if lines and lines[0].strip() == "---":
+                    for line in lines[1:]:
+                        if line.strip() == "---":
+                            break
+                        key, sep, value = line.partition(":")
+                        if sep and key.strip() not in fm:
+                            fm[key.strip()] = value.strip()
+                return p, fm
+    return None
+
+
+def snapshot_board(plan, exempt=None):
+    """The task files this run builds, committed as approved before anything
+    starts. factory-check reads a task's acceptance and exemptions from this
+    commit, never from the working tree a builder writes. Only those files go
+    in: anything else staged or changed stays as it was.
+
+    A task file HEAD already has is committed again only when what was approved
+    is unchanged (a builder's notes, a stage): a run never approves a change to
+    a task it builds - that would let one run launder its own untested_ok. Such
+    a change is a problem the developer settles by committing the file.
+    exempt names keys a script changed for the developer (factory-preflight
+    clears needs_human when the developer answered the task's question).
+
+    A task file that moved lanes since HEAD is committed at its new place, and
+    its old place as gone - otherwise HEAD would hold the task twice.
+
+    Returns (short sha or None, problems, warnings)."""
+    problems, warnings = [], []
+    exempt = exempt or {}
+    if git("rev-parse", "--is-inside-work-tree")[0] != 0:
+        return None, problems, warnings
+    paths = []
+    for t in plan["tasks"]:
+        rc, out, _ = git("ls-files", "--", "tasks/*/%s.md" % t["id"])
+        for old in out.splitlines() if rc == 0 else []:
+            if old.strip() and not os.path.exists(os.path.join(ROOT, old.strip())):
+                paths.append(old.strip())
+        for col in ("backlog", "in-progress"):
+            p = "tasks/%s/%s.md" % (col, t["id"])
+            on_disk = os.path.isfile(os.path.join(ROOT, p))
+            tracked = git("ls-files", "--error-unmatch", "--", p)[0] == 0
+            if not (on_disk or tracked):
+                continue
+            head = committed_task(t["id"])
+            if head and on_disk:
+                now = frontmatter(os.path.join(ROOT, p))
+                changed = [k for k in APPROVED_KEYS if now.get(k, "").strip() != head[1].get(k, "").strip()
+                           and k not in exempt.get(t["id"], ())]
+                if changed:
+                    problems.append("%s: %s changes what was approved (%s) since %s was committed - a run never "
+                                    "approves a change to a task it builds. If you made the change, commit the task "
+                                    "file; otherwise put it back" % (t["id"], p, ", ".join(changed), head[0]))
+                    continue
+            paths.append(p)
+    if problems or not paths:
+        return None, problems, warnings
+    ignored = [p for p in paths if git("check-ignore", "-q", "--", p)[0] == 0]
+    if ignored:
+        warnings.append("task files are gitignored (%s): what was approved cannot be committed, so factory-check "
+                        "reads each task's approval from the working tree" % " ".join(ignored[:5]))
+        paths = [p for p in paths if p not in ignored]
+        if not paths:
+            return None, problems, warnings
+    rc, st, _ = git("status", "--porcelain", "--", *paths)
+    if rc != 0 or not st.strip():
+        return None, problems, warnings
+    msg = "factory: board snapshot (%d task(s))" % len(plan["tasks"])
+    # No project hook judges this commit: it holds task files only, and a
+    # commit-msg rule that refused it would leave the approvals unanchored.
+    for step in (["add", "-A", "--"] + paths,
+                 ["commit", "-q", "--no-verify", "-m", msg, "-m", "Factory-Board: snapshot", "--"] + paths):
+        rc, out, err = git(*step)
+        if rc != 0:
+            why = ((err or out).strip().splitlines() or ["git " + step[0] + " failed"])[0]
+            problems.append("the board snapshot could not be committed (%s). factory-check reads each task's "
+                            "approval from it, so the run does not start: commit the task files yourself, or fix "
+                            "what git refused" % why)
+            return None, problems, warnings
+    return (git("rev-parse", "--short", "HEAD")[1].strip() or None), problems, warnings
+
+
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            v = json.load(fh)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def record_start(plan, change=None):
     """The test census of HEAD before anything lands. Each task's check can only
-    see its own files; this is what lets the end of the run see all of them."""
-    r = subprocess.run(["python3", os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
+    see its own files; this is what lets the end of the run see all of them.
+
+    A run that has not finished (.factory/run.lock) and is started again for the
+    same change keeps its base: the census and the start commit are the ones it
+    had, and its task list grows by what is new. Returns "kept" or "new"."""
+    lock = read_json(os.path.join(F, "run.lock"))
+    start = read_json(os.path.join(F, "run-start.json"))
+    ids = [t["id"] for t in plan["tasks"]]
+    if lock and start and (lock.get("change") or None) == (change or None) \
+            and lock.get("start_head") and lock.get("start_head") == start.get("head"):
+        start["tasks"] = list(dict.fromkeys((start.get("tasks") or []) + ids))
+        lock["tasks"] = start["tasks"]
+        lock["restarts"] = int(lock.get("restarts") or 0) + 1
+        lock["touched"] = int(time.time())
+        with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
+            json.dump(start, fh)
+        with open(os.path.join(F, "run.lock"), "w", encoding="utf-8") as fh:
+            json.dump(lock, fh)
+        return "kept"
+    r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
                        capture_output=True, text=True, cwd=ROOT)
     try:
         census = json.loads(r.stdout)
     except ValueError:
-        return
-    census["tasks"] = [t["id"] for t in plan["tasks"]]
+        return "new"
+    census["tasks"] = ids
     census["started"] = int(time.time())
     with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
         json.dump(census, fh)
+    with open(os.path.join(F, "run.lock"), "w", encoding="utf-8") as fh:
+        json.dump({"started": census["started"], "touched": census["started"], "start_head": census.get("head"),
+                   "change": change or None, "tasks": ids, "restarts": 0}, fh)
+    return "new"
 
 
 def delivery_gate(change):
@@ -270,18 +416,18 @@ def delivery_gate(change):
     problems = []
     level = "local"
     try:
-        r = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-autonomy.sh")],
+        r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")],
                            capture_output=True, text=True, cwd=ROOT, timeout=20)
         level = (r.stdout.strip() or "local").split()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         pass
     if change:
-        b = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-branch.sh"), change],
+        b = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-branch.sh"), change],
                            capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if b.returncode != 0:
             problems.append((b.stdout.strip() or b.stderr.strip() or "factory-branch refused").splitlines()[0])
     if level == "merge":
-        q = subprocess.run(["bash", os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
+        q = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
                            capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if q.returncode != 0:
             problems.append((q.stdout.strip() or "quota check failed").splitlines()[0]
@@ -303,13 +449,46 @@ def main(argv):
             plan["ok"] = False
             plan["problems"] += gate
     if "--start" in argv and plan["ok"] and "--proposed" not in argv:
-        record_start(plan)
+        snap, problems, warnings = snapshot_board(plan)
+        plan["warnings"] += warnings
+        if problems:
+            plan["ok"] = False
+            plan["problems"] += problems
+        elif snap:
+            plan["snapshot"] = snap
+    if "--start" in argv and plan["ok"] and "--proposed" not in argv:
+        plan["base"] = record_start(plan, change)
         try:
             plan["start_head"] = json.load(open(os.path.join(F, "run-start.json"))).get("head")
         except (OSError, ValueError):
             pass
         for t in plan["tasks"]:
             t.pop("allow_test_removal", None)
+    if "--ready" in argv:
+        # The ready set, one line per backlog task: what a run would start now,
+        # what waits and on what, what no agent gets.
+        lanes = {t: c for c in ("backlog", "in-progress") for t in lane(c)}
+        held = {h["id"]: h["reason"] for h in plan["held"]}
+        n = {"ready": 0, "wait": 0, "hold": 0, "stall": 0}
+        for tid in sorted(t for t, c in lanes.items() if c == "backlog"):
+            fm = frontmatter(os.path.join(ROOT, "tasks", "backlog", tid + ".md"))
+            why = held.get(tid, "")
+            task = next((t for t in plan["tasks"] if t["id"] == tid), None)
+            if why.startswith("stalled"):
+                print("STALL %s the check saw the identical failure twice - it needs a different approach, not another builder" % tid)
+                n["stall"] += 1
+            elif why.startswith("needs_human"):
+                print("HOLD %s needs_human - a decision for the developer; factory-preflight blocks it and asks" % tid)
+                n["hold"] += 1
+            elif task and not task["deps"]:
+                print("READY %s %s %s" % (tid, fm.get("module", ""), fm.get("title", "")))
+                n["ready"] += 1
+            else:
+                print("WAIT  %s %s" % (tid, "needs " + ",".join(task["deps"]) if task else why))
+                n["wait"] += 1
+        print("SUMMARY ready=%d wait=%d hold=%d stall=%d in-progress=%d" % (
+            n["ready"], n["wait"], n["hold"], n["stall"], sum(1 for c in lanes.values() if c == "in-progress")))
+        return 0
     if "--json" in argv:
         for t in plan["tasks"]:
             t.pop("allow_test_removal", None)

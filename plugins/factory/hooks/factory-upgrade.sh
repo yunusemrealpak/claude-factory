@@ -5,6 +5,8 @@
 #   factory-upgrade          report what is missing
 #   factory-upgrade --apply  add the safe parts
 #   factory-upgrade --brief  one line, or nothing
+#   factory-upgrade --gate   only the gate: write the shim when there is none,
+#                            replace a known template (what /factory:init runs)
 #
 # The hooks, commands and agents live in ~/.claude and are shared by every
 # project, so those upgrade themselves the moment they are edited. What does
@@ -16,15 +18,23 @@
 #
 # --apply only ever adds: config keys that are missing, directories that are
 # missing, gitignore lines that are missing, task sections that are missing. It
-# never rewrites a value, a gate, or a task body. The gate is reported and left
-# alone: it is the one file that is legitimately project-specific, and merging
-# into it is /factory-init's job, with the developer watching.
+# never rewrites a value or a task body. It replaces two things, each only when
+# it is exactly what an older factory wrote:
+#   - the old 64-line "## Factory Protokolü" section of CLAUDE.md, which every
+#     agent read on every turn and which contradicted the agents' own
+#     instructions: it becomes the short pointer /factory:init now writes, and
+#     the old text is kept in .factory/claude-md-protocol.old.md;
+#   - a gates/verify.sh that is, byte for byte, a template /factory:init wrote
+#     (hooks/legacy/templates.sha256): it becomes the shim that runs the gate
+#     engine, factory-check, and the old file is kept in .factory/gate-legacy/.
+# A gate somebody changed is theirs: it is reported and left alone.
 set -uo pipefail
 
 # Where this script lives. Siblings are called through it, so the whole
 # toolkit works from any install path - a plugin directory changes on
 # every update.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 
 ROOT="$PWD"
 F="${ROOT}/.factory"
@@ -36,18 +46,24 @@ mode=report
 case "${1:-}" in
   --apply) mode=apply ;;
   --brief) mode=brief ;;
+  --gate)  mode=gate ;;
 esac
 
 [ -f "${F}/active" ] || { [ "${mode}" = "brief" ] && exit 0; echo "factory-upgrade: no .factory/active here - this is not a factory project."; exit 2; }
 
 project_version="$(jq -r '.factory_version // "unknown"' "${CONFIG}" 2>/dev/null || echo unknown)"
 
+if [ "${mode}" = "gate" ]; then
+  python3 "${HOOK_DIR}/factory-gate.py" install
+  exit $?
+fi
+
 # --- what is missing ---------------------------------------------------------
 gaps=0
 note() { gaps=$((gaps + 1)); [ "${mode}" = "brief" ] || echo "  - $*"; }
 
 missing_keys=""
-for key in verify workers max_concurrent_agents retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min autonomy_default; do
+for key in verify retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min autonomy_default; do
   jq -e --arg k "${key}" 'has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
 
@@ -59,13 +75,13 @@ for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effor
 done
 
 missing_dirs=""
-for d in verified failures no-progress changes lessons questions inflight; do
+for d in verified failures no-progress changes lessons questions; do
   [ -d "${F}/${d}" ] || missing_dirs="${missing_dirs} ${d}"
 done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP"; do
+  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/" ".factory/schedule/" ".factory/start-check" ".factory/rules/" ".factory/monitor/" ".factory/mutation/" ".factory/scans/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -77,17 +93,36 @@ if ! FACTORY_ROOT="${ROOT}" bash "${HOOK_DIR}/factory-deny.sh" >/dev/null 2>&1; 
   missing_deny=" permissions.deny"
 fi
 
+# The rules an unattended run needs in permissions.allow: a night run is
+# started with --permission-prompts none, so whatever would ask is refused.
+# factory-allow.py holds the list and does the merge.
+missing_allow=""
+if ! FACTORY_ROOT="${ROOT}" python3 "${HOOK_DIR}/factory-allow.py" >/dev/null 2>&1; then
+  missing_allow=" permissions.allow"
+fi
+
+# The gate: the shim (current), a template an older factory wrote (--apply
+# makes it the shim), or the project's own (its protections are reported).
 missing_gate=""
-if [ -f "${GATE}" ]; then
+gate_replace=""
+gate_kind="$(python3 "${HOOK_DIR}/factory-gate.py" classify 2>/dev/null || echo custom)"
+case "${gate_kind}" in
+  shim) ;;
+  absent) missing_gate=" (no gates/verify.sh at all)"; gate_replace=yes ;;
+  template*) missing_gate=" the gate engine - it is the template factory ${gate_kind#template } wrote"; gate_replace=yes ;;
+esac
+if [ -z "${gate_replace}" ] && [ "${gate_kind}" != shim ]; then
   grep -q 'count_tests'        "${GATE}" || missing_gate="${missing_gate} count_tests"
   grep -q 'guard_test_census'  "${GATE}" || missing_gate="${missing_gate} guard_test_census"
   grep -q 'guard_acceptance'   "${GATE}" || missing_gate="${missing_gate} guard_acceptance"
   grep -q 'record_failure'     "${GATE}" || missing_gate="${missing_gate} record_failure"
   grep -q 'rm -f "${ROOT}/.factory/verified' "${GATE}" || missing_gate="${missing_gate} marker-invalidation"
-  grep -q 'tree=' "${GATE}"            || missing_gate="${missing_gate} tree-fingerprint"
   grep -q 'isolate()' "${GATE}"        || missing_gate="${missing_gate} isolate(optional)"
-else
-  missing_gate=" (no gates/verify.sh at all)"
+fi
+
+old_protocol=""
+if [ -f "${ROOT}/CLAUDE.md" ] && grep -q '^## Factory Protokolü[[:space:]]*$' "${ROOT}/CLAUDE.md"; then
+  old_protocol=yes
 fi
 
 missing_sections=""
@@ -104,15 +139,23 @@ done
 [ -n "${missing_dirs}" ]     && note ".factory/ is missing:${missing_dirs}"
 [ -n "${missing_ignore}" ]   && note ".gitignore is missing:${missing_ignore}"
 [ -n "${missing_deny}" ]     && note ".claude/settings.json is missing hard-ban rules in:${missing_deny}"
+[ -n "${missing_allow}" ]    && note ".claude/settings.json is missing the rules an unattended run needs in:${missing_allow}"
 [ -n "${missing_gate}" ]     && note "gates/verify.sh is missing:${missing_gate}"
 [ -n "${missing_sections}" ] && note "task files with no '## Files touched' / '## Attempts':${missing_sections}"
+[ -n "${old_protocol}" ]     && note "CLAUDE.md still carries the old '## Factory Protokolü' section (every agent reads it on every turn)"
 [ "${project_version}" = "${HARNESS}" ] || note "initialised by factory ${project_version}, harness is now ${HARNESS}"
 
 # --- brief: one line for the session briefing --------------------------------
 if [ "${mode}" = "brief" ]; then
   [ "${gaps}" -eq 0 ] && exit 0
-  echo "This project was set up by factory ${project_version}; the harness is ${HARNESS}, and ${gaps} thing(s) it writes into a project are out of date. Run /factory-upgrade - it is additive and takes seconds."
+  echo "This project was set up by factory ${project_version}; the harness is ${HARNESS}, and ${gaps} thing(s) it writes into a project are out of date. Run /factory:upgrade - it is additive and takes seconds."
   exit 0
+fi
+
+# A gate of the project's own that carries every protection is not a gap - it
+# is a choice - but the way over to the engine is worth one line.
+if [ "${gate_kind}" = custom ] && [ -z "${missing_gate}" ]; then
+  echo "  (gates/verify.sh is the project's own and stays as it is. The gate engine is factory-check: making gates/verify.sh the shim and moving what it does of its own into gates/extra.sh lets the gate upgrade with the plugin.)"
 fi
 
 if [ "${gaps}" -eq 0 ]; then
@@ -122,8 +165,12 @@ fi
 
 if [ "${mode}" = "report" ]; then
   echo
-  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections."
-  [ -n "${missing_gate}" ] && echo "The gate is never touched by --apply: run /factory-init in this project and it will offer to merge the missing parts into gates/verify.sh, keeping everything the file already does."
+  echo "UPGRADE ${gaps} gap(s). 'factory-upgrade.sh --apply' adds the config keys, directories, gitignore lines, deny rules and task sections, and replaces the old CLAUDE.md protocol with its pointer."
+  if [ -n "${gate_replace}" ]; then
+    echo "--apply makes gates/verify.sh the shim that runs factory-check, the plugin's gate engine; a template it replaces is kept in .factory/gate-legacy/verify.sh."
+  elif [ -n "${missing_gate}" ]; then
+    echo "gates/verify.sh is the project's own and --apply leaves it alone. The gate engine is factory-check: make gates/verify.sh the shim (exec factory-check \"\$@\") and move what it does of its own into gates/extra.sh, which every check runs last."
+  fi
   exit 1
 fi
 
@@ -147,8 +194,6 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
     {
       factory_version: "unknown",
       verify: "gates/verify.sh",
-      workers: 2,
-      max_concurrent_agents: 3,
       retry_limit: 2,
       min_tests: 1,
       gate_mode: "staged",
@@ -193,6 +238,11 @@ if [ -n "${missing_deny}" ]; then
   applied=$((applied + 1))
 fi
 
+if [ -n "${missing_allow}" ]; then
+  FACTORY_ROOT="${ROOT}" python3 "${HOOK_DIR}/factory-allow.py" --apply | sed 's/^/  /'
+  applied=$((applied + 1))
+fi
+
 if [ -n "${missing_sections}" ]; then
   for id in ${missing_sections}; do
     f="$(ls "${ROOT}"/tasks/*/"${id}".md 2>/dev/null | head -1)"
@@ -202,6 +252,59 @@ if [ -n "${missing_sections}" ]; then
   done
   echo "  added the missing sections to:${missing_sections}"
   applied=$((applied + 1))
+fi
+
+if [ -n "${old_protocol}" ]; then
+  claude_was_clean=no
+  if git -C "${ROOT}" ls-files --error-unmatch -- CLAUDE.md >/dev/null 2>&1 \
+     && [ -z "$(git -C "${ROOT}" status --porcelain -- CLAUDE.md 2>/dev/null)" ]; then
+    claude_was_clean=yes
+  fi
+  # The section runs from its heading to the next level-1 or level-2 heading, or
+  # to the end of the file; its own subsections are level 3.
+  if FACTORY_POINTER="$(cat <<'POINTER'
+<!-- factory: written by /factory:init, kept current by /factory:upgrade -->
+## Factory
+While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:run` builds the approved backlog and `/factory:status` shows the board.
+<!-- /factory -->
+POINTER
+)" awk -v keep="${F}/claude-md-protocol.old.md" '
+      BEGIN { pointer = ENVIRON["FACTORY_POINTER"] }
+      !inside && /^## Factory Protokolü[[:space:]]*$/ { inside = 1; print pointer; print $0 > keep; next }
+      inside && /^##?[ 	]/ { inside = 0 }
+      inside { print > keep; next }
+      { print }' "${ROOT}/CLAUDE.md" > "${ROOT}/CLAUDE.md.tmp.$$" \
+     && mv -f "${ROOT}/CLAUDE.md.tmp.$$" "${ROOT}/CLAUDE.md"; then
+    echo "  replaced the old CLAUDE.md protocol with the pointer (the old text is in .factory/claude-md-protocol.old.md)"
+    applied=$((applied + 1))
+    if [ "${claude_was_clean}" = yes ]; then
+      git -C "${ROOT}" add -- CLAUDE.md >/dev/null 2>&1 \
+        && git -C "${ROOT}" commit -q -m "factory: CLAUDE.md protocol replaced by its pointer" -m "Factory-Upgrade: ${HARNESS}" -- CLAUDE.md >/dev/null 2>&1 \
+        && echo "  committed CLAUDE.md"
+    fi
+  else
+    rm -f "${ROOT}/CLAUDE.md.tmp.$$"
+  fi
+fi
+
+if [ -n "${gate_replace}" ]; then
+  gate_was_clean=no
+  if git -C "${ROOT}" ls-files --error-unmatch -- gates/verify.sh >/dev/null 2>&1 \
+     && [ -z "$(git -C "${ROOT}" status --porcelain -- gates/verify.sh 2>/dev/null)" ]; then
+    gate_was_clean=yes
+  fi
+  if line="$(python3 "${HOOK_DIR}/factory-gate.py" install)"; then
+    echo "  ${line}"
+    applied=$((applied + 1))
+    missing_gate=""
+    # gates/ is what a run is judged by: an upgrade that left it uncommitted
+    # would read as a changed gate at the next run's first check.
+    if [ "${gate_was_clean}" = yes ] \
+       && git -C "${ROOT}" add -- gates/verify.sh >/dev/null 2>&1 \
+       && git -C "${ROOT}" commit -q -m "factory: gates/verify.sh runs the plugin's gate engine" -m "Factory-Upgrade: ${HARNESS}" -- gates/verify.sh >/dev/null 2>&1; then
+      echo "  committed gates/verify.sh"
+    fi
+  fi
 fi
 
 # Stamp the version even when nothing else was missing, so the next check is
@@ -221,7 +324,7 @@ fi
 echo "UPGRADE APPLIED: ${applied} area(s) brought up to factory ${HARNESS}."
 if [ -n "${missing_gate}" ]; then
   echo "STILL BEHIND - gates/verify.sh is missing:${missing_gate}"
-  echo "The gate is the project's own file and is never rewritten by this script. Run /factory-init here: it reads the existing gate, reports exactly which protections it lacks and what each one would have caught, and merges in only the missing parts once you approve. Until then the config still says ${project_version}."
+  echo "gates/verify.sh is the project's own file and is never rewritten by this script. The gate engine is factory-check: make gates/verify.sh the shim (exec factory-check \"\$@\") and move what it does of its own into gates/extra.sh, which every check runs last - or run /factory:init here, which reads the gate and says what it lacks. Until then the config still says ${project_version}."
   exit 1
 fi
 exit 0

@@ -30,6 +30,10 @@ and nothing about that is visible from the board.
      questions inbox, no lessons, no change archive
    - a task file with no `## Files touched` cannot be committed by
      `factory-commit`: the commit takes exactly those paths
+   - missing `permissions.allow` rules mean a night run (`factory-next`,
+     started with `--permission-prompts none`) is refused the commands it
+     needs - the factory's own, the project's build and test, read-only git -
+     and stops on the first one instead of waiting for an answer
    - a gate missing a guard is the serious one. Name what each absent guard
      would have caught, in one line each.
 
@@ -41,11 +45,15 @@ and nothing about that is visible from the board.
 
    This only adds: missing config keys at their defaults (an existing value is
    never overwritten), missing directories, missing gitignore lines, missing
-   task sections. It never rewrites the gate, a config value, or a task body.
+   task sections, missing `permissions.deny` and `permissions.allow` rules in
+   `.claude/settings.json` (the rules already there stay, in their order). It
+   never rewrites the gate, a config value, or a task body. If it prints
+   `ALLOW NOTE` lines, those configured commands run through a shell or a
+   launcher and got no rule: show them to me, a rule for each is my call.
 
 3b. **The `check` block.** If `.factory/config.json` has no `check.units` (the
    upgrade adds `check.claude_md_max_lines` on its own, so a bare `check` block
-   is not a configured one), `/factory:fast` judges every task by running the whole suite. Read the project's structure -
+   is not a configured one), `/factory:run` judges every task by running the whole suite. Read the project's structure -
    the packages, projects or modules its own build tool declares - and propose
    a `check` block as `/factory:init` Step 2 describes it: `units` with their
    paths, dependencies and test commands, a `format` command, a `lint` scoped

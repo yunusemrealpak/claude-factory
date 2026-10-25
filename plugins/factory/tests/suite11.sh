@@ -4,6 +4,7 @@
 # retrospective is not locked out, and an unclassified gate result keeps a hint.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 PLUGIN="$(cd "$H/.." && pwd)"
 WORK="${FACTORY_TEST_DIR:-$(mktemp -d)}"
 export PATH="${PLUGIN}/bin:$PATH"
@@ -17,7 +18,7 @@ REMOTE="$WORK/s11-remote.git"; rm -rf "$REMOTE"; git init -q --bare -b main "$RE
 P="$WORK/s11-proj"; rm -rf "$P"; mkdir -p "$P"; cd "$P" || exit 1
 git init -q -b main .; git config user.email dev@example.com; git config user.name dev
 git remote add origin "$REMOTE"
-mkdir -p tasks/backlog tasks/in-progress tasks/done .factory/inflight
+mkdir -p tasks/backlog tasks/in-progress tasks/done .factory
 : > .factory/active; printf '.factory/\n' > .gitignore
 echo '{"verify":"gates/verify.sh","delivery":{"base":"main","max_unpushed":3}}' > .factory/config.json
 printf -- '---\nid: C1-01\ntitle: t\nmodule: core\ndepends_on: []\nacceptance: true\nneeds_human: false\nreview: on-red\nretries: 0\nowner:\nstage: backlog\nstage_since:\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C1-01.md
@@ -94,7 +95,8 @@ hb bash 'git push origin main' >/dev/null; rc=$?
 check "a ban that is not optional stays banned" '[ $rc -eq 3 ]'
 bash "$H/factory-deny.sh" --apply >/dev/null
 check "a re-run of factory-deny does not put it back" '! jq -e ".permissions.deny | index(\"Bash(fastlane *)\")" .claude/settings.json >/dev/null'
-check "the hard-block version carries the allowed set" '[ "$(bash "$H/factory-hardblock.sh" version "$B2")" = "1+store-deploy" ]'
+HBV="$(sed -n 's/^hard_blocks_version:[[:space:]]*//p' "$H/hard-blocks.txt" | head -1)"
+check "the hard-block version carries the allowed set" '[ -n "$HBV" ] && [ "$(bash "$H/factory-hardblock.sh" version "$B2")" = "$HBV+store-deploy" ]'
 hb bash 'factory-bans allow git-tag' >/dev/null; rc=$?
 check "an agent may not change the choice" '[ $rc -eq 3 ]'
 bash "$H/factory-bans.sh" forbid store-deploy >/dev/null

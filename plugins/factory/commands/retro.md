@@ -1,6 +1,6 @@
 ---
 description: Retrospective on the factory itself - cluster recorded failures into mechanisms and propose minimal harness changes for approval
-argument-hint: [project dir, defaults to cwd]
+argument-hint: "[project dir, defaults to cwd]"
 disable-model-invocation: true
 ---
 
@@ -52,7 +52,7 @@ cause.
 
 Two signatures belong to one mechanism when the same harness change would have
 prevented both. `error CS0246: type or namespace not found` in three different
-modules is one mechanism (the implementer is not being told where contracts
+modules is one mechanism (the builder is not being told where contracts
 live), not three failures.
 
 Rank mechanisms by **breadth first, then cost**: a signature spanning several
@@ -74,7 +74,7 @@ names the smallest surface that fixes it:
 | what an agent is told | `this plugin's `agents/`` |
 | what the gate refuses | `<project>/gates/verify.sh` |
 | how tasks are written | `/factory:init` |
-| how the loop routes | `/factory:run` |
+| how the loop routes | the plugin's `workflows/loop.js` and `factory-settle` |
 | limits, commands, isolation, risk paths | `<project>/.factory/config.json` |
 | project-specific rules | `<project>/CLAUDE.md` |
 | what one module's tasks must know | `<project>/.factory/lessons/<module>.md` - Step 3b, not here |
@@ -93,9 +93,8 @@ Rules for a proposal:
   A proposal with no trace behind it is an opinion, and opinions do not belong
   in a retrospective built on records.
 
-Two things are explicitly out of scope. Do not propose raising `workers` or
-`max_concurrent_agents`: those are set where they are for the machine's sake,
-not by accident. Do not propose new instructions for an agent prompt that
+Two things are explicitly out of scope. Do not propose raising `fast.workers`:
+it is set where it is for the machine's sake, not by accident. Do not propose new instructions for an agent prompt that
 already says the thing - check first, and if the rule exists but is not being
 followed, that is a different diagnosis with a different fix.
 
@@ -105,13 +104,13 @@ by` another task, the gate was most likely judging one task by another's
 half-written work. The proposal for that mechanism is `"gate_isolation": true`
 in the config - plus `isolation_links` for what the stack needs to build
 without reinstalling (`node_modules`, a `.venv`). A path `listed by no task` is
-different: usually the task broke a file it did not list, which is an
-implementer finding, not an isolation one.
+different: usually the task broke a file it did not list, which is a
+builder finding, not an isolation one.
 
 ## Step 3b - Lessons
 
 Separately from the harness proposals, propose at most five **lessons**. A
-lesson is a project fact an implementer would have needed before starting:
+lesson is a project fact a builder would have needed before starting:
 "`dotnet test` needs `--filter Category!=Integration` unless the compose
 database is up", "new handlers are registered in `Modules/<X>/Registration.cs`".
 Its material is the digest's "Red tasks that went green" section - the
@@ -129,7 +128,28 @@ Its material is the digest's "Red tasks that went green" section - the
   `CLAUDE.md` and the agent prompts first.
 - **Lessons that did not work.** A lesson in force whose evidence signature
   still has red runs since it was added did not do its job: propose rewording
-  or retiring it, not a second lesson next to it.
+  or retiring it, not a second lesson next to it. `factory-lesson add`
+  refuses a lesson that overlaps one already in the file (same module and two
+  of: the same category, a path in common, the same command, half the same
+  words - or 80% the same words) and names the one to reword with
+  `factory-lesson update <module> <n> <evidence> "<lesson>"`.
+- **Categorised.** Give each lesson one category: `build`, `test`, `tooling`,
+  `convention`, `environment` or `dependency` (`--category`).
+- **With an end, where it has one.** A lesson about a file, or about a
+  workaround that a commit put in, names it: `--retire-when <path>` or
+  `--retire-when <sha>`. "Lessons to retire" in the digest
+  (`factory-lesson check`) lists every lesson whose path is gone or whose
+  commit HEAD no longer reaches: propose retiring those.
+- **A rule, when a lesson was not enough.** When builders kept making the
+  same mistake with the lesson in force - the signature still recurs, the
+  command is still run - propose a rule: `.factory/rules/<name>.rule`, which
+  the hooks module holds every builder's call to. `match: bash` (the shell
+  command), `path` (the file written, from the root) or `content` (what is
+  written), a regex, `action: warn` (the builder is reminded, the call runs)
+  or `block` (the call is refused; only for what is never right here), a
+  one-line message and the evidence. At most two per retrospective and ten in
+  all; a rule never applies to the factory's own commands or the task files.
+  "Rules in force" shows how often each one fired.
 
 ## Step 4 - Write it down, change nothing
 
@@ -152,8 +172,9 @@ Expected: <the number that should move, and where it stands now>
 ## Mechanism 2 - ...
 
 ## Lesson proposals
-- L1 [module: <module>] <the lesson, one line> - evidence: <task ids, sig-hashes>
-- L2 ...
+- L1 [module: <module>; category: <category>] <the lesson, one line> - evidence: <task ids, sig-hashes>
+- L2 [retire: <module> <n>] <the lesson> - <path or sha> is gone
+- L3 [rule: <name>; match: bash|path|content; action: warn|block] /<regex>/ <message> - evidence: <...>
 
 ## Checked from the previous retrospective
 - <proposal from last time>: <did the number move? by how much?>
@@ -176,7 +197,10 @@ writes the report):
   `.factory/retro-due` exists (30 new failure signatures, or a week with runs
   in it), and writes a `<date>.proposals.json` next to the report.
 - `factory-retro-apply apply <file>` is the only thing that applies it, and it
-  applies only: a lesson (evidence checked on disk), a config patch that does
+  applies only: a lesson (evidence checked on disk; a rewording of one in
+  force), the retirement of a lesson `factory-lesson check` flags, a rule
+  (two per retrospective, ten in all, never one in the way of checking or
+  settling), a config patch that does
   not loosen the gate (`gate_isolation` on, `isolation_links` gained,
   `risk_paths` widened, `min_tests` raised, `retry_limit` lowered,
   `fast.risk_review` before, `fast.audit` on), and at most one CLAUDE.md
@@ -202,10 +226,16 @@ Each approved lesson goes in with the script, one call per lesson, its text
 verbatim:
 
 ```bash
-factory-lesson add <module> <evidence> "<lesson>"
+factory-lesson add <module> <evidence> "<lesson>" --category <category> [--retire-when <path or sha>]
+factory-lesson update <module> <n> <evidence> "<lesson>"    # a rewording
+factory-lesson remove <module> <n>                          # a retirement
 ```
 
 `<evidence>` is comma-separated without spaces, e.g. `C2-03,sig-4f1a9c0e2b7d`.
+An approved rule goes in through the validator, never by hand: write it as a
+`rule` proposal (as the retro agent's are) in
+`.factory/retro/<date>.proposals.json` and run `factory-retro-apply apply` on
+it.
 If the script refuses - evidence not on disk, text too long, module file full -
 show me its message and wait: a full file means I pick a lesson to retire
 (`factory-lesson list <module>`, then `remove <module> <number>`), never you.

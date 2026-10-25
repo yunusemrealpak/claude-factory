@@ -3,6 +3,7 @@
 # check that tells an old project it is behind.
 set -u
 H="$(cd "$(dirname "$0")/../hooks" && pwd)"
+. "$H/factory-compat.sh"
 BASE="$(cd "$(dirname "$0")" && pwd)"
 EXTRACT="$BASE/extract.py"
 # Sandboxes are built under here, never beside the suite itself.
@@ -88,22 +89,6 @@ printf 'g\n' | bash "$H/factory-change.sh" open C2 plain chore - >/dev/null 2>&1
 check "no acceptance command: the change still closes on its tasks" 'bash "$H/factory-change.sh" sync C2 | grep -qE "^(closed|CLOSED-NOW) C2-plain" && [ -f .factory/changes/C2-plain/closed ]'
 check "accept says there is nothing to run" 'bash "$H/factory-accept.sh" C2 | grep -q "^ACCEPT NONE C2"'
 
-echo "=== the run does not end on an unrun acceptance"
-cd "$A" || exit 1
-mktask "$A" backlog C2-04
-mv tasks/backlog/C2-04.md tasks/done/
-rm -f .factory/changes/C2-kasa/closed .factory/changes/C2-kasa/acceptance
-printf 's1' > .factory/run-owner
-stop_in() { jq -cn --arg c "$A" '{cwd:$c, session_id:"s1", hook_event_name:"Stop", stop_hook_active:false}'; }
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "an acceptance that never ran holds the session" 'printf "%s" "$out" | jq -e ".decision==\"block\"" >/dev/null && printf "%s" "$out" | jq -r ".reason" | grep -q "factory-accept"' "$out"
-check "the claim is not released while it is held" '[ -s .factory/run-owner ]'
-rm -f src/wired.txt
-bash "$H/factory-accept.sh" C2 >/dev/null 2>&1
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "a red verdict is reported, not looped on" '! printf "%s" "$out" | jq -e ".decision" >/dev/null 2>&1 && printf "%s" "$out" | jq -r ".systemMessage" | grep -q "Waiting on a change acceptance"' "$out"
-check "the claim is released once it has been run" '[ ! -s .factory/run-owner ]'
-
 echo "=== bisect"
 B="$WORK/bisect"; rm -rf "$B"; mkdir -p "$B/src" "$B/.factory" "$B/tasks/done"; cd "$B" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
@@ -157,7 +142,7 @@ check "it names the missing gate guards" 'printf "%s" "$out" | grep -q "gates/ve
 check "it names the task file with no Files touched" 'printf "%s" "$out" | grep -q "C2-01"' "$out"
 check "the report changes nothing" '[ "$(jq -r ".factory_version // \"none\"" .factory/config.json)" = "none" ]'
 brief="$(bash "$H/factory-upgrade.sh" --brief 2>&1)"
-check "the session brief gets one line about it" 'printf "%s" "$brief" | grep -q "Run /factory-upgrade"' "$brief"
+check "the session brief gets one line about it" 'printf "%s" "$brief" | grep -q "Run /factory:upgrade"' "$brief"
 
 out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
 check "apply adds what it safely can" 'printf "%s" "$out" | grep -q "^UPGRADE APPLIED"' "$out"
@@ -167,14 +152,14 @@ check "the missing directories exist" '[ -d .factory/questions ] && [ -d .factor
 check "the gitignore learned the new paths" 'grep -q ".factory/events.jsonl" .gitignore && grep -q "node_modules/" .gitignore'
 check "the old task file got its sections" 'grep -q "## Files touched" tasks/backlog/C2-01.md && grep -q "## Attempts" tasks/backlog/C2-01.md'
 check "apply still refuses to touch the gate" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "STILL BEHIND - gates/verify.sh is missing"' "$out"
-check "it points at /factory-init for the gate" 'printf "%s" "$out" | grep -q "factory-init"' "$out"
+check "it points at /factory:init for the gate" 'printf "%s" "$out" | grep -q "/factory:init"' "$out"
 check "the version stamp does not move while the gate is behind" '[ "$(jq -r ".factory_version" .factory/config.json)" != "${harness}" ]' "$(jq -r .factory_version .factory/config.json)"
 
 # a current project: nothing to say
 C="$WORK/current"; rm -rf "$C"; mkdir -p "$C/gates" "$C/tasks/backlog"; cd "$C" || exit 1
-mkdir -p .factory/verified .factory/failures .factory/no-progress .factory/changes .factory/lessons .factory/questions .factory/inflight
+mkdir -p .factory/verified .factory/failures .factory/no-progress .factory/changes .factory/lessons .factory/questions
 : > .factory/active
-python3 "$EXTRACT" gates/verify.sh >/dev/null
+cp "$H/gate-shim.sh" gates/verify.sh
 jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers:2, max_concurrent_agents:3,
   retry_limit:2, min_tests:1, gate_mode:"staged", gate_isolation:false, isolation_links:[], risk_paths:["*.sql"],
   agent_stale_after_min:45, autonomy_default:"merge",
@@ -183,13 +168,71 @@ jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers
   fast:{workers:4,risk_review:"after",audit:true,effort_build:"medium",effort_escalate:"high",effort_review:"high",effort_audit:"high"},
   check:{claude_md_max_lines:200,untracked_guard:true},
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n' > .gitignore
+printf '.factory/verified/\n.factory/run.lock\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/reviews/\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit/\n.factory/attempts/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/waiting/\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n.factory/schedule/\n.factory/start-check\n.factory/rules/\n.factory/monitor/\n.factory/mutation/\n.factory/scans/\n' > .gitignore
 FACTORY_ROOT="$C" bash "$H/factory-deny.sh" --apply >/dev/null
+FACTORY_ROOT="$C" python3 "$H/factory-allow.py" --apply >/dev/null
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
 check "a current project reports nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"
 check "and says nothing in the session brief" '[ -z "$(bash "$H/factory-upgrade.sh" --brief)" ]'
-check "the current gate template carries every guard" '! printf "%s" "$out" | grep -q "gates/verify.sh is missing"' "$out"
+check "a project whose gate is the shim reports no gate gap" '! printf "%s" "$out" | grep -q "gates/verify.sh"' "$out"
+A="$WORK/allowgap"; rm -rf "$A"; cp -R "$C" "$A"; cd "$A" || exit 1
+jq '.permissions.allow -= ["Bash(factory-settle *)"]' .claude/settings.json > "$WORK/allowgap.json" && mv "$WORK/allowgap.json" .claude/settings.json
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
+check "a rule an unattended run needs, missing, is a gap" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "missing the rules an unattended run needs in: permissions.allow"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "...that apply closes, the deny rules kept" 'printf "%s" "$out" | grep -q "ALLOW APPLIED: 1 rule(s)" && FACTORY_ROOT="$A" python3 "$H/factory-allow.py" >/dev/null 2>&1 && FACTORY_ROOT="$A" bash "$H/factory-deny.sh" >/dev/null 2>&1' "$out"
+cd "$C" || exit 1
+
+echo "=== 3.3: the gate becomes the shim"
+M="$WORK/migrate"; rm -rf "$M"; cp -R "$C" "$M"; cd "$M" || exit 1
+python3 "$EXTRACT" gates/verify.sh > "$WORK/extract.out"
+check "the old template is still there for the projects that run it" 'grep -q "^lines: 514$" "$WORK/extract.out" && grep -q "guard_test_census" gates/verify.sh' "$(cat "$WORK/extract.out")"
+cp gates/verify.sh "$WORK/template.sh"
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+git add -A; git commit -qm base
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
+check "a gate that is the template an older factory wrote is a gap" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "the template factory 2.5-3.2 wrote" && printf "%s" "$out" | grep -q "apply makes gates/verify.sh the shim"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "apply puts the shim in its place" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "GATE REPLACED 2.5-3.2" && cmp -s gates/verify.sh "$H/gate-shim.sh" && [ -x gates/verify.sh ]' "$out"
+check "...keeps the old file" 'cmp -s .factory/gate-legacy/verify.sh "$WORK/template.sh"' "$out"
+check "...and commits the gate, so the next run does not read it as changed" '[ -z "$(git status --porcelain -- gates)" ] && git log -1 --format=%B | grep -q "^Factory-Upgrade: "' "$(git log -1 --format=%B; git status --porcelain)"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "a second apply has nothing to do" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^UPGRADE NONE"' "$out"
+out="$(bash gates/verify.sh 2>&1)"; rc=$?
+check "the shim hands over to factory-check" '[ $rc -eq 2 ] && printf "%s" "$out" | grep -q "Factory fast check"' "$out"
+{ cat "$WORK/template.sh"; printf '# our own tweak
+'; } > gates/verify.sh; git add gates; git commit -qm "our gate"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "a gate with one line of the project's own is kept" 'cmp -s gates/verify.sh <({ cat "$WORK/template.sh"; printf "# our own tweak\n"; }) && printf "%s" "$out" | grep -q "is the project.s own and stays as it is" && printf "%s" "$out" | grep -q "gates/extra.sh"' "$out"
+rm -f gates/verify.sh
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"; rc=$?
+check "init writes the shim where there is no gate" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "^GATE WRITTEN" && cmp -s gates/verify.sh "$H/gate-shim.sh"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"
+check "...and says so when it is already there" 'printf "%s" "$out" | grep -q "^GATE CURRENT"' "$out"
+printf 'echo mine\r\n' > gates/verify.sh; cat "$WORK/template.sh" | sed 's/$/\r/' > gates/verify.sh
+out="$(bash "$H/factory-upgrade.sh" --gate 2>&1)"
+check "a template checked out with CRLF line ends is still recognised" 'printf "%s" "$out" | grep -q "^GATE REPLACED"' "$out"
+
+echo "=== the old CLAUDE.md protocol becomes a pointer"
+PR="$WORK/protocol"; rm -rf "$PR"; cp -R "$C" "$PR"; cd "$PR" || exit 1
+git init -q -b main; git config user.email t@example.invalid; git config user.name t
+{
+  printf '# My project\n\nOur own rule: tabs, not spaces.\n\n'
+  printf '## Factory Protokolü\n\nBu projede `.factory/active` dosyası varken...\n\n### Commit kuralı\nCommit i yalnızca entegratör atar.\n\n### Lead kod yazmaz\nLead yazmaz.\n\n'
+  printf '## Protocol (added by retro)\n\n- keep migrations reversible\n\n## Our API\n\nREST only.\n'
+} > CLAUDE.md
+git add -A; git commit -qm base
+out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
+check "an old protocol section is reported" '[ $rc -eq 1 ] && printf "%s" "$out" | grep -q "old .## Factory Protokolü. section"' "$out"
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"; rc=$?
+check "apply replaces it with the pointer" '[ $rc -eq 0 ] && grep -q "^<!-- factory: written by /factory:init" CLAUDE.md && grep -q "^<!-- /factory -->" CLAUDE.md && ! grep -q "Protokolü\|entegratör\|Lead kod" CLAUDE.md' "$(cat CLAUDE.md)"
+check "...and leaves everything else as it was" 'grep -q "^Our own rule: tabs, not spaces." CLAUDE.md && grep -q "^- keep migrations reversible" CLAUDE.md && grep -q "^## Our API" CLAUDE.md && grep -q "^REST only." CLAUDE.md' "$(cat CLAUDE.md)"
+check "the old text is kept, and the change is its own commit" 'grep -q "entegratör" .factory/claude-md-protocol.old.md && git log -1 --format=%B | grep -q "^Factory-Upgrade: " && [ -z "$(git status --porcelain -- CLAUDE.md)" ]' "$(git log -1 --stat)"
+check "the pointer is the one init writes" 'awk "/^<!-- factory: written/,/^<!-- \/factory -->/" CLAUDE.md > p1 && awk "/^<!-- factory: written/,/^<!-- \/factory -->/" "$H/../commands/init.md" > p2 && cmp -s p1 p2' "$(diff p1 p2)"
+rm -f p1 p2
+out="$(bash "$H/factory-upgrade.sh" --apply 2>&1)"
+check "a second apply finds nothing to replace" '[ "$(grep -c "^<!-- factory: written" CLAUDE.md)" = 1 ] && ! printf "%s" "$out" | grep -q "replaced the old CLAUDE.md"' "$out"
 
 echo
 echo "passed=$pass failed=$fail"

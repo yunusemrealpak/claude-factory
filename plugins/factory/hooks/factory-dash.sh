@@ -20,6 +20,7 @@ set -uo pipefail
 # toolkit works from any install path - a plugin directory changes on
 # every update.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HOOK_DIR/factory-compat.sh"
 
 ROOT="$PWD"
 F="${ROOT}/.factory"
@@ -144,7 +145,8 @@ fi
 
 # --- questions --------------------------------------------------------------
 open_questions=0
-[ -d "${F}/questions" ] && open_questions="$(grep -l '^status: open' "${F}/questions"/*.md 2>/dev/null | grep -c .)"
+# An expired question is still one the developer owes: it counts.
+[ -d "${F}/questions" ] && open_questions="$(grep -lE '^status: (open|expired)$' "${F}/questions"/*.md 2>/dev/null | grep -c .)"
 
 # --- changes ----------------------------------------------------------------
 changes="$(bash "${HOOK_DIR}/factory-change.sh" list 2>/dev/null)"
@@ -186,12 +188,23 @@ needs=""
 if [ -d "${F}/questions" ]; then
   for q in "${F}/questions"/*.md; do
     [ -e "${q}" ] || continue
-    grep -q '^status: open' "${q}" || continue
+    qstatus="$(fm "${q}" status)"
+    [ "${qstatus}" = open ] || [ "${qstatus}" = expired ] || continue
     qid="$(fm "${q}" id)"; qtask="$(fm "${q}" task)"
+    qdl="$(fm "${q}" deadline | esc)"; qdef="$(fm "${q}" default | esc)"
+    if [ "${qstatus}" = expired ]; then
+      qdue="<div class=\"rec\"><b>Süresi doldu</b> (${qdl}): görev cevabını bekliyor, bloklu.</div>"
+    elif [ -n "${qdef}" ]; then
+      qdue="<div class=\"rec\">Son tarih ${qdl}: cevap gelmezse görev şununla devam eder: ${qdef}</div>"
+    elif [ -n "${qdl}" ]; then
+      qdue="<div class=\"rec\">Son tarih ${qdl}: cevap gelmezse görev bloklu kalır.</div>"
+    else
+      qdue=""
+    fi
     qtext="$(sed -n '/^## Soru/,/^## /p' "${q}" | sed '1d;/^## /d' | grep -v '^$' | head -3 | esc | tr '\n' ' ')"
     qopts="$(sed -n '/^## Seçenekler/,/^## /p' "${q}" | sed -n 's/^- //p' | esc | sed 's|^|<li>|; s|$|</li>|' | tr -d '\n')"
     qrec="$(sed -n '/^## Öneri/,$p' "${q}" | sed '1d' | grep -v '^$' | head -2 | esc | tr '\n' ' ')"
-    needs="${needs}<div class=\"q\"><div class=\"qh\">${qid} · görev ${qtask}</div><div>${qtext}</div>${qopts:+<ul>${qopts}</ul>}${qrec:+<div class=\"rec\">Ekibin önerisi: ${qrec}</div>}<div class=\"how\">Cevap: <code>factory-ask answer ${qid} \"...\"</code></div></div>"
+    needs="${needs}<div class=\"q\"><div class=\"qh\">${qid} · görev ${qtask}</div><div>${qtext}</div>${qopts:+<ul>${qopts}</ul>}${qrec:+<div class=\"rec\">Ekibin önerisi: ${qrec}</div>}${qdue}<div class=\"how\">Cevap: <code>factory-ask answer ${qid} \"...\"</code></div></div>"
   done
 fi
 if [ -d "${T}/blocked" ]; then
@@ -289,8 +302,12 @@ if [ "${last_event_age}" -ge 0 ] 2>/dev/null; then
   if [ "${last_event_age}" -lt 300 ]; then live="canlı · son hareket $(ago "${last_event_age}") önce"; live_cls="on"
   else live="son hareket $(ago "${last_event_age}") önce"; fi
 fi
-owner_state="sahipsiz"
-[ -s "${F}/run-owner" ] && owner_state="koşu sahipli"
+owner_state="koşu yok"
+if [ -f "${F}/run.lock" ]; then
+  if grep -q '"state": *"halted"' "${F}/run.lock" 2>/dev/null; then owner_state="koşu durdu"
+  elif [ -n "$(find "${F}/run.lock" -mmin -120 2>/dev/null)" ]; then owner_state="koşu sürüyor"
+  else owner_state="koşu yarım kaldı"; fi
+fi
 
 cat > "${TMP}" <<HTML
 <!doctype html>
