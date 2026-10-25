@@ -7,12 +7,12 @@
 #   FACTORY_KEEP=1 bash .../run-all.sh             keep the sandboxes to look at
 #
 # What each suite covers:
-#   1  ids, change open/sync/close, per-task commit, claim, done-guard, stop gate
+#   1  ids, change open/sync/close, per-task commit, done-guard
 #   2  risk routing, lessons, attempts-safe parsing, retro sections, gate isolation
-#   3  event log, dashboard, question inbox, status line, end-of-run message
-#   4  duplicate-gate skip, task lint, ready set
+#   3  event log, sweep and run.lock in the brief, dashboard, question inbox, status line
+#   4  task lint, the ready set (factory-plan --ready)
 #   5  change-level acceptance, commit bisect, the version/upgrade check
-#   6  the fast lane: factory-check, plan, start/land/block, /factory:fast scheduling
+#   6  factory-check, plan, start/land/block, finish
 #   7  hard bans, autonomy consent, deny merge, STOP
 #   8  delivery: per-change branch, publisher state machine against a fake gh,
 #      classes, breakers, quota line
@@ -20,6 +20,8 @@
 #  10  the outer loop: factory-next gates, worktree launch, launchd plist, modifies_tests
 #  11  3.1: the unpushed breaker, the upgrade commits its config, unclassified gate results
 #  12  shadow mode: the pre-3.3 gate template and the engine, verdict for verdict
+#  13  the one loop: the workflow's schedule (loop-cases.mjs), preflight, settle,
+#      review-submit, deliver
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
@@ -38,7 +40,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5 6 7 8 9 10 11 12; do
+for n in 1 2 3 4 5 6 7 8 9 10 11 12 13; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"

@@ -1,6 +1,6 @@
 ---
 name: retro
-description: Factory retro agent. Reads the failure evidence, proposes at most five harness changes in a proposals file and hands it to factory-retro-apply, which alone decides what may change. Dispatched by /factory:fast only when the project set retro.mode to full.
+description: Factory retro agent. Reads the failure evidence, proposes at most five harness changes in a proposals file and hands it to factory-retro-apply, which alone decides what may change. Dispatched by the factory loop workflow (/factory:run) only when the project set retro.mode to full.
 tools: Read, Grep, Glob, Bash, Write
 model: sonnet
 effort: high

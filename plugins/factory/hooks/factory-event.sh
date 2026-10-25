@@ -100,15 +100,6 @@ case "$event" in
       fi
       emit gate --argjson extra "$(jq -cn --arg id "$id" --arg v "$verdict" --arg h "$hint" \
         'if $h == "" then {task: $id, verdict: $v} else {task: $id, verdict: $v, hint: $h} end')"
-      # A gate too old to fingerprint its tree gets the fingerprint here - only
-      # when the tree the run ended on is the one it started on, so the marker
-      # never vouches for bytes the gate did not test.
-      marker="$F/verified/$id"; started="$F/gate-start/$id"
-      if [ "$verdict" = green ] && [ -f "$marker" ] && [ -s "$started" ] && ! grep -q '^tree=' "$marker"; then
-        now_tree="$(bash "$HOOK_DIR/factory-gate-skip.sh" hash "$project_dir" 2>/dev/null)"
-        [ -n "$now_tree" ] && [ "$now_tree" != unknown ] && [ "$now_tree" = "$(cat "$started")" ] && echo "tree=$now_tree" >> "$marker"
-      fi
-      rm -f "$started"
     fi
 
     # A task changing column. Every move goes through Bash, so this is the
@@ -135,9 +126,6 @@ case "$event" in
       *factory-change*open*)
         ch="$(printf '%s' "$out" | sed -n -E 's#^OPENED ([^:]+):.*#\1#p' | head -1)"
         [ -n "$ch" ] && emit change_open --argjson extra "$(jq -cn --arg c "$ch" '{change: $c}')"
-        ;;
-      *factory-claim*)
-        case "$out" in *CLAIMED*) emit claim --argjson extra '{}' ;; esac
         ;;
       *factory-ask*)
         q="$(printf '%s' "$out" | sed -n -E 's#^ASKED ([A-Za-z0-9-]+).*#\1#p' | head -1)"

@@ -28,6 +28,18 @@ hard:android-keystore	bash	-	mv a release.jks
 hard:gates-dir	bash	-	rm gates/verify.sh
 hard:verify-script	bash	-	sed -i s/a/b/ tools/verify.sh
 hard:census-baseline	bash	-	echo {} > .factory/baseline.json
+hard:factory-reviews	bash	-	echo '{"verdict":"pass"}' > .factory/reviews/T-1.json
+hard:factory-reviews	path	-	{R}/.factory/reviews/T-1.json
+hard:factory-attempts	bash	-	: > .factory/attempts/T-1
+hard:factory-waiting	bash	-	echo at=x > .factory/waiting/T-1
+hard:factory-full-check	bash	-	echo verdict=green > .factory/full-check
+hard:factory-full-check	path	-	{R}/.factory/full-check
+hard:factory-run-lock	bash	-	touch .factory/run.lock
+hard:factory-run-lock	path	-	{R}/.factory/run.lock
+clean	bash	-	cat .factory/reviews/T-1.json
+clean	bash	-	factory-review-submit T-1 --landed
+clean	bash	-	factory-settle T-1 'CHECK RESULT: GREEN'
+clean	path	-	{R}/.factory/audit/C1.md
 hard:factory-config	bash	-	echo {} >> .factory/config.json
 hard:stop-switch	bash	-	rm .factory/STOP
 hard:autonomy-consent	bash	-	echo x > {R}/.factory/autonomy.json

@@ -1,7 +1,7 @@
 ---
 description: Report factory state - task counts, active agents, blocked list and the needs-human queue
 disable-model-invocation: true
-allowed-tools: Read, Grep, Glob, Bash(ls *), Bash(cat *), Bash(find *), Bash(grep *), Bash(jq *), Bash(wc *), Bash(tail *), Bash(factory-change list), Bash(factory-ready), Bash(factory-ask list *), Bash(factory-lint --all), Bash(factory-accept * --show), Bash(factory-upgrade)
+allowed-tools: Read, Grep, Glob, Bash(ls *), Bash(cat *), Bash(find *), Bash(grep *), Bash(jq *), Bash(wc *), Bash(tail *), Bash(factory-change list), Bash(factory-plan --ready), Bash(factory-ask list *), Bash(factory-lint --all), Bash(factory-accept * --show), Bash(factory-upgrade)
 ---
 
 Report the factory state of this project. Read only - change nothing.
@@ -19,18 +19,19 @@ Report the factory state of this project. Read only - change nothing.
 3. **Ready now** and **4. waiting on dependencies**, both from one command:
 
    ```bash
-   factory-ready
+   factory-plan --ready
    ```
 
-   `READY <id> <module> <title>` is dispatchable now; `WAIT <id> needs <ids>` is
+   `READY <id> <module> <title>` is what a run would start now; `WAIT <id> needs <ids>` is
    waiting on those; `HOLD` is needs-human; `STALL` is a task the gate has
    already shown is not moving. Print them as two lists, and do not recompute
    the dependency arithmetic yourself.
 
 5. **In progress**: `id - title - owner - stage - how long in that stage`
    (from `owner`, `stage`, `stage_since`), plus whether `.factory/verified/<id>`
-   already exists. Call out any task missing `owner` or `stage`: the Stop hook
-   blocks on those.
+   already exists. Say whether a run is in progress: `.factory/run.lock` touched
+   in the last two hours and not marked `"state": "halted"`. A halted one says
+   why (`halted`), and the next `/factory:run` continues it.
 
 6. **Dispatched agents**: two records, and they are worth comparing. The task
    files say who holds what (`owner`, `stage`, `stage_since`); the event log
@@ -40,7 +41,7 @@ Report the factory state of this project. Read only - change nothing.
    List who holds what and for how long, and mark any agent silent for more
    than 7 minutes. Where the two records disagree, say so plainly rather than
    picking one: a task that claims an owner while no agent is open is a task
-   whose agent died with its session, and it needs re-dispatching.
+   whose agent died with its session; the next `/factory:run` takes it over.
 
 7. **Blocked**: `id - title - reason` (read the `## Blocked reason` section or the
    last review findings from each file), plus `retries` from the frontmatter.

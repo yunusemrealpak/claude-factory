@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Factory: close a build. NOT a hook: the /factory:fast workflow runs it once,
-at the end, whatever happened to the tasks.
+"""Factory: close a build. NOT a hook: the loop workflow runs it once, at the
+end, whatever happened to the tasks.
 
 Usage (from the project root):
-  factory-finish --tasks <id,id,...> [--no-full]
+  factory-finish --tasks <id,id,...> [--no-full] [--audit] [--halted "<why>"] [--json]
 
-Prints one JSON object and writes the same report, readable, to
-.factory/last-run.md.
+  --audit    an audit of this run is running alongside: delivery waits for it
+  --halted   the run stopped early (STOP, the quota, the infrastructure): its
+             base is kept for the next run, and the report says why
+  --json     print the whole result as JSON instead of one line
+
+Prints one line - what landed, the full check, where the report is - and writes
+the report, readable, to .factory/last-run.md.
 
 What a run reports has to come from disk, not from what its agents said about
 themselves: an agent's closing sentence is written before the review, the land
@@ -20,9 +25,16 @@ is worth more to the developer than a table of green ticks, and in a tally of
 twelve tasks it is exactly the line that gets skipped.
 
 Then the tree is judged as a whole, once: factory-check --full runs the
-project's own gate commands and compares the test census with the run's start;
-the change archive is synced and every change whose tasks are all done runs its
-own acceptance command.
+project's own gate commands and compares the test census with the run's start.
+When it is red, factory-bisect names the first task commit of the run that
+fails the tests - the place to look, without a second gate after every land.
+The change archive is synced, every change whose tasks are all done runs its
+own acceptance command, and factory-deliver hands on what is ready: only after
+the full check, and after the audit when one runs.
+
+Last, the run is closed: agents a dead session left open are swept, and
+.factory/run.lock is removed - unless the run halted or left work unbuilt, in
+which case it stays, marked halted, so the next run keeps this one's base.
 """
 import glob
 import importlib.util
@@ -63,30 +75,68 @@ def run(cmd):
     return r.returncode, (r.stdout or "") + (r.stderr or "")
 
 
-def deliver_closed(ids):
-    """A change that closed in this run is handed to the publisher, detached: it
-    waits on CI and must not hold the run's end. The pending mark is what lets a
-    later session pick it up if this one never gets to (a level that was local,
-    a sleeping laptop). The publisher itself refuses below level pr."""
+def deliver(ids, audit):
+    """A change that closed in this run goes to factory-deliver, which hands it
+    to the publisher only when the full check is green at HEAD and the audit,
+    when one runs, has spoken."""
     if not ids:
-        return
-    pub = os.path.join(F, "publish")
+        return []
+    _, out = run([sys.executable, os.path.join(HOOK_DIR, "factory-deliver.py"), "--if-ready"] + list(ids)
+                 + (["--audit"] if audit else []))
+    return [l for l in out.splitlines() if l.startswith("DELIVER")]
+
+
+def bisect(start_head):
+    """The first task commit of this run that fails the tests, when the full
+    check is red. None when there is nothing to search or it is turned off."""
     try:
-        os.makedirs(pub, exist_ok=True)
-    except OSError:
-        return
-    for cid in ids:
+        cfg = json.loads(read(os.path.join(F, "config.json")) or "{}")
+    except ValueError:
+        cfg = {}
+    if (cfg.get("finish") or {}).get("bisect", True) is False or not start_head:
+        return None
+    if not ((cfg.get("commands") or {}).get("test") or "").strip():
+        return None
+    _, n = run(["git", "rev-list", "--count", "--grep", "^Factory-Task: ", "%s..HEAD" % start_head])
+    try:
+        n = int(n.strip() or 0)
+    except ValueError:
+        n = 0
+    if n < 1:
+        return None
+    _, out = run([bash(), os.path.join(HOOK_DIR, "factory-bisect.sh"), "--max", str(n)])
+    for line in out.splitlines():
+        if line.startswith(("FIRST BAD", "BISECT CLEAN", "BISECT INCONCLUSIVE")):
+            return line.strip()
+    return "BISECT gave no answer: " + (out.strip().splitlines() or ["(no output)"])[-1][:200]
+
+
+def close_run(ids, halted):
+    """run.lock goes when the run is over. A run that halted, or left a task of
+    its own unbuilt, keeps it - marked halted - so the next run keeps its base
+    and nothing mistakes it for a run still going."""
+    lock = os.path.join(F, "run.lock")
+    left = [i for i in ids for col in ("backlog", "in-progress")
+            if os.path.isfile(os.path.join(ROOT, "tasks", col, i + ".md"))]
+    if not halted and not left:
         try:
-            if not os.path.exists(os.path.join(pub, cid + ".json")):
-                open(os.path.join(pub, cid + ".pending"), "w").close()
-            subprocess.Popen([sys.executable, os.path.join(HOOK_DIR, "factory-publish.py"), cid], cwd=ROOT,
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
+            os.remove(lock)
         except OSError:
             pass
+        return left
+    try:
+        rec = json.loads(read(lock) or "{}")
+    except ValueError:
+        rec = {}
+    if rec:
+        rec["state"] = "halted"
+        rec["halted"] = halted or "%d task(s) of this run were not built" % len(left)
+        with open(lock, "w", encoding="utf-8") as fh:
+            json.dump(rec, fh)
+    return left
 
 
-HELPER_SUFFIXES = ("land", "block", "recheck")
+HELPER_SUFFIXES = ("land", "block", "recheck", "settle")
 
 
 def pricer():
@@ -164,7 +214,7 @@ def metrics(ids, board, started):
         elif not label:
             unlabeled += usd
         if (r.get("type") or "").endswith("runner") or (tid and kind.split(" ")[0] in HELPER_SUFFIXES) \
-                or label in ("plan", "finish"):
+                or label in ("plan", "finish", "preflight"):
             helpers += usd
         if tid:
             tasks_usd[tid] = tasks_usd.get(tid, 0.0) + usd
@@ -211,10 +261,32 @@ def retro_state():
     return {"due": due, "mode": mode}
 
 
+def reviews(ids):
+    """Failed reviews on file for the run's tasks - a task that landed before its
+    review carries the verdict in .factory/reviews/<id>.json and nowhere else."""
+    out = []
+    for tid in ids:
+        try:
+            rec = json.loads(read(os.path.join(F, "reviews", tid + ".json")) or "{}")
+        except ValueError:
+            continue
+        rounds = rec.get("rounds") or []
+        if rec.get("verdict") == "owed":
+            out.append({"id": tid, "concern": "its review after landing never finished - the change is not delivered "
+                                              "until it does (the next /factory:run reviews it)"})
+        if rec.get("verdict") == "fail" and rounds:
+            for f in (rounds[-1].get("blocking") or [])[:5]:
+                out.append({"id": tid, "concern": "review failed%s: %s" % (
+                    " after landing" if rec.get("mode") == "after" else "", f)})
+    return out
+
+
 def main(argv):
     if not os.path.isfile(os.path.join(F, "active")):
-        print(json.dumps({"error": "no .factory/active here"}))
+        print(json.dumps({"error": "no .factory/active here"}) if "--json" in argv else
+              "FINISH REFUSED: no .factory/active here")
         return 1
+    halted = argv[argv.index("--halted") + 1] if "--halted" in argv and argv.index("--halted") + 1 < len(argv) else ""
     ids = []
     if "--tasks" in argv and argv.index("--tasks") + 1 < len(argv):
         ids = [i for i in re.split(r"[,\s]+", argv[argv.index("--tasks") + 1]) if i]
@@ -240,20 +312,30 @@ def main(argv):
         board.append(entry)
         for c in section(text, "Open concerns"):
             attention.append({"id": tid, "concern": c})
-        # The last review on file, when it failed - a task that landed before
-        # its review carries the verdict here and nowhere else.
-        reviews = re.findall(r"^##\s+Review\b[^\n]*\n(.*?)(?=^#{1,2}\s|\Z)", text, re.M | re.S)
-        if reviews and re.search(r"^verdict:\s*fail", reviews[-1], re.M):
-            found = [l.strip()[2:] for l in reviews[-1].splitlines() if l.strip().startswith("- ")]
+        # The last review in the task file, when it failed.
+        found_reviews = re.findall(r"^##\s+Review\b[^\n]*\n(.*?)(?=^#{1,2}\s|\Z)", text, re.M | re.S)
+        if found_reviews and re.search(r"^verdict:\s*fail", found_reviews[-1], re.M) \
+                and not os.path.exists(os.path.join(F, "reviews", tid + ".json")):
+            found = [l.strip()[2:] for l in found_reviews[-1].splitlines() if l.strip().startswith("- ")]
             for f in found[:5] or ["the review failed without listing findings"]:
                 attention.append({"id": tid, "concern": "review failed: " + f})
+    attention += reviews(ids)
 
+    try:
+        start_head = json.loads(read(os.path.join(F, "run-start.json")) or "{}").get("head")
+    except ValueError:
+        start_head = None
     full = {"verdict": "skipped", "output": "nothing landed, so there was nothing new to judge"}
+    first_bad = None
     if "--no-full" not in argv and any(b["lane"] == "done" for b in board):
         rc, out = run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "--full"])
         lines = out.splitlines()
         full = {"verdict": "green" if rc == 0 else "red",
                 "output": "\n".join(lines[-60:] if rc else [l for l in lines if l.startswith("  ") or "FULL" in l])}
+        if rc != 0:
+            first_bad = bisect(start_head)
+            if first_bad:
+                attention.insert(0, {"id": "full check", "concern": "red; " + first_bad})
 
     _, sync = run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
     acceptance = []
@@ -266,7 +348,8 @@ def main(argv):
     if acceptance:
         _, sync = run([bash(), os.path.join(HOOK_DIR, "factory-change.sh"), "sync"])
         closed_now += re.findall(r"^CLOSED-NOW\s+(C[0-9]+)-", sync, re.M)
-    deliver_closed(sorted(set(closed_now)))
+    delivery = deliver(sorted(set(closed_now)), "--audit" in argv)
+    run([bash(), os.path.join(HOOK_DIR, "factory-sweep.sh"), "run-end", ROOT])
     run([bash(), os.path.join(HOOK_DIR, "factory-dash.sh")])
 
     started = 0
@@ -276,17 +359,24 @@ def main(argv):
         pass
     m = metrics(ids, board, started)
 
+    left = close_run(ids, halted)
     result = {
         "attention": attention,
         "board": board,
         "full_check": full["verdict"],
         "full_output": full["output"],
+        "first_bad": first_bad,
         "changes": [l for l in sync.splitlines() if l.strip()],
         "acceptance": acceptance,
+        "delivery": delivery,
+        "halted": halted or None,
+        "left": left,
         "retro": retro_state(),
     }
 
     lines = ["# Last run", ""]
+    if halted:
+        lines += ["Halted: %s. The next /factory:run continues from this run's base." % halted, ""]
     if attention:
         lines += ["## Needs your attention", ""] + ["- %s: %s" % (a["id"], a["concern"]) for a in attention] + [""]
     lines += ["## Tasks", "", "| task | where it is | commit | note |", "| --- | --- | --- | --- |"]
@@ -299,10 +389,36 @@ def main(argv):
     lines += ["", "## Full check: %s" % full["verdict"], "", "```", full["output"], "```", ""]
     if acceptance:
         lines += ["## Change acceptance", ""] + ["- %s" % a["result"] for a in acceptance] + [""]
+    if delivery:
+        lines += ["## Delivery", ""] + ["- %s" % d for d in delivery] + [""]
+    if result["retro"].get("due"):
+        lines += ["A retrospective is due: /factory:retro.", ""]
     with open(os.path.join(F, "last-run.md"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines))
 
-    print(json.dumps(result))
+    if "--json" in argv:
+        print(json.dumps(result))
+        return 0
+    landed = sum(1 for b in board if b["lane"] == "done")
+    blocked = sum(1 for b in board if b["lane"] == "blocked")
+    parts = ["FINISH %d/%d landed" % (landed, len(board))]
+    if blocked:
+        parts.append("%d blocked" % blocked)
+    if left:
+        parts.append("%d not built" % len(left))
+    parts.append("full check %s" % full["verdict"] + ("; %s" % first_bad if first_bad else ""))
+    if attention:
+        parts.append("%d to look at" % len(attention))
+    for d in delivery:
+        m = re.match(r"^DELIVER (WAIT |HELD |SKIPPED )?(C[0-9]+)", d)
+        if m:
+            parts.append("%s %s" % (m.group(2), {"WAIT ": "waits", "HELD ": "held", "SKIPPED ": "already handed on"}
+                                    .get(m.group(1), "handed on")))
+    if halted:
+        parts.append("halted: %s" % halted)
+    if result["retro"].get("due"):
+        parts.append("retro due")
+    print("; ".join(parts) + " - report .factory/last-run.md")
     return 0
 
 

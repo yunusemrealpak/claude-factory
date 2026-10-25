@@ -4,8 +4,8 @@ when everything that makes unattended work safe holds. NOT a hook.
 
 Usage (from the project root):
   factory-next check                 NEXT GO <Cn> (<n> task(s)) | NEXT WAIT <why>
-  factory-next launch [--dry-run]    check, then run /factory:fast for that change
-                                     in a worktree of its own
+  factory-next launch [--dry-run]    check, then run /factory:run <change> in a
+                                     worktree of its own
   factory-next launchd [--hour H]    print the LaunchAgent plist for a nightly
                                      run (nothing is installed or loaded)
 
@@ -17,7 +17,8 @@ It goes only when, all together:
     (factory-quota check) - no reading is "wait", never "go";
   - no publish is still in flight or held, so one change is never stacked on
     another that has not landed;
-  - no run is active in this project;
+  - no run is active in this project (.factory/run.lock, fresh and not
+    marked halted);
   - an approved change (tasks in the backlog) is ready to start.
 
 The run happens in a git worktree under .factory/worktrees/, not in the
@@ -26,9 +27,12 @@ consent file travels with it: factory-autonomy re-checks it against the
 transcript it names, which still exists, so the run's level is the one the
 developer typed and not a new one.
 
-The command is `claude -p "/factory:fast" --permission-mode auto
---strict-mcp-config`: no --bare, so hooks and the module load and the run
-writes its own quota file, which makes it subject to the same breaker.
+The command is `claude -p "/factory:run <Cn>" --permission-mode auto
+--allowedTools "Workflow(factory:loop)" --strict-mcp-config`: the change it
+picked is the change it builds (on its own branch when delivery.branch is
+per-change), the loop workflow is allowed up front so a headless session never
+waits on a prompt, and there is no --bare, so hooks and the module load and the
+run writes its own quota file, which makes it subject to the same breaker.
 """
 import glob
 import json
@@ -62,6 +66,18 @@ def jread(path, default):
         return default
 
 
+def run_active():
+    """A run holds .factory/run.lock from its preflight to its finish, and its
+    checks keep the file fresh. One marked halted, or untouched for two hours,
+    is not running: the next run takes over its base."""
+    lock = os.path.join(F, "run.lock")
+    try:
+        age = time.time() - os.path.getmtime(lock)
+    except OSError:
+        return False
+    return age < 2 * 3600 and jread(lock, {}).get("state") != "halted"
+
+
 def decide():
     """(go: bool, text, change)"""
     if not os.path.isfile(os.path.join(F, "active")):
@@ -82,7 +98,7 @@ def decide():
         if st.get("state") not in TERMINAL:
             return False, "publish %s is %s%s" % (st.get("change", os.path.basename(p)), st.get("state"),
                                                   " (held)" if st.get("held") else ""), None
-    if glob.glob(os.path.join(F, "inflight", "*")) or glob.glob(os.path.join(ROOT, "tasks", "in-progress", "*.md")):
+    if run_active():
         return False, "a run is active", None
     rc, out = sh([sys.executable, os.path.join(HOOK_DIR, "factory-plan.py"), "--json"])
     try:
@@ -145,7 +161,8 @@ def cmd_launch(argv):
     if not go:
         print("NEXT WAIT " + text)
         return 1
-    argv_cmd = [CLAUDE, "-p", "/factory:fast", "--permission-mode", "auto", "--strict-mcp-config"]
+    argv_cmd = [CLAUDE, "-p", "/factory:run %s" % cid, "--permission-mode", "auto",
+                "--allowedTools", "Workflow(factory:loop)", "--strict-mcp-config"]
     if "--dry-run" in argv:
         print("NEXT GO %s\nWOULD RUN %s (in a new worktree under .factory/worktrees/)" % (text, " ".join(argv_cmd)))
         return 0
@@ -157,7 +174,7 @@ def cmd_launch(argv):
     os.makedirs(logdir, exist_ok=True)
     log = os.path.join(logdir, "next-%s.log" % time.strftime("%Y%m%d-%H%M", time.gmtime()))
     # Forward slashes: bash compares and strips this root as text.
-    env = dict(os.environ, FACTORY_ROOT=npath(path), FACTORY_NEXT="1")
+    env = dict(os.environ, FACTORY_ROOT=npath(path), FACTORY_NEXT="1", FACTORY_HEADLESS="1")
     env.pop("CLAUDE_PROJECT_DIR", None)
     with open(log, "w", encoding="utf-8") as fh:
         r = subprocess.run(runnable(argv_cmd), cwd=path, env=env, stdout=fh, stderr=subprocess.STDOUT)

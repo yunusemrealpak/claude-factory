@@ -4,21 +4,16 @@
 # Usage:
 #   factory-sweep <reason> [project-dir]
 #
-# An agent leaves two traces when it is dispatched: a marker in
-# .factory/inflight/ that holds one of the max_concurrent_agents slots, and an
-# agent_start line in the event log that the dashboard pairs with a later
-# agent_stop. Both are cleared by the agent returning - SubagentStop fires, the
-# Stop hook reconciles the markers against what the harness reports in flight.
+# An agent leaves an agent_start line in the event log when it is dispatched,
+# which the dashboard pairs with a later agent_stop. SubagentStop writes that
+# stop when the agent returns.
 #
-# Neither happens when the session is killed mid-dispatch. The process is gone,
-# so no SubagentStop ever arrives and no Stop hook ever runs: the markers hold
-# slots for agents that no longer exist, and the dashboard keeps showing them as
-# running. Reopen the session and the factory believes it has three agents at
-# work and refuses to dispatch a fourth.
+# It never arrives when the session is killed mid-run: the process is gone, and
+# the dashboard keeps showing agents at work that no longer exist.
 #
-# This is called at the three moments when nothing from before can still be
-# alive: a session starting or resuming (not compacting - that is the same
-# process continuing), a run being claimed, and a run ending.
+# This is called at the moments when nothing from before can still be alive: a
+# session starting or resuming (not compacting - that is the same process
+# continuing) with no run in progress, a run starting, and a run ending.
 set -uo pipefail
 
 # Where this script lives. Siblings are called through it, so the whole
@@ -34,12 +29,8 @@ LOG="${F}/events.jsonl"
 
 [ -f "${F}/active" ] || exit 0
 
-markers=0
-if [ -d "${F}/inflight" ]; then
-  markers="$(find "${F}/inflight" -maxdepth 1 -type f 2>/dev/null | wc -l | tr -d ' ')"
-  [ -z "${markers}" ] && markers=0
-  find "${F}/inflight" -maxdepth 1 -type f -exec rm -f {} + 2>/dev/null
-fi
+# Concurrency markers from before 3.4 hold nothing any more.
+[ -d "${F}/inflight" ] && rm -rf "${F}/inflight" 2>/dev/null
 
 # Starts with no stop, as the dashboard counts them.
 open_agents=0
@@ -56,7 +47,7 @@ if [ -f "${LOG}" ]; then
   case "${open_agents}" in ''|*[!0-9]*) open_agents=0 ;; esac
 fi
 
-if [ "${markers}" -eq 0 ] && [ "${open_agents}" -eq 0 ]; then
+if [ "${open_agents}" -eq 0 ]; then
   exit 0
 fi
 
@@ -65,12 +56,12 @@ fi
 if [ -f "${LOG}" ] || [ -d "${F}" ]; then
   mkdir -p "${F}"
   jq -cn --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" --argjson epoch "$(date +%s)" \
-     --arg reason "${reason}" --argjson agents "${open_agents}" --argjson markers "${markers}" \
-     '{ts: $ts, epoch: $epoch, kind: "sweep", reason: $reason, agents: $agents, markers: $markers}' \
+     --arg reason "${reason}" --argjson agents "${open_agents}" \
+     '{ts: $ts, epoch: $epoch, kind: "sweep", reason: $reason, agents: $agents}' \
      >> "${LOG}" 2>/dev/null
 fi
 
 ( cd "${project_dir}" && bash "${HOOK_DIR}/factory-dash.sh" >/dev/null 2>&1 )
 
-echo "SWEPT ${open_agents} agent(s) and ${markers} concurrency slot(s) left behind by a session that ended (${reason})."
+echo "SWEPT ${open_agents} agent(s) left behind by a session that ended (${reason})."
 exit 0

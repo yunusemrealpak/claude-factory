@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Factory: the board as a build plan. NOT a hook: the /factory:fast workflow
-reads it before it starts anything.
+"""Factory: the board as a build plan. NOT a hook: factory-preflight builds the
+run's plan with it, and /factory:init measures a task list with it.
 
 Usage (from the project root):
   factory-plan            human-readable
-  factory-plan --json     one JSON object, what the workflow consumes
+  factory-plan --json     one JSON object
+  factory-plan --ready    the ready set: READY / WAIT / HOLD / STALL per backlog task
   add --proposed to plan tasks/proposed as well - how /factory:init measures a
   task list before it is approved; nothing is ever dispatched from there
   add --start to record the run's starting point in .factory/run-start.json:
-  HEAD and its test census, which the full check at the end compares against
+  HEAD and its test census, which the full check at the end compares against.
+  factory-preflight does this for /factory:run; --start is kept for scripts.
+
+The starting point belongs to a run, not to a start. .factory/run.lock marks a
+run that has not finished (factory-finish removes it): a run started again for
+the same change keeps the base it had, so the audit range and the run's test
+census still cover everything it landed before it was interrupted.
 
 Every task in tasks/backlog or tasks/in-progress that an agent may work on,
 with the dependencies it still has to wait for - only ones that are themselves
@@ -281,7 +288,7 @@ def committed_task(tid):
     return None
 
 
-def snapshot_board(plan):
+def snapshot_board(plan, exempt=None):
     """The task files this run builds, committed as approved before anything
     starts. factory-check reads a task's acceptance and exemptions from this
     commit, never from the working tree a builder writes. Only those files go
@@ -291,13 +298,23 @@ def snapshot_board(plan):
     is unchanged (a builder's notes, a stage): a run never approves a change to
     a task it builds - that would let one run launder its own untested_ok. Such
     a change is a problem the developer settles by committing the file.
+    exempt names keys a script changed for the developer (factory-preflight
+    clears needs_human when the developer answered the task's question).
+
+    A task file that moved lanes since HEAD is committed at its new place, and
+    its old place as gone - otherwise HEAD would hold the task twice.
 
     Returns (short sha or None, problems, warnings)."""
     problems, warnings = [], []
+    exempt = exempt or {}
     if git("rev-parse", "--is-inside-work-tree")[0] != 0:
         return None, problems, warnings
     paths = []
     for t in plan["tasks"]:
+        rc, out, _ = git("ls-files", "--", "tasks/*/%s.md" % t["id"])
+        for old in out.splitlines() if rc == 0 else []:
+            if old.strip() and not os.path.exists(os.path.join(ROOT, old.strip())):
+                paths.append(old.strip())
         for col in ("backlog", "in-progress"):
             p = "tasks/%s/%s.md" % (col, t["id"])
             on_disk = os.path.isfile(os.path.join(ROOT, p))
@@ -307,7 +324,8 @@ def snapshot_board(plan):
             head = committed_task(t["id"])
             if head and on_disk:
                 now = frontmatter(os.path.join(ROOT, p))
-                changed = [k for k in APPROVED_KEYS if now.get(k, "").strip() != head[1].get(k, "").strip()]
+                changed = [k for k in APPROVED_KEYS if now.get(k, "").strip() != head[1].get(k, "").strip()
+                           and k not in exempt.get(t["id"], ())]
                 if changed:
                     problems.append("%s: %s changes what was approved (%s) since %s was committed - a run never "
                                     "approves a change to a task it builds. If you made the change, commit the task "
@@ -341,19 +359,50 @@ def snapshot_board(plan):
     return (git("rev-parse", "--short", "HEAD")[1].strip() or None), problems, warnings
 
 
-def record_start(plan):
+def read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            v = json.load(fh)
+        return v if isinstance(v, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def record_start(plan, change=None):
     """The test census of HEAD before anything lands. Each task's check can only
-    see its own files; this is what lets the end of the run see all of them."""
+    see its own files; this is what lets the end of the run see all of them.
+
+    A run that has not finished (.factory/run.lock) and is started again for the
+    same change keeps its base: the census and the start commit are the ones it
+    had, and its task list grows by what is new. Returns "kept" or "new"."""
+    lock = read_json(os.path.join(F, "run.lock"))
+    start = read_json(os.path.join(F, "run-start.json"))
+    ids = [t["id"] for t in plan["tasks"]]
+    if lock and start and (lock.get("change") or None) == (change or None) \
+            and lock.get("start_head") and lock.get("start_head") == start.get("head"):
+        start["tasks"] = list(dict.fromkeys((start.get("tasks") or []) + ids))
+        lock["tasks"] = start["tasks"]
+        lock["restarts"] = int(lock.get("restarts") or 0) + 1
+        lock["touched"] = int(time.time())
+        with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
+            json.dump(start, fh)
+        with open(os.path.join(F, "run.lock"), "w", encoding="utf-8") as fh:
+            json.dump(lock, fh)
+        return "kept"
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
                        capture_output=True, text=True, cwd=ROOT)
     try:
         census = json.loads(r.stdout)
     except ValueError:
-        return
-    census["tasks"] = [t["id"] for t in plan["tasks"]]
+        return "new"
+    census["tasks"] = ids
     census["started"] = int(time.time())
     with open(os.path.join(F, "run-start.json"), "w", encoding="utf-8") as fh:
         json.dump(census, fh)
+    with open(os.path.join(F, "run.lock"), "w", encoding="utf-8") as fh:
+        json.dump({"started": census["started"], "touched": census["started"], "start_head": census.get("head"),
+                   "change": change or None, "tasks": ids, "restarts": 0}, fh)
+    return "new"
 
 
 def delivery_gate(change):
@@ -403,13 +452,38 @@ def main(argv):
         elif snap:
             plan["snapshot"] = snap
     if "--start" in argv and plan["ok"] and "--proposed" not in argv:
-        record_start(plan)
+        plan["base"] = record_start(plan, change)
         try:
             plan["start_head"] = json.load(open(os.path.join(F, "run-start.json"))).get("head")
         except (OSError, ValueError):
             pass
         for t in plan["tasks"]:
             t.pop("allow_test_removal", None)
+    if "--ready" in argv:
+        # The ready set, one line per backlog task: what a run would start now,
+        # what waits and on what, what no agent gets.
+        lanes = {t: c for c in ("backlog", "in-progress") for t in lane(c)}
+        held = {h["id"]: h["reason"] for h in plan["held"]}
+        n = {"ready": 0, "wait": 0, "hold": 0, "stall": 0}
+        for tid in sorted(t for t, c in lanes.items() if c == "backlog"):
+            fm = frontmatter(os.path.join(ROOT, "tasks", "backlog", tid + ".md"))
+            why = held.get(tid, "")
+            task = next((t for t in plan["tasks"] if t["id"] == tid), None)
+            if why.startswith("stalled"):
+                print("STALL %s the check saw the identical failure twice - it needs a different approach, not another builder" % tid)
+                n["stall"] += 1
+            elif why.startswith("needs_human"):
+                print("HOLD %s needs_human - a decision for the developer; factory-preflight blocks it and asks" % tid)
+                n["hold"] += 1
+            elif task and not task["deps"]:
+                print("READY %s %s %s" % (tid, fm.get("module", ""), fm.get("title", "")))
+                n["ready"] += 1
+            else:
+                print("WAIT  %s %s" % (tid, "needs " + ",".join(task["deps"]) if task else why))
+                n["wait"] += 1
+        print("SUMMARY ready=%d wait=%d hold=%d stall=%d in-progress=%d" % (
+            n["ready"], n["wait"], n["hold"], n["stall"], sum(1 for c in lanes.values() if c == "in-progress")))
+        return 0
     if "--json" in argv:
         for t in plan["tasks"]:
             t.pop("allow_test_removal", None)

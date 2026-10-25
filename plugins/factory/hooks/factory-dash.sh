@@ -290,8 +290,12 @@ if [ "${last_event_age}" -ge 0 ] 2>/dev/null; then
   if [ "${last_event_age}" -lt 300 ]; then live="canlı · son hareket $(ago "${last_event_age}") önce"; live_cls="on"
   else live="son hareket $(ago "${last_event_age}") önce"; fi
 fi
-owner_state="sahipsiz"
-[ -s "${F}/run-owner" ] && owner_state="koşu sahipli"
+owner_state="koşu yok"
+if [ -f "${F}/run.lock" ]; then
+  if grep -q '"state": *"halted"' "${F}/run.lock" 2>/dev/null; then owner_state="koşu durdu"
+  elif [ -n "$(find "${F}/run.lock" -mmin -120 2>/dev/null)" ]; then owner_state="koşu sürüyor"
+  else owner_state="koşu yarım kaldı"; fi
+fi
 
 cat > "${TMP}" <<HTML
 <!doctype html>

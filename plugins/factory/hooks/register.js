@@ -265,7 +265,7 @@ async function board($) {
     counts.push(lane + '=' + n)
   }
   const out = [counts.join('  ')]
-  const ready = await $.process.run([await bashPath($), $.plugin.root + '/hooks/factory-ready.sh'], { cwd: root, timeoutMs: 15000 })
+  const ready = await $.process.run([await bashPath($), $.plugin.root + '/bin/factory-plan', '--ready'], { cwd: root, timeoutMs: 15000 })
   const lines = ready.stdout.trim()
   out.push(lines || '(nothing ready or waiting)')
   const home = await homeDir($)

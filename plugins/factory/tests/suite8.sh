@@ -80,7 +80,7 @@ newproj() {  # <name> <branch-mode> <consent-level>  -> sets P, O, S; cd's into 
   git init -q --bare -b main "$O"
   git clone -q "$O" "$P" 2>/dev/null; cd "$P" || exit 1
   git config user.email dev@example.com; git config user.name dev
-  mkdir -p src tasks/backlog tasks/in-progress tasks/done tasks/blocked tasks/proposed .factory/changes .factory/verified .factory/inflight
+  mkdir -p src tasks/backlog tasks/in-progress tasks/done tasks/blocked tasks/proposed .factory/changes .factory/verified
   echo base > src/a.txt; : > .factory/active
   printf '.factory/\n' > .gitignore
   jq -cn --arg b "$2" --arg l "$3" '{verify:"gates/verify.sh", autonomy_default:$l, risk_paths:["*/auth/*"], fast:{risk_review:"before"},
@@ -207,7 +207,8 @@ out="$(pub C2)"
 check "...and goes through once the review passes" '[ "$(state state C2)" = done ] && grep -q "^pr merge" "$GHLOG"' "$out"
 newproj audit per-change merge
 bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
-printf '# Audit\n\n## high - tenant filter missing\nWhere: a\n' > .factory/audit.md
+mkdir -p .factory/audit
+printf '# Audit\n\n## high - tenant filter missing\nWhere: a\n' > .factory/audit/C2.md
 out="$(pub C2)"
 check "a high audit finding holds the merge"    '[ -n "$(state held C2)" ] && ! grep -q "^pr merge" "$GHLOG"' "$out"
 python3 "$H/factory-publish.py" --ack-audit C2 >/dev/null
@@ -244,11 +245,17 @@ check "main mode: local main followed origin"   '[ "$(git rev-parse HEAD)" = "$(
 echo "=== delivery: no checkout while a run is active"
 newproj active per-change merge
 bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
-touch .factory/inflight/C3-01
+echo '{"started":"x","change":"C3"}' > .factory/run.lock
 out="$(pub C2)"
 check "merged, but the local branch is left"    '[ "$(state state C2)" = done ] && [ "$(git symbolic-ref --short HEAD)" = factory/C2-add-thing ]' "$out"
 check "...and the record says why"              '[ -n "$(state sync_pending C2)" ]'
-rm -f .factory/inflight/C3-01
+rm -f .factory/run.lock
+newproj halted per-change merge
+bash "$H/factory-branch.sh" C2 >/dev/null; change_commit src/new.txt "x"
+echo '{"started":"x","change":"C3","state":"halted","halted":"infra"}' > .factory/run.lock
+out="$(pub C2)"
+check "a run that halted is not active: the checkout happens" '[ "$(state state C2)" = done ] && [ -z "$(state sync_pending C2)" ]' "$out"
+rm -f .factory/run.lock
 
 echo "=== delivery: kill -9 and resume"
 newproj kill per-change merge

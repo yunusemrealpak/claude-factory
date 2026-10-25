@@ -5,9 +5,9 @@
 # Usage (from the project root):
 #   factory-start <task-id> [owner]
 #
-# One call does what used to cost the lead five model turns and the implementer
-# two more: lint the task, move it into tasks/in-progress, write owner, stage and
-# stage_since, and print the task file together with the lessons for its module.
+# One call lints the task, moves it into tasks/in-progress, writes owner, stage
+# and stage_since, and prints the task file together with the lessons for its
+# module.
 # The builder starts with everything it needs in one tool result.
 #
 # A task already in tasks/in-progress is a retry, or a task a dead run left

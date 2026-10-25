@@ -7,8 +7,8 @@ allowed-tools: Read, Write, Edit, Bash, Grep, Glob, AskUserQuestion
 
 Bootstrap the factory in the current project. Argument (optional): $ARGUMENTS
 
-Work through the steps in order. Do not skip step 5: nothing builds - not
-`/factory:fast`, not `/factory:run` - without my explicit approval.
+Work through the steps in order. Do not skip step 5: nothing builds -
+`/factory:run` included - without my explicit approval.
 
 ---
 
@@ -35,7 +35,7 @@ Incremental mode changes the steps below like this:
   (see Step 2) and ask whether to add it - without it no green task is routed
   to a reviewer by what it touched. Likewise a missing `check` block: propose
   one from the project's structure (Step 2) and ask - without it every
-  `/factory:fast` check runs the whole suite.
+  `/factory:run` check runs the whole suite.
 - **Step 2** - create only directories that are missing, plus `tasks/proposed/`.
   Never write `.factory/config.json`, `gates/verify.sh`, `decisions.md` or
   `.factory/active` in this mode: each already exists and may have been adjusted
@@ -58,9 +58,9 @@ Incremental mode changes the steps below like this:
   A finished one counts as satisfied; an unfinished one makes this task wait for
   it, which is right when the new work genuinely builds on it.
 - **Step 4, location** - write the new task files to `tasks/proposed/`, not
-  `tasks/backlog/`. The lead dispatches from the backlog, and a factory that is
-  already running would pick up tasks I have not approved. Nothing reads
-  `tasks/proposed/` except this command.
+  `tasks/backlog/`. The loop builds from the backlog, and a run that starts
+  would pick up tasks I have not approved. Nothing reads `tasks/proposed/`
+  except this command.
 - **Before Step 5** - run `factory-ids check`. It must
   exit 0. A non-zero exit names each collision; rename the offending new task
   and run the check again.
@@ -162,8 +162,6 @@ older factory and offers `/factory:upgrade`):
 {
   "factory_version": "<the contents of factory-version>",
   "verify": "gates/verify.sh",
-  "workers": 2,
-  "max_concurrent_agents": 3,
   "retry_limit": 2,
   "min_tests": 1,
   "gate_mode": "staged",
@@ -186,7 +184,7 @@ older factory and offers `/factory:upgrade`):
 ```
 
 `risk_paths` decides which green tasks still get a reviewer before they are
-committed: after every green gate the lead runs `factory-risk`, which matches
+committed: after every green check `factory-settle` runs `factory-risk`, which matches
 the task's `## Files touched` against these patterns (shell globs,
 case-insensitive, `*` crossing directories, a pattern without a leading `/` or
 `*` matching at any depth). The list above is a starting point, not a verdict.
@@ -198,16 +196,17 @@ mark them `linguist-generated=true` in `.gitattributes` if the project does not
 already, or list their globs under `risk_exclude` in the config. The final list is part of what I approve in
 Step 5.
 
-`fast` is optional and configures `/factory:fast`: `workers` (how many builders at
-once, default 4), `effort_build` (default `medium`), `effort_escalate` (the one
-retry of a red task, default `high`), `effort_review` (default `high`),
+`fast` is optional and configures the loop `/factory:run` runs: `workers` (how
+many builders at once, default 4), `effort_build` (default `medium`),
+`effort_escalate` (a retry of a red task, default `high`), `effort_review`
+(default `high`),
 `risk_review` (`after`, the default: a task sent to review only by a risk path
 lands first and is reviewed alongside the run; `before`: it waits for the
 review), `audit` (default `true`: one auditor reads the run's seams at the end)
 and `effort_audit` (default `high`). The top-level `retry_limit` (default 2)
 is how many attempts a red task gets in total, the first included.
 
-`check` is optional too, and it is how `/factory:fast` judges one task without
+`check` is optional too, and it is how the loop judges one task without
 running the whole project. `factory-check` knows no language, framework or build
 tool: everything it runs comes from this block or, where the block is silent,
 from `commands`. Write it from what you found in Step 1, and put in it only what
@@ -264,15 +263,9 @@ symlinked rather than rebuilt - `["node_modules"]` for a Node project, a
 `.venv` for Python, an untracked local settings file. Never a build output
 directory.
 
-`workers` is how many tasks may sit in `tasks/in-progress` at once.
-`max_concurrent_agents` is a separate, harder limit: how many agents may be open
-at the same time, of any type - implementers, reviewers and integrators all count
-against it. A `factory-agent-limit` PreToolUse hook enforces it by denying the
-dispatch, so it does not depend on the lead remembering.
-
-Defaults are 2 and 3. Each concurrent agent is a separate Claude process on the
-developer's machine, so raising either heats the laptop as much as it speeds the
-run. Raise them only if I ask.
+How many builders work at once is `fast.workers` (default 4). Each
+builder is a separate Claude process on the developer's machine, so raising it
+heats the laptop as much as it speeds the run. Raise it only if I ask.
 
 Also write `.claude/settings.json` in the project (merge, do not clobber an
 existing one):
@@ -307,15 +300,14 @@ which is why it runs from my session and is banned for agents, and it runs
 `factory-deny --apply` itself. On a re-run of init on an existing project, do
 not ask again: point to `/factory:bans`.
 
-A long run outlives its context, and the lead carries the run across a
-compaction (see "After a compaction" in the lead agent), so auto-compact must
-stay on. Do not write `autoCompactWindow`: when to compact is the developer's
-own setting (`~/.claude/settings.json` or `/autocompact`), and a project value
+Auto-compact stays on so a long session does not stop at its context limit.
+Do not write `autoCompactWindow`: when to compact is the developer's own
+setting (`~/.claude/settings.json` or `/autocompact`), and a project value
 would silently override it.
 
 `gates/verify.sh` is the project's gate entry point, and agents may not touch
-it. The gate itself is in the plugin: `factory-check`, the same engine
-`/factory:fast` uses, so it upgrades with the plugin. Write the entry point
+it. The gate itself is in the plugin: `factory-check`, the same engine the
+loop runs for every task, so it upgrades with the plugin. Write the entry point
 with:
 
 ```bash
@@ -340,8 +332,6 @@ factory-upgrade --gate
   - no marker removal at the start (an `rm -f` of `.factory/verified/` for the
     task) - a red run leaves the previous green marker in place, and the
     done-guard lets the task into done on it
-  - no `tree=` line in its marker - the integrator cannot skip a second run of
-    the same bytes, so every task pays for the full suite twice
 
   Then offer the way over, and wait: `gates/verify.sh` becomes the shim, and
   what the gate does of its own (a dispatcher, an extra stage, a service it
@@ -357,16 +347,12 @@ the repo while `.factory/active` and `config.json` remain committed:
 
 ```
 .factory/verified/
-.factory/lead-state.md
-.factory/lead-state.read.md
 .factory/claude-md-protocol.old.md
 .factory/gate-legacy/
 .factory/compact-log.md
 .factory/failures/
 .factory/no-progress/
 .factory/baseline.json
-.factory/run-owner*
-.factory/inflight/
 .factory/changes/
 .factory/retro/
 .factory/lessons/
@@ -379,11 +365,14 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/logs/
 .factory/locks/
 .factory/full-check
+.factory/run.lock
 .factory/run-start.json
 .factory/last-run.md
 .factory/parked/
-.factory/audit.md
-.factory/gate-start/
+.factory/reviews/
+.factory/attempts/
+.factory/waiting/
+.factory/audit/
 .factory/usage.jsonl
 .factory/autonomy.json
 .factory/autonomy-off
@@ -397,7 +386,10 @@ the repo while `.factory/active` and `config.json` remain committed:
 `events.jsonl` is the run's history - every dispatch, gate run, move and commit,
 written by hooks at no cost - and `dashboard.html` is the page built from it that
 shows what the team is doing right now. `questions/` is what the team is waiting
-on the developer for.
+on the developer for. `run.lock` is the run in progress, or the one that halted
+and is continued by the next `/factory:run`; `reviews/`, `attempts/` and
+`waiting/` are what `factory-settle` decides each task from, and `audit/` holds
+one audit per change.
 
 `changes/`, `retro/` and `lessons/` are the factory's own record of what it did,
 how it went and what it learned. They stay on this machine, like the
@@ -422,8 +414,7 @@ replace it with this one instead of adding a second:
 ```markdown
 <!-- factory: written by /factory:init, kept current by /factory:upgrade -->
 ## Factory
-While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:fast` builds the approved backlog and `/factory:status` shows the board.
-Compact instructions: keep which tasks were dispatched and at which stage, the last check results, retries and blocked reasons; where the summary and `.factory/lead-state.md` disagree, the file is right.
+While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:run` builds the approved backlog and `/factory:status` shows the board.
 <!-- /factory -->
 ```
 
@@ -469,10 +460,10 @@ stage_since:
 - [ ] <criterion>
 
 ## Files touched
-<filled in by the implementer: one repo-relative path per line, as "- path">
+<filled in by the builder: one repo-relative path per line, as "- path">
 
 ## Attempts
-<appended by implementers: one entry per red gate, and a "Resolved by:" line on the first green after a red>
+<appended by builders: one entry per red check, and a "Resolved by:" line on the first green after a red>
 ```
 
 Rules:
@@ -487,10 +478,10 @@ Rules:
   does not make obvious. At most ten lines, paths rather than prose. Every
   builder starts cold; on a real board, builders without it spent about sixty
   reads per task rediscovering the same code.
-- `## Files touched` starts empty. The implementer fills it in, and the commit
-  that records the task takes exactly those files, so this list is the line
+- `## Files touched` starts empty. The builder fills it in, and the commit
+  that lands the task takes exactly those files, so this list is the line
   between this task's work and everything else in a shared working tree.
-- `## Attempts` starts empty too. Every implementer that leaves the gate red
+- `## Attempts` starts empty too. Every builder that leaves the check red
   writes what it tried and what it ruled out there, so a retry starts from the
   last attempt's knowledge instead of from zero; the first green after a red
   adds what finally fixed it, which is what `/factory:retro` turns into lessons.
@@ -504,11 +495,9 @@ Rules:
   the agent satisfies by writing a sentence; the gate rejects those outright.
   If a task genuinely cannot be machine-checked, it is `needs_human: true` work,
   not a task with a soft criterion.
-- `owner`, `stage` and `stage_since` start empty / `queued`. The loop fills them:
-  they are what /factory:status and the compaction memo read to show who holds
-  what,
-  and the Stop hook refuses to let the session end while an in-progress task is
-  missing either of them.
+- `owner`, `stage` and `stage_since` start empty / `queued`. `factory-start`
+  fills them when a builder takes the task: they are what `/factory:status` and
+  the dashboard read to show who holds what.
 - Ordering: for every module, its contract/interface task comes first, and every
   other task in that module declares it in `depends_on`. Cross-module tasks depend
   on the other module's contract task, never on its implementation task.
@@ -516,11 +505,12 @@ Rules:
   acceptance command runnable.
 - `needs_human: true` for anything needing credentials, a paid account, a store
   submission, a design decision I have not made, or access you do not have.
-- `review:` is `on-red` by default: a reviewer runs only when the gate fails. Set
-  `review: always` on work the gate cannot judge - security boundaries, tenant
+- `review:` is `on-red` by default: no reviewer unless the task touches a
+  `risk_paths` path - a red check gets a fresh builder, not a reviewer. Set
+  `review: always` on work the check cannot judge - security boundaries, tenant
   isolation, authentication, payments, data deletion, and public contracts other
-  modules compile against. Be sparing: every `always` costs a dispatch on every
-  attempt.
+  modules compile against. Be sparing: every `always` costs a reviewer before
+  the task can land, and another after every failed review.
 - Graph shape: the longest dependency chain, not the number of workers, bounds
   how fast the board is built - tasks on one chain run one after another.
   Before Step 5, measure it: `factory-plan --proposed` (incremental mode) or
@@ -531,7 +521,7 @@ Rules:
   migration, a lockfile - into one task after the parallel work instead of
   threading it through every link. Depend on a contract, not on an
   implementation, wherever the contract is enough.
-- Task size: one implementer, one gate run. If it needs three unrelated gates,
+- Task size: one builder, one check. If it needs three unrelated checks,
   split it. The working granularity is one pull request: substantial enough to
   be worth a dispatch, small enough that a red gate does not throw away an hour
   of work.
@@ -579,7 +569,8 @@ grouped by phase/module, in dependency order. Then the totals: task count,
 Phase 0 count, needs-human count, and the longest dependency chain and widest
 level as `factory-plan` measured them. On the first run,
 also print the `risk_paths` list you wrote into the config, one line: green
-tasks touching these get a reviewer before commit.
+tasks touching these get a reviewer (alongside the run once they have landed,
+or before they land with `fast.risk_review: before`).
 
 Then stop and ask for approval in plain words. Do not start a run, do not
 dispatch any agents, do not touch source code until I approve. If I want changes,
@@ -623,9 +614,9 @@ When I approve:
    branch and commit it starts from, its tasks, the earlier changes it builds
    on - and a first `summary.md`. It refuses a reused id, a malformed slug or
    type, and a change with no tasks: fix what it names and run it again.
-3. Tell me the change is open and that `/factory:fast` builds it: one builder per
-   task and one deterministic check each, measured at about a third of the cost
-   of `/factory:run`, which remains for when I want a lead to steer task by task.
+3. Tell me the change is open and that `/factory:run` builds it: one builder and
+   one deterministic check per task, and one full check at the end.
+
 ### The one line that approves and hands over
 
 End the board with exactly one line: `Onaylıyorsanız "auto devam et" yazın.` That

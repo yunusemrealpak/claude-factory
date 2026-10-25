@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Factory: land one task. NOT a hook: a builder runs it once its check is green.
+# Factory: land one task. NOT a hook: factory-settle and factory-review-submit
+# run it once the task's check is green (and its review passed).
 #
 # Usage (from the project root):
 #   factory-land <task-id>
 #
 # Moves the task into tasks/done and records it as one commit of exactly its own
-# files (factory-commit.sh). This is the integrator's whole job, and every step
-# of it was deterministic: it no longer costs an agent, its start-up and a second
-# run of the test suite. Whether the tasks work together is what
+# files (factory-commit.sh). Every step of it is deterministic: it costs no
+# agent, no start-up and no second run of the test suite. Whether the tasks work together is what
 # factory-check --full answers, once, when the board is built.
 #
 # The done-guard hook cannot see a move made inside a script, so the marker is

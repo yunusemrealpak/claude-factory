@@ -45,7 +45,7 @@ and nothing about that is visible from the board.
 
 3b. **The `check` block.** If `.factory/config.json` has no `check.units` (the
    upgrade adds `check.claude_md_max_lines` on its own, so a bare `check` block
-   is not a configured one), `/factory:fast` judges every task by running the whole suite. Read the project's structure -
+   is not a configured one), `/factory:run` judges every task by running the whole suite. Read the project's structure -
    the packages, projects or modules its own build tool declares - and propose
    a `check` block as `/factory:init` Step 2 describes it: `units` with their
    paths, dependencies and test commands, a `format` command, a `lint` scoped

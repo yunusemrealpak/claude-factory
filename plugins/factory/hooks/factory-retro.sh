@@ -130,7 +130,7 @@ fi
 
 # --- what fixed the tasks that went green -------------------------------------
 # The raw material for lessons: a task that failed, then passed, and a line from
-# the implementer saying what made the difference.
+# the builder saying what made the difference.
 section "Red tasks that went green, and what fixed them"
 if ls "${F}"/failures/resolved/*.log >/dev/null 2>&1; then
   for lf in "${F}"/failures/resolved/*.log; do

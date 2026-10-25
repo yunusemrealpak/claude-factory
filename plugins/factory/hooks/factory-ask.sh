@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Factory question inbox. NOT a hook: the lead runs it when the run needs a
-# decision only the developer can make.
+# Factory question inbox. NOT a hook: factory-preflight, factory-settle and
+# factory-review-submit run it when the run needs a decision only the developer
+# can make.
 #
 # Usage (from the project root):
 #   factory-ask ask <task-id> "<question>" ["<option>|<option>"] ["<recommendation>"]
@@ -9,7 +10,7 @@
 #
 # Until now a task that needed the developer went quiet: it moved to blocked
 # with needs_human: true and sat there until somebody read the board. A team
-# that cannot ask its lead a question is not a team, it is a queue. This is the
+# that cannot ask a question is not a team, it is a queue. This is the
 # channel: one question, the options as the team sees them, and what the team
 # would do - so the answer can be one word.
 #

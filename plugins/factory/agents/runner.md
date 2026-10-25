@@ -1,6 +1,6 @@
 ---
 name: runner
-description: Factory fast-lane runner. Runs one given shell command and returns its result as the structured answer the workflow asks for. No judgement, no exploration. Dispatched by /factory:fast for plan, land, block, recheck and finish steps.
+description: Factory runner. Runs one given shell command and returns its result as the structured answer the workflow asks for. No judgement, no exploration. Dispatched by the factory loop workflow for the finish, a re-check after a wait, a settle the builder did not run, and the preflight when the workflow was started without a plan.
 tools: Bash, Read
 model: haiku
 effort: low

@@ -18,7 +18,7 @@ REMOTE="$WORK/s11-remote.git"; rm -rf "$REMOTE"; git init -q --bare -b main "$RE
 P="$WORK/s11-proj"; rm -rf "$P"; mkdir -p "$P"; cd "$P" || exit 1
 git init -q -b main .; git config user.email dev@example.com; git config user.name dev
 git remote add origin "$REMOTE"
-mkdir -p tasks/backlog tasks/in-progress tasks/done .factory/inflight
+mkdir -p tasks/backlog tasks/in-progress tasks/done .factory
 : > .factory/active; printf '.factory/\n' > .gitignore
 echo '{"verify":"gates/verify.sh","delivery":{"base":"main","max_unpushed":3}}' > .factory/config.json
 printf -- '---\nid: C1-01\ntitle: t\nmodule: core\ndepends_on: []\nacceptance: true\nneeds_human: false\nreview: on-red\nretries: 0\nowner:\nstage: backlog\nstage_since:\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C1-01.md

@@ -103,6 +103,11 @@ path ## factory-questions ## root ## \.factory/questions/.*
 path ## factory-lessons ## root ## \.factory/lessons/.*
 path ## factory-events ## root ## \.factory/events\.jsonl
 path ## factory-publish-state ## root ## \.factory/publish/.*
+path ## factory-reviews ## root ## \.factory/reviews/.*
+path ## factory-attempts ## root ## \.factory/attempts/.*
+path ## factory-waiting ## root ## \.factory/waiting/.*
+path ## factory-full-check ## root ## \.factory/full-check
+path ## factory-run-lock ## root ## \.factory/run\.lock
 path ## factory-active ## root ## \.factory/active
 path ## git-dir ## any ## \.git/.*
 

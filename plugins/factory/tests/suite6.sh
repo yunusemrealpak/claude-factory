@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Sandbox tests: the fast lane - factory-check (units, reach, guards, the
 # per-task census, no-progress, the full check), factory-plan, factory-start,
-# factory-land, factory-block, factory-finish, the /factory:fast workflow's
-# scheduling, and the claim/telemetry fixes it relies on.
+# factory-land, factory-block, factory-finish, and the telemetry fixes the loop
+# relies on. The loop workflow's own schedule is tests/loop-cases.mjs.
 #
 # The project in the sandbox is written in no language at all: its "toolchain"
 # is a handful of shell scripts, its tests are *.t files, and everything the
@@ -110,7 +110,7 @@ mktask in-progress T-01 "" "bash runner.sh core" core/src/main.src core/tests/ma
 printf 'value messy\n' > core/src/main.src; : > .factory/tool.log
 out="$(factory-check T-01)"; rc=$?
 check "green on a clean change" '[ $rc -eq 0 ] && printf "%s" "$out" | grep -q "CHECK RESULT: GREEN for T-01"' "$out"
-check "the marker says it came from the fast check" 'grep -q "^check=fast" .factory/verified/T-01 && grep -q "^tree=" .factory/verified/T-01 && grep -q "^tests=6" .factory/verified/T-01' "$(cat .factory/verified/T-01 2>/dev/null)"
+check "the marker says it came from the fast check" 'grep -q "^check=fast" .factory/verified/T-01 && ! grep -q "^tree=" .factory/verified/T-01 && grep -q "^tests=6" .factory/verified/T-01' "$(cat .factory/verified/T-01 2>/dev/null)"
 check "only the touched files are handed to the formatter, and fixed" '[ "$(cat .factory/fmt.args)" = "core/src/main.src core/tests/main.t" ] && grep -q tidy core/src/main.src' "$(cat .factory/fmt.args)"
 check "build and lint come from the project commands" 'tools_log | grep -q "^build,lint,"' "$(tools_log)"
 check "the tests of the touched unit and its dependents run, nothing else" 'tools_log | grep -q "runner core,runner api,runner ui,$"' "$(tools_log)"
@@ -324,6 +324,7 @@ check "a planned run records where it started" 'jq -e ".test_files == 3 and (.fi
 out="$(factory-check --full)"; rc=$?
 check "the full check runs build, test and lint" '[ $rc -eq 0 ] && [ "$(tools_log)" = "build,runner .,lint," ] && printf "%s" "$out" | grep -q "test     PASS (6 test(s))"' "$(tools_log) / $out"
 check "its verdict is recorded" 'grep -q "^verdict=green" .factory/full-check && grep -q "^tests=6" .factory/full-check'
+check "...with the commit it judged and whether the tree was clean, not a tree fingerprint" 'grep -qx "head=$(git rev-parse HEAD)" .factory/full-check && grep -qE "^clean=(yes|no)$" .factory/full-check && ! grep -q "^tree=" .factory/full-check' "$(cat .factory/full-check)"
 # The cases below retune the gate commands between full checks, as a developer
 # would between runs: each one records the new config as the run's start.
 redigest() { jq --argjson p "$(factory-check census --json | jq -c .protected)" '.protected = $p' .factory/run-start.json > rs && mv rs .factory/run-start.json; }
@@ -566,154 +567,28 @@ mktask blocked F-02 "" "x" src/a.txt
 printf '\n## Blocked reason\n- 2026-01-01T00:00:00Z: needs the provider decided\n' >> tasks/blocked/F-02.md
 mktask backlog F-03 "F-02" "x" src/a.txt
 out="$(factory-finish --tasks F-01,F-02,F-03 --no-full)"
+check "finish prints one line by default" '[ "$(printf "%s\n" "$out" | wc -l | tr -d " ")" = 1 ] && printf "%s" "$out" | grep -q "^FINISH 1/3 landed"' "$out"
+out="$(factory-finish --tasks F-01,F-02,F-03 --no-full --json)"
 check "finish puts what a builder left open first" 'jq -e ".attention == [{\"id\":\"F-01\",\"concern\":\"the id /start returns is never accepted by /next\"}]" <<< "$out" >/dev/null' "$out"
 check "finish reads where each task is and which commit carries it" 'jq -e "[.board[] | .lane] == [\"done\",\"blocked\",\"backlog\"] and .board[0].commit != null and .board[1].reason == \"2026-01-01T00:00:00Z: needs the provider decided\"" <<< "$out" >/dev/null' "$out"
 check "with nothing new to judge the full check is skipped, and says so" 'jq -e ".full_check == \"skipped\"" <<< "$out" >/dev/null' "$out"
 check "the report is written for the developer too" 'grep -q "## Needs your attention" .factory/last-run.md && grep -q "| F-02 | blocked |" .factory/last-run.md'
 mktask done F-04 "" "x" src/a.txt
 printf '\n## Review 2026-01-02\nverdict: fail\nfindings:\n- src/a.txt:3 tenant filter missing on the list query -> add it\n' >> tasks/done/F-04.md
-out="$(factory-finish --tasks F-04 --no-full)"
+out="$(factory-finish --tasks F-04 --no-full --json)"
 check "a failed review of a task that already landed is reported first" 'jq -e ".attention[0].concern | startswith(\"review failed: src/a.txt:3 tenant filter\")" <<< "$out" >/dev/null' "$out"
 
-echo "=== the workflow's scheduling (JavaScriptCore, or node)"
-JSC=/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc
-JSRUN=""
-if [ -x "$JSC" ]; then JSRUN="$JSC"; elif command -v node >/dev/null 2>&1; then JSRUN=node; fi
-if [ -n "$JSRUN" ]; then
-  harness() {  # <scenario js defining agent()> -> prints result JSON and call order
-    { [ "$JSRUN" = node ] && echo 'var print = function (s) { console.log(s) };'
-      cat <<'JS'
-var logs=[]; function log(m){logs.push(m)} function phase(p){}
-var args={workers:2}; var calls=[]; var prompts={};
-JS
-      printf '%s\n' "$1"
-      echo "async function __main(){"
-      sed '1,/^}$/d' "${PLUGIN}/workflows/fast.js"
-      echo "}"
-      echo "__main().then(function(r){ print(JSON.stringify(r)); print('CALLS '+calls.join(',')); print('FINISH '+prompts.finish); print('AUDIT '+prompts.audit) }, function(e){ print('ERROR '+e) });"
-    } > "$WORK/wf.js"
-    "$JSRUN" "$WORK/wf.js"
-  }
-  base='function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]},{id:"C",deps:["A"]},{id:"D",deps:["B","C"],review:true}]});
- if(l==="finish") return reply({attention:[{id:"B",concern:"gap"}],board:[{id:"A",lane:"done",commit:"abc"}],full_check:"green"});
- if(/ land$/.test(l)||/ block$/.test(l)) return reply({ok:true,line:"LANDED"});
- if(/ review$/.test(l)) return reply({verdict:"pass",findings:[]});
- if(l==="D") return reply({id:"D",status:"review",summary:"returning review, not landed",concerns:[]});'
-  out="$(harness "$base
- return reply({id:l,status:\"landed\",summary:\"ok\",concerns:[]}); }")"
-  calls="$(printf '%s\n' "$out" | sed -n 's/^CALLS //p')"
-  check "dependents start only after what they need has landed" 'printf "%s" "$calls" | grep -Eq "^plan,A,(B,C|C,B),D,D review,D land,finish$"' "$out"
-  check "the plan step records where the run started" 'grep -q "factory-plan --json --start" "$WORK/wf.js"'
-  check "a reviewed and landed task no longer says it awaits review" 'printf "%s" "$out" | head -1 | jq -e "(.agent_notes[] | select(.id==\"D\") | .status == \"landed\" and (.summary | startswith(\"reviewed and landed\")))" >/dev/null' "$out"
-  check "the result leads with what needs attention and the board from disk" 'printf "%s" "$out" | head -1 | jq -e "(keys_unsorted | .[0:2]) == [\"attention\",\"board\"] and .attention[0].concern == \"gap\"" >/dev/null' "$out"
-  check "finish is told every task of the run" 'printf "%s" "$out" | grep -Eq "^FINISH .*factory-finish --tasks A,B,C,D( |$)"' "$out"
-  out="$(harness "$base
- if(l===\"A\") return reply({id:\"A\",status:\"red\",summary:\"x\",concerns:[]});
- if(l===\"A retry\") return reply({id:\"A\",status:\"red\",summary:\"still\",concerns:[]});
- return reply({id:l,status:\"landed\",summary:\"ok\",concerns:[]}); }")"
-  check "a task red twice is blocked and its dependents are skipped" 'printf "%s" "$out" | head -1 | jq -e "[.agent_notes[] | .status] == [\"blocked\",\"skipped\",\"skipped\",\"skipped\"]" >/dev/null' "$out"
-  check "the red task is retried once, at higher effort" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A block,finish"' "$out"
-  check "nothing landed: finish still reports, without a full check" 'printf "%s" "$out" | grep -q "^FINISH .*--tasks A,B,C,D --no-full"' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,start_head:"abc1234",tasks:[{id:"G",deps:[]},{id:"H",deps:["G"]}]});
- if(l==="finish") return reply({attention:[{id:"G",concern:"left open"}],board:[],full_check:"green"});
- if(l==="audit") return reply({findings:[{severity:"high",where:"a.x:3 <-> b.x:9",what:"H sends the id G never returns",fix:"return it from G"},{severity:"low",what:"naming"}]});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a run that landed several tasks is audited at its seams, alongside the full check" 'printf "%s" "$out" | grep -Eq "^CALLS plan,G,H,(finish,audit|audit,finish)$" && printf "%s" "$out" | grep -q "abc1234..HEAD"' "$out"
-  check "serious seam findings join the attention list; low ones stay in the audit file" 'printf "%s" "$out" | head -1 | jq -e "(.attention | length) == 2 and (.attention[1].concern | startswith(\"high: H sends the id G never returns\"))" >/dev/null' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"E",deps:[]},{id:"F",deps:["E"]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"green"});
- if(l==="E") return reply({id:"E",status:"review",summary:"touched a risk path",risk:["RISK E: db/x.sql"],concerns:[]});
- if(l==="E land") return reply({ok:true,line:"LANDED E abc"});
- if(l==="E review") return reply({verdict:"pass",findings:[]});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a task on a risk path lands first; its review runs alongside and does not hold back what depends on it" 'printf "%s" "$out" | grep -Eq "^CALLS plan,E,E land,(E review,F|F,E review),finish$" && grep -q "already landed" "$WORK/wf.js" ' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function later(o){return new Promise(function(r){ Promise.resolve().then(function(){ return 0 }).then(function(){ r(o) }) })}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"X",deps:[]},{id:"Y",deps:[]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"green"});
- if(l==="X") return reply({id:"X",status:"waiting",summary:"built; the check failed on Y files",concerns:[]});
- if(l==="Y") return later({id:"Y",status:"landed",summary:"ok",concerns:[]});
- if(l==="X recheck") return reply({ok:true,line:"CHECK RESULT: GREEN for X (marker written)"});
- if(l==="X land") return reply({ok:true,line:"LANDED X abc"});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a waiting task is re-checked after the work it waited on lands, then landed" 'printf "%s" "$out" | grep -q "^CALLS plan,X,Y,X recheck,X land,finish$" && printf "%s" "$out" | head -1 | jq -e "(.agent_notes[] | select(.id==\"X\") | .status) == \"landed\"" >/dev/null' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
- if(l==="A ask") return reply({ok:true,line:"ASKED Q1 for A"});
- if(l==="A") return reply({id:"A",status:"spec_conflict",summary:"criteria 2 and 3 cannot both hold: which wins?",concerns:[]});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a spec conflict is asked, not retried, and holds what depends on it" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A ask,finish$" && printf "%s" "$out" | head -1 | jq -e "[.agent_notes[] | .status] == [\"blocked\",\"skipped\"]" >/dev/null' "$out"
-  check "the question goes to factory-ask and the reason to factory-block" 'grep -q "factory-ask ask" "$WORK/wf.js" && printf "%s" "$out" | head -1 | jq -e "(.agent_notes[0].summary | startswith(\"spec conflict, asked: criteria 2 and 3\"))" >/dev/null' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
- if(/ block$/.test(l)) { prompts.block=p; return reply({ok:true,line:"BLOCKED A"}) }
- return reply({id:"A",status:"refused",summary:"START REFUSED for A: DEPENDENCY Z is not done",concerns:[]}); }')"
-  check "a task refused at start is blocked once, with the refusal" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A block,finish$" && grep -q "refused at start" "$WORK/wf.js"' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
- if(l==="A") return reply(null);
- if(l==="A retry") return reply({id:"A",status:"refused",summary:"START REFUSED for A: it is in done/A.md - only a task in tasks/backlog or tasks/in-progress can be started.",concerns:[]});
- if(l==="A land") return reply({ok:true,line:"LAND SKIPPED for A: it is already in tasks/done."});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a task an earlier attempt landed is landed, and what depends on it runs" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A land,B,finish$"' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l); prompts[l]=p;
- if(l==="plan") return reply({ok:true,tasks:[{id:"A",deps:[]},{id:"B",deps:["A"]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"skipped"});
- if(l==="A") return reply({id:"A",status:"waiting",summary:"waits on work in flight",concerns:[]});
- if(l==="A recheck") return reply({ok:true,line:"CHECK RESULT: GREEN"});
- if(l==="A land") return reply({ok:false,line:"LAND UNCOMMITTED A: the task is done and its check is green, but the commit was refused (above)"});
- return reply({id:l,status:"landed",summary:"ok",concerns:[]}); }')"
-  check "a land whose commit was refused is not a landing: what depends on it waits" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A recheck,A land,finish$"' "$out"
-else
-  echo "(neither JavaScriptCore nor node found - workflow scheduling tests skipped)"
-fi
-
-echo "=== 2.6.1: what chains a plan, and where the lead wakes"
+echo "=== 2.6.1: what chains a plan, and where the session wakes"
 SC="$WORK/chain"; rm -rf "$SC"; mkdir -p "$SC/.factory" "$SC/tasks/backlog"; P="$SC"; cd "$SC" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
 : > .factory/active; printf '{"commands":{}}\n' > .factory/config.json
 for n in 1 2 3 4; do mktask backlog K$n "$([ $n -gt 1 ] && echo K$((n - 1)))" "x" lib/strings.arb lib/page$n.dart; done
 out="$(factory-plan)"
 check "a serial chain names the file that holds it together" 'printf "%s" "$out" | grep -q "Files they share: lib/strings.arb (4 tasks)"' "$out"
-check "the brief tells the lead not to watch a running workflow" 'grep -q "do not attach a Monitor" "$H/factory-brief.sh"'
+check "the brief tells the session not to watch a running workflow" 'grep -q "do not attach a Monitor" "$H/factory-brief.sh"'
 
 echo "=== 2.6: the runner agent, helper calls, metrics, the idle brief"
 check "runner.md is a cheap, bounded, CLAUDE.md-free agent" 'f="$PLUGIN/agents/runner.md"; grep -q "^name: runner" "$f" && grep -q "^model: haiku" "$f" && grep -q "^effort: low" "$f" && grep -q "^maxTurns: 4" "$f" && grep -q "^omitClaudeMd: true" "$f"'
-if [ -n "$JSRUN" ]; then
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l+"@"+((o&&o.agentType)||"-")+(o&&o.model?"!model":""));
- if(l==="A block") prompts.finish=p;
- if(l==="finish") { prompts.finish=prompts.finish+"|||"+p; return reply({attention:[],board:[],full_check:"green"}) }
- if(l==="plan") return reply({ok:true,retry_limit:2,tasks:[{id:"A",deps:[]}]});
- if(/ block$/.test(l)) return reply({ok:true,line:"BLOCKED A"});
- if(/ land$/.test(l)) return reply({ok:true,line:"LANDED A"});
- return reply({id:"A",status:"red",summary:"it'"'"'s $(whoami) \"x\" `id`",concerns:[]}); }')"
-  check "every step that only runs a command goes to factory:runner, with no model override" 'printf "%s" "$out" | grep -q "^CALLS plan@factory:runner,A@factory:builder,A retry@factory:builder,A block@factory:runner,finish@factory:runner$"' "$out"
-  check "a block reason is one single-quoted shell word" 'printf "%s" "$out" | grep -q "factory-block A '"'"'.*it'"'"'\\\\'"'"''"'"'s \$(whoami)"' "$out"
-  check "the finish step is given a long timeout" 'printf "%s" "$out" | grep -q "10-minute"' "$out"
-  out="$(harness 'function reply(o){return Promise.resolve(o)}
-function agent(p,o){var l=(o&&o.label)||""; calls.push(l);
- if(l==="plan") return reply({ok:true,retry_limit:3,tasks:[{id:"A",deps:[]}]});
- if(l==="finish") return reply({attention:[],board:[],full_check:"green"});
- if(/ block$/.test(l)) return reply({ok:true,line:"BLOCKED A"});
- return reply({id:"A",status:"red",summary:"no",concerns:[]}); }')"
-  check "retry_limit is bound: 3 attempts = the build and two escalated retries" 'printf "%s" "$out" | grep -q "^CALLS plan,A,A retry,A retry 2,A block,finish$"' "$out"
-fi
-
 # metrics.jsonl: one line per finished run
 cd "$Z" || exit 1
 rm -f .factory/metrics.jsonl
@@ -738,11 +613,9 @@ mkdir -p gates; printf '# count_tests guard_test_census guard_acceptance record_
 out="$(jq -n --arg c "$IDLE" '{cwd:$c, session_id:"S9", hook_event_name:"SessionStart", source:"startup"}' | bash "$H/factory-brief.sh" 2>/dev/null)"
 ctx="$(printf "%s" "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')"
 check "an empty board gets a short brief, not the full one" '[ -n "$ctx" ] && [ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ] && printf "%s" "$ctx" | grep -q "board is empty"' "$out"
-printf 'LEAD-STATE: dispatching T-9\n' > .factory/lead-state.md
 out="$(jq -n --arg c "$IDLE" '{cwd:$c, session_id:"S9", hook_event_name:"SessionStart", source:"compact"}' | bash "$H/factory-brief.sh" 2>/dev/null)"
 ctx="$(printf "%s" "$out" | jq -r '.hookSpecificOutput.additionalContext // empty')"
-check "...after a compaction too: an empty board has nothing to resume" '[ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ] && ! printf "%s" "$ctx" | grep -q "LEAD-STATE" && [ ! -f .factory/lead-state.md ]' "$out"
-rm -f .factory/lead-state.read.md
+check "...after a compaction too" '[ -n "$ctx" ] && [ "$(printf "%s\n" "$ctx" | wc -l | tr -d " ")" -le 3 ]' "$out"
 
 # nested config keys are migrated
 NEST="$WORK/nest"; rm -rf "$NEST"; mkdir -p "$NEST/gates" "$NEST/tasks/backlog" "$NEST/.factory"; cd "$NEST" || exit 1
@@ -755,9 +628,6 @@ check "--apply adds them and keeps the project's own values" 'jq -e ".fast.worke
 
 echo "=== fixes the fast lane depends on"
 Q="$WORK/fixes"; rm -rf "$Q"; mkdir -p "$Q/.factory"; cd "$Q" || exit 1; : > .factory/active
-jq -n --arg cwd "$Q" '{cwd:$cwd, session_id:"S1", tool_name:"Bash", tool_input:{command:"factory-claim"}}' | bash "$H/factory-done-guard.sh" >/dev/null
-out="$(bash "$H/factory-claim.sh")"
-check "the claim works the way /factory:run spells it" 'printf "%s" "$out" | grep -q "^CLAIMED"' "$out"
 echo 99999999999 > .factory/.dash-stamp
 jq -cn --arg c "$Q" '{cwd:$c, hook_event_name:"PostToolUse", tool_name:"Bash", tool_input:{command:"factory-commit C2-01"}, tool_response:{stdout:"COMMIT 9f3ab12 C2-01 (C2): a", stderr:""}}' | bash "$H/factory-event.sh"
 jq -cn --arg c "$Q" '{cwd:$c, hook_event_name:"PostToolUse", tool_name:"Bash", tool_input:{command:"bash gates/verify.sh C2-02"}, tool_response:{stdout:"", stderr:"GATE RESULT: GREEN for C2-02"}}' | bash "$H/factory-event.sh"
@@ -766,23 +636,11 @@ check "bin-style commits are recorded, read from tool_response" 'jq -e "select(.
 check "a gate verdict printed on stderr is recorded" 'jq -e "select(.kind==\"gate\" and .task==\"C2-02\" and .verdict==\"green\")" .factory/events.jsonl >/dev/null'
 check "a factory-check verdict is recorded as a gate run" 'jq -e "select(.kind==\"gate\" and .task==\"C2-03\" and .verdict==\"red\")" .factory/events.jsonl >/dev/null'
 
-echo "=== classic gates: a tree fingerprint for old gates, and any runner's count"
+echo "=== classic gates: any runner's count"
 K="$WORK/classic"; rm -rf "$K"; mkdir -p "$K/.factory/verified" "$K/gates" "$K/src"; cd "$K" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
 : > .factory/active; printf 'a\n' > src/a.txt; printf '.factory/\n' > .gitignore; git add -A; git commit -qm base
 echo 99999999999 > .factory/.dash-stamp
-pre()  { jq -n --arg cwd "$K" --arg c "$1" '{cwd:$cwd, session_id:"S", tool_name:"Bash", tool_input:{command:$c}}' | bash "$H/factory-done-guard.sh" >/dev/null; }
-post() { jq -cn --arg c "$K" --arg cmd "$1" --arg e "$2" '{cwd:$c, hook_event_name:"PostToolUse", tool_name:"Bash", tool_input:{command:$cmd}, tool_response:{stdout:"", stderr:$e}}' | bash "$H/factory-event.sh"; }
-pre "bash gates/verify.sh K-1"; printf '%s\n' "2026-01-01T00:00:00Z" > .factory/verified/K-1
-post "bash gates/verify.sh K-1" "GATE RESULT: GREEN for K-1 (marker written)"
-check "an old gate's green marker gets the fingerprint of the tree it tested" 'grep -q "^tree=[0-9a-f]" .factory/verified/K-1 && [ ! -f .factory/gate-start/K-1 ]' "$(cat .factory/verified/K-1)"
-out="$(factory-gate-skip check K-1)"
-check "so the integrator can skip the second run of the same bytes" 'printf "%s" "$out" | grep -q "^GATE SKIP K-1"' "$out"
-pre "bash gates/verify.sh K-2"; printf '%s\n' "2026-01-01T00:00:00Z" > .factory/verified/K-2
-printf 'changed while the gate ran\n' > src/a.txt
-post "bash gates/verify.sh K-2" "GATE RESULT: GREEN for K-2 (marker written)"
-check "a tree that changed while the gate ran gets no fingerprint" '! grep -q "^tree=" .factory/verified/K-2'
-git checkout -q src/a.txt
 python3 "$PLUGIN/tests/extract.py" gates/verify.sh >/dev/null; chmod +x gates/verify.sh
 jq -n '{gate_mode:"full", min_tests:1, commands:{build:"true", test:"echo suite done; echo ran=5", arch:"", lint:"true"}, check:{count:"ran=(\\d+)"}}' > .factory/config.json
 printf -- '---\nid: K-3\nacceptance: bash gates/verify.sh K-3\n---\n' > .factory/K-3.md

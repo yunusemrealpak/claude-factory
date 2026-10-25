@@ -63,7 +63,7 @@ gaps=0
 note() { gaps=$((gaps + 1)); [ "${mode}" = "brief" ] || echo "  - $*"; }
 
 missing_keys=""
-for key in verify workers max_concurrent_agents retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min autonomy_default; do
+for key in verify retry_limit min_tests gate_mode gate_isolation isolation_links risk_paths agent_stale_after_min autonomy_default; do
   jq -e --arg k "${key}" 'has($k)' "${CONFIG}" >/dev/null 2>&1 || missing_keys="${missing_keys} ${key}"
 done
 
@@ -75,13 +75,13 @@ for key in fast.workers fast.risk_review fast.audit fast.effort_build fast.effor
 done
 
 missing_dirs=""
-for d in verified failures no-progress changes lessons questions inflight; do
+for d in verified failures no-progress changes lessons questions; do
   [ -d "${F}/${d}" ] || missing_dirs="${missing_dirs} ${d}"
 done
 
 missing_ignore=""
 if [ -f "${ROOT}/.gitignore" ]; then
-  for line in ".factory/verified/" ".factory/inflight/" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/run-owner" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit.md" ".factory/gate-start/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/lead-state.read.md" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/"; do
+  for line in ".factory/verified/" ".factory/run.lock" ".factory/events.jsonl" ".factory/dashboard.html" ".factory/statusline.txt" ".factory/questions/" ".factory/reviews/" ".factory/logs/" ".factory/locks/" ".factory/run-start.json" ".factory/last-run.md" ".factory/parked/" ".factory/audit/" ".factory/attempts/" ".factory/usage.jsonl" ".factory/autonomy.json" ".factory/autonomy-off" ".factory/autonomy-cap" ".factory/publish/" ".factory/digest/" ".factory/retro-due" ".factory/STOP" ".factory/waiting/" ".factory/claude-md-protocol.old.md" ".factory/gate-legacy/"; do
     grep -qF "${line}" "${ROOT}/.gitignore" || missing_ignore="${missing_ignore} ${line}"
   done
 fi
@@ -109,7 +109,6 @@ if [ -z "${gate_replace}" ] && [ "${gate_kind}" != shim ]; then
   grep -q 'guard_acceptance'   "${GATE}" || missing_gate="${missing_gate} guard_acceptance"
   grep -q 'record_failure'     "${GATE}" || missing_gate="${missing_gate} record_failure"
   grep -q 'rm -f "${ROOT}/.factory/verified' "${GATE}" || missing_gate="${missing_gate} marker-invalidation"
-  grep -q 'tree=' "${GATE}"            || missing_gate="${missing_gate} tree-fingerprint"
   grep -q 'isolate()' "${GATE}"        || missing_gate="${missing_gate} isolate(optional)"
 fi
 
@@ -186,8 +185,6 @@ if [ -n "${missing_keys}" ] && [ -f "${CONFIG}" ]; then
     {
       factory_version: "unknown",
       verify: "gates/verify.sh",
-      workers: 2,
-      max_concurrent_agents: 3,
       retry_limit: 2,
       min_tests: 1,
       gate_mode: "staged",
@@ -254,8 +251,7 @@ if [ -n "${old_protocol}" ]; then
   if FACTORY_POINTER="$(cat <<'POINTER'
 <!-- factory: written by /factory:init, kept current by /factory:upgrade -->
 ## Factory
-While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:fast` builds the approved backlog and `/factory:status` shows the board.
-Compact instructions: keep which tasks were dispatched and at which stage, the last check results, retries and blocked reasons; where the summary and `.factory/lead-state.md` disagree, the file is right.
+While `.factory/active` exists this project is built by the factory plugin: `tasks/` is the board, each task file is the source of truth for its work, and every factory agent follows its own instructions. Hooks enforce the hard blocks (`/factory:bans`); `/factory:run` builds the approved backlog and `/factory:status` shows the board.
 <!-- /factory -->
 POINTER
 )" awk -v keep="${F}/claude-md-protocol.old.md" '

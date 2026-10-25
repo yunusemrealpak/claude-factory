@@ -25,7 +25,8 @@ Risk classes decide what merging needs:
        dependency bump          -> the pull request only, a person merges it
     B  a file matches risk_paths -> `risk_review: before` and no failed review
     A  everything else
-A high-severity finding in .factory/audit.md holds any class until acknowledged.
+A high-severity finding in the change's audit (.factory/audit/<id>.md) holds any
+class until acknowledged.
 
 Exit: 0 delivered or deliberately stopped; 1 held (the output says why);
       2 usage or not a factory project.
@@ -194,16 +195,17 @@ def change_dir(cid):
 
 
 def run_active():
-    inflight = os.path.join(F, "inflight")
+    """A run holds .factory/run.lock from its preflight to its finish, and its
+    checks keep the file's time fresh. A lock untouched for two hours is a run
+    that died: the next preflight takes over its base, and nothing waits on it."""
+    lock = os.path.join(F, "run.lock")
     try:
-        if any(not n.startswith(".") for n in os.listdir(inflight)):
-            return True
-    except OSError:
-        pass
-    try:
-        return any(n.endswith(".md") for n in os.listdir(os.path.join(ROOT, "tasks", "in-progress")))
-    except OSError:
-        return False
+        if time.time() - os.path.getmtime(lock) >= 2 * 3600:
+            return False
+        rec = json.load(open(lock, encoding="utf-8"))
+    except (OSError, ValueError):
+        return os.path.exists(lock)
+    return not (isinstance(rec, dict) and rec.get("state") == "halted")
 
 
 def tree_clean():
@@ -241,10 +243,12 @@ def major_bumps(base, sha, files):
 
 
 def audit_highs(cid):
+    """The high findings of this change's own audit. Never another change's, and
+    never a file an earlier run left: .factory/audit/<C>.md is the change's."""
     if os.path.exists(os.path.join(P, cid + ".ack")):
         return []
     try:
-        text = open(os.path.join(F, "audit.md"), encoding="utf-8").read()
+        text = open(os.path.join(F, "audit", cid + ".md"), encoding="utf-8").read()
     except OSError:
         return []
     return re.findall(r"^##\s*high\b[^\n]*", text, re.I | re.M)
@@ -263,6 +267,13 @@ def failed_reviews(cid):
         if not tid or (re.match(r"^C[0-9]+-", tid) and not tid.startswith(cid + "-")):
             continue
         if not re.match(r"^C[0-9]+-", tid) and cid != "C1":
+            continue
+        try:
+            rec = json.load(open(os.path.join(F, "reviews", tid + ".json"), encoding="utf-8"))
+        except (OSError, ValueError):
+            rec = {}
+        if isinstance(rec, dict) and rec.get("verdict") == "fail":
+            out.append(tid)
             continue
         try:
             verdicts = re.findall(r"^verdict:\s*(pass|fail)", open(os.path.join(d, n), encoding="utf-8").read(), re.M)
@@ -316,7 +327,7 @@ def pr_body(st, d):
         except OSError:
             pass
     try:
-        audit = open(os.path.join(F, "audit.md"), encoding="utf-8").read()[:4000]
+        audit = open(os.path.join(F, "audit", st["change"] + ".md"), encoding="utf-8").read()[:4000]
         parts.append("## Audit\n\n" + audit)
     except OSError:
         pass

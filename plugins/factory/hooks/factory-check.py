@@ -1112,13 +1112,38 @@ def files_fingerprint(listed):
     return h.hexdigest()
 
 
-def tree_hash():
+def waiting_record(task_id, blockers):
+    """.factory/waiting/<id>: the files this task's check is waiting on, and the
+    tasks in progress that list them. factory-settle reads it, and the loop
+    re-checks the task when one of those tasks settles. None removes it."""
+    path = os.path.join(F, "waiting", task_id)
+    if blockers is None:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    owners = set()
+    d = os.path.join(ROOT, "tasks", "in-progress")
     try:
-        r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-gate-skip.sh"), "hash", ROOT],
-                           capture_output=True, text=True)
-        return r.stdout.strip() or "unknown"
+        names = [n[:-3] for n in os.listdir(d) if n.endswith(".md") and n[:-3] != task_id]
     except OSError:
-        return "unknown"
+        names = []
+    for other in names:
+        if set(blockers) & set(files_touched(read(os.path.join(d, other + ".md")))):
+            owners.add(other)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("at=%s\nfiles=%s\ntasks=%s\n" % (now_iso(), " ".join(blockers[:20]), " ".join(sorted(owners))))
+
+
+def heartbeat():
+    """A run is alive while its checks run: factory-next and the publisher read
+    the age of .factory/run.lock to tell a run in progress from one that died."""
+    lock = os.path.join(F, "run.lock")
+    if os.path.exists(lock):
+        try:
+            os.utime(lock, None)
+        except OSError:
+            pass
 
 
 TEXT_READERS = {"grep", "egrep", "fgrep", "rg", "cat", "test", "[", "head", "tail", "wc", "awk", "sed", "diff",
@@ -1578,6 +1603,8 @@ def check_task(task_id):
     marker = os.path.join(F, "verified", task_id)
     if os.path.exists(marker):
         os.remove(marker)
+    waiting_record(task_id, None)
+    heartbeat()
     if col == "in-progress":
         set_frontmatter(path, {"stage": "verifying", "stage_since": now_iso()})
 
@@ -1733,6 +1760,7 @@ def check_task(task_id):
             for line in run.lines:
                 print(line)
             print("--- full log: %s" % run.log_rel)
+            waiting_record(task_id, blockers)
             print("CHECK RESULT: WAITING for %s - the failure is in work another task has in flight (%s). "
                   "Nothing here is this task's to fix: change nothing, and report that the task is waiting."
                   % (task_id, " ".join(blockers[:5])))
@@ -1761,9 +1789,9 @@ def check_task(task_id):
     with open(marker, "w", encoding="utf-8") as fh:
         # review=: what a reviewer has to see before this lands (factory-risk
         # reads it). In the marker, which no agent may write.
-        fh.write("%s\n%sisolated=%s\ncheck=fast\ncommit=%s\ntree=%s\nfiles=%s\n%s"
+        fh.write("%s\n%sisolated=%s\ncheck=fast\ncommit=%s\nfiles=%s\n%s"
                  % (now_iso(), "tests=%d\n" % tests_ran if counted else "", "yes" if run.isolated else "no",
-                    head.strip() or "unknown", tree_hash(), files_fingerprint(listed),
+                    head.strip() or "unknown", files_fingerprint(listed),
                     "".join("review=%s\n" % r.replace("\n", " ") for r in ctx["review"])))
     hist = os.path.join(F, "failures", task_id + ".log")
     if os.path.exists(hist):
@@ -1876,10 +1904,17 @@ def check_full():
     for line in run.lines:
         print(line)
     verdict = "red" if run.failed else "green"
+    # factory-deliver hands a change on only when this says green for the
+    # commit that is HEAD now, on a tree with nothing uncommitted in product code.
+    _, full_head = git("rev-parse", "HEAD")
+    _, porcelain = git("status", "--porcelain", "--", ".")
+    dirty = [l[3:] for l in porcelain.splitlines()
+             if l[3:] and not l[3:].strip('"').startswith(("tasks/", "decisions.md", ".factory/"))]
     with open(os.path.join(F, "full-check"), "w", encoding="utf-8") as fh:
-        fh.write("verdict=%s\nat=%s\ntests=%s\nisolated=%s\ntree=%s\nlog=%s\n"
+        fh.write("verdict=%s\nat=%s\ntests=%s\nisolated=%s\nhead=%s\nclean=%s\nlog=%s\n"
                  % (verdict, now_iso(), tests_ran if tests_ran is not None else "unknown",
-                    "yes" if full_isolated else "no", tree_hash(), run.log_rel))
+                    "yes" if full_isolated else "no", full_head.strip() or "unknown",
+                    "no" if dirty else "yes", run.log_rel))
     if run.failed:
         for name, text_ in run.failed:
             if text_:

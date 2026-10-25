@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Factory risk check. NOT a hook: the lead runs it on every task that comes back
-# with a green gate and without `review: always`, before the integrator gets it.
+# Factory risk check. NOT a hook: factory-settle runs it on every task whose
+# check is green and that is not marked `review: always`, before it lands.
 #
 # Usage: factory-risk <task-id>      (from the project root)
 #

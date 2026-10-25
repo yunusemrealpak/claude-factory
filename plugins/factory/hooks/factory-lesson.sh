@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Factory lessons. NOT a hook: /factory-retro writes lessons with it once the
-# developer has approved them; implementers only read the files.
+# developer has approved them; builders only read the files.
 #
 # Usage (from the project root):
 #   factory-lesson add <module> <evidence> <lesson>

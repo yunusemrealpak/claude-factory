@@ -89,22 +89,6 @@ printf 'g\n' | bash "$H/factory-change.sh" open C2 plain chore - >/dev/null 2>&1
 check "no acceptance command: the change still closes on its tasks" 'bash "$H/factory-change.sh" sync C2 | grep -qE "^(closed|CLOSED-NOW) C2-plain" && [ -f .factory/changes/C2-plain/closed ]'
 check "accept says there is nothing to run" 'bash "$H/factory-accept.sh" C2 | grep -q "^ACCEPT NONE C2"'
 
-echo "=== the run does not end on an unrun acceptance"
-cd "$A" || exit 1
-mktask "$A" backlog C2-04
-mv tasks/backlog/C2-04.md tasks/done/
-rm -f .factory/changes/C2-kasa/closed .factory/changes/C2-kasa/acceptance
-printf 's1' > .factory/run-owner
-stop_in() { jq -cn --arg c "$A" '{cwd:$c, session_id:"s1", hook_event_name:"Stop", stop_hook_active:false}'; }
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "an acceptance that never ran holds the session" 'printf "%s" "$out" | jq -e ".decision==\"block\"" >/dev/null && printf "%s" "$out" | jq -r ".reason" | grep -q "factory-accept"' "$out"
-check "the claim is not released while it is held" '[ -s .factory/run-owner ]'
-rm -f src/wired.txt
-bash "$H/factory-accept.sh" C2 >/dev/null 2>&1
-out="$(stop_in | bash "$H/factory-stop-gate.sh")"
-check "a red verdict is reported, not looped on" '! printf "%s" "$out" | jq -e ".decision" >/dev/null 2>&1 && printf "%s" "$out" | jq -r ".systemMessage" | grep -q "Waiting on a change acceptance"' "$out"
-check "the claim is released once it has been run" '[ ! -s .factory/run-owner ]'
-
 echo "=== bisect"
 B="$WORK/bisect"; rm -rf "$B"; mkdir -p "$B/src" "$B/.factory" "$B/tasks/done"; cd "$B" || exit 1
 git init -q -b main; git config user.email t@example.invalid; git config user.name t
@@ -173,7 +157,7 @@ check "the version stamp does not move while the gate is behind" '[ "$(jq -r ".f
 
 # a current project: nothing to say
 C="$WORK/current"; rm -rf "$C"; mkdir -p "$C/gates" "$C/tasks/backlog"; cd "$C" || exit 1
-mkdir -p .factory/verified .factory/failures .factory/no-progress .factory/changes .factory/lessons .factory/questions .factory/inflight
+mkdir -p .factory/verified .factory/failures .factory/no-progress .factory/changes .factory/lessons .factory/questions
 : > .factory/active
 cp "$H/gate-shim.sh" gates/verify.sh
 jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers:2, max_concurrent_agents:3,
@@ -184,7 +168,7 @@ jq -n --arg v "$harness" '{factory_version:$v, verify:"gates/verify.sh", workers
   fast:{workers:4,risk_review:"after",audit:true,effort_build:"medium",effort_escalate:"high",effort_review:"high",effort_audit:"high"},
   check:{claude_md_max_lines:200,untracked_guard:true},
   commands:{build:"",test:"",arch:"",lint:""}}' > .factory/config.json
-printf '.factory/verified/\n.factory/inflight/\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/run-owner\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit.md\n.factory/gate-start/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/lead-state.read.md\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n' > .gitignore
+printf '.factory/verified/\n.factory/run.lock\n.factory/events.jsonl\n.factory/dashboard.html\n.factory/statusline.txt\n.factory/questions/\n.factory/reviews/\n.factory/logs/\n.factory/locks/\n.factory/run-start.json\n.factory/last-run.md\n.factory/parked/\n.factory/audit/\n.factory/attempts/\n.factory/usage.jsonl\n.factory/autonomy.json\n.factory/autonomy-off\n.factory/autonomy-cap\n.factory/publish/\n.factory/digest/\n.factory/retro-due\n.factory/STOP\n.factory/waiting/\n.factory/claude-md-protocol.old.md\n.factory/gate-legacy/\n' > .gitignore
 FACTORY_ROOT="$C" bash "$H/factory-deny.sh" --apply >/dev/null
 printf -- '---\nid: C2-01\n---\n\n## Files touched\n\n## Attempts\n' > tasks/backlog/C2-01.md
 out="$(bash "$H/factory-upgrade.sh" 2>&1)"; rc=$?
