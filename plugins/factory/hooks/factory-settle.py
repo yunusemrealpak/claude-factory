@@ -214,12 +214,20 @@ def settle(tid, why, no_wait=False):
         risk_lines = [l for l in out.splitlines() if l.startswith("RISK")] if rc == 1 else []
         mode = ((config().get("fast") or {}).get("risk_review") or "after").lower()
         always = review_always(tid, col)
-        if always or (risk_lines and mode == "before"):
+        # review.monitor: a green check that left a cheat-type reason (a cheat
+        # signature, a frozen suite) is not landed first - the loop asks one
+        # narrow monitor about it before the reviewer (agents/monitor.md).
+        monitor = [l[len("review="):] for l in read(marker).splitlines()
+                   if re.match(r"^review=(cheat signature|frozen suite)", l)] \
+            if (config().get("review") or {}).get("monitor") is True else []
+        if always or monitor or (risk_lines and mode == "before"):
             for r in risk_lines:
                 print(r)
+            for m in monitor:
+                print("MONITOR %s: %s" % (tid, m))
             if always:
                 print("REVIEW %s: the task is marked review: always" % tid)
-            print("SETTLED %s REVIEW" % tid)
+            print("SETTLED %s REVIEW%s" % (tid, " MONITOR" if monitor else ""))
             return 0
         return land(tid, risk_lines)
 

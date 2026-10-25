@@ -5,7 +5,8 @@
 // A scenario answers each agent call by its label. An answer is a value, a
 // function (prompt, opts, n) -> value, or a list taken in order (the last one
 // repeats). `{ delay: k, value }` answers after k turns of the event loop, which
-// is how a test makes one builder finish after another.
+// is how a test makes one builder finish after another; a function as `value`
+// is called at that moment.
 import { readFileSync } from 'node:fs'
 
 const SRC = readFileSync(new URL('../workflows/loop.js', import.meta.url), 'utf8')
@@ -31,7 +32,9 @@ export async function runLoop(args, answers) {
     if (typeof a === 'function') a = a(prompt, opts, n)
     if (a && typeof a === 'object' && 'delay' in a) {
       await tick(a.delay)
-      a = a.value
+      // A function as the value runs when the delay is over: how a case sees
+      // when an agent ends, not only when it starts.
+      a = typeof a.value === 'function' ? a.value(prompt, opts, n) : a.value
     }
     if (a instanceof Error) throw a
     return a === undefined ? null : a

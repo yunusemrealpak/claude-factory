@@ -26,6 +26,12 @@ never fail.
   - The acceptance command: not a watch mode or a server that never exits,
     and not one that cannot fail (`true`, `exit 0`, `echo ...`, `... || true`).
   - At most five clarifying questions in the list's `## Clarifications`.
+  - EARS, only with plan.ears: true - every acceptance criterion in one of the
+    five EARS shapes, "shall" in each: "The <system> shall ...", "When
+    <trigger>, the <system> shall ...", "While <state>, ...", "If <condition>,
+    then the <system> shall ...", "Where <feature>, ...". A criterion in
+    another shape is a CONCERN, at any size of change, never a FAIL: the
+    wording helps a builder read it, it does not make it decidable.
 
 The verdict is PASS, CONCERNS or FAIL. A small change (plan.small_change
 tasks or fewer, 3 by default) never FAILs on scope, coverage or markers - only
@@ -93,6 +99,28 @@ def listed(value):
 def change_of(tid):
     m = re.match(r"^(C[0-9]+)-", tid)
     return m.group(1) if m else "C1"
+
+
+# The EARS shapes (Mavin et al.), each with "shall"; a leading label such as
+# "AC1:" or "**R2.**" is not part of the sentence.
+EARS_LABEL = re.compile(r"^\s*(\*\*)?\s*[A-Za-z]{0,6}-?[0-9]+[.:)]\s*(\*\*)?\s*")
+EARS = [re.compile(p, re.I) for p in (
+    r"^the\s+\S.*?\bshall\b",                       # ubiquitous
+    r"^when\s+[^,]+,\s*the\s+\S.*?\bshall\b",      # event-driven
+    r"^while\s+[^,]+,.*?\bshall\b",                # state-driven
+    r"^if\s+[^,]+,\s*then\s+the\s+\S.*?\bshall\b",  # unwanted behaviour
+    r"^where\s+[^,]+,.*?\bshall\b",                # optional feature
+)]
+
+
+def not_ears(text):
+    """The acceptance criteria of a task file that follow no EARS shape."""
+    out = []
+    for m in re.finditer(r"^- \[[ xX]\] (.+)$", section(text, "Acceptance criteria"), re.M):
+        crit = EARS_LABEL.sub("", m.group(1).strip(), count=1).strip()
+        if not any(rx.search(crit) for rx in EARS):
+            out.append(m.group(1).strip())
+    return out
 
 
 def section(text, name):
@@ -244,6 +272,11 @@ def check_change(cid, tasks, cfg):
         concerns += fails
         fails = []
     fails = graph + fails
+    if plan.get("ears") is True:
+        for t in mine:
+            for crit in not_ears(tasks[t]["text"]):
+                concerns.append("%s: a criterion not in EARS form (The/When/While/If .. then/Where .., with "
+                                "shall): %s" % (t, crit if len(crit) <= 90 else crit[:87] + "..."))
     verdict = "FAIL" if fails else "CONCERNS" if concerns else "PASS"
     return {"change": cid, "tasks": len(mine), "requirements": len(req or []), "verdict": verdict,
             "fail": fails, "concerns": concerns, "coverage": [{"requirement": r, "tasks": ts} for r, ts in coverage],

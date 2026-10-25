@@ -104,6 +104,10 @@ def build(proposed=False, change=None):
     out["workers"] = int(fast.get("workers") or 4)
     out["risk_review"] = fast.get("risk_review") or "after"
     out["audit"] = fast.get("audit", True) is not False
+    # Opt-in: two tasks of one area never build at once (fast.area_lease), and a
+    # cheat-type reason is put to a monitor before the reviewer (review.monitor).
+    out["area_lease"] = fast.get("area_lease") is True
+    out["monitor"] = (cfg.get("review") or {}).get("monitor") is True
     # retry_limit counts attempts at a task, the first included.
     out["retry_limit"] = max(1, int(cfg.get("retry_limit") or 2))
     out["effort"] = {"build": fast.get("effort_build") or "medium",
@@ -197,7 +201,8 @@ def build(proposed=False, change=None):
         fm = active[t]["fm"]
         out["tasks"].append({"id": t, "title": (fm.get("title") or t)[:60], "deps": active[t]["deps"],
                              "review": fm.get("review", "").lower() == "always",
-                             "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true"})
+                             "allow_test_removal": fm.get("allow_test_removal", "").lower() == "true",
+                             "area": fm.get("area", "").strip().strip("\"'").lower()})
     out["held"] = [{"id": t, "reason": r} for t, r in sorted(held.items())]
 
     # The shape of the graph bounds the run more than any worker count does:

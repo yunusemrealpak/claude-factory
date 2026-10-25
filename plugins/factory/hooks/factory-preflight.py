@@ -425,7 +425,7 @@ def preflight(change):
     plan_check(sorted({change_of(t["id"]) for t in plan["tasks"]}, key=lambda c: int(c[1:])), out)
     out["warnings"] += [w for w in plan["warnings"] if not w.startswith("uncommitted work") or level == "local"]
     out["held"] = plan["held"]
-    for k in ("workers", "risk_review", "audit", "effort", "counts"):
+    for k in ("workers", "risk_review", "audit", "effort", "counts", "area_lease", "monitor"):
         if k in plan:
             out[k] = plan[k]
     try:
@@ -444,7 +444,9 @@ def preflight(change):
     if out["problems"]:
         out["ok"] = False
         return out
-    out["tasks"] = [{"id": t["id"], "deps": t["deps"], "review": t["review"]} for t in plan["tasks"]]
+    # area only where a task has one: the plan stays small, and no area is no lease.
+    out["tasks"] = [dict({"id": t["id"], "deps": t["deps"], "review": t["review"]},
+                         **({"area": t["area"]} if t.get("area") else {})) for t in plan["tasks"]]
     if not out["tasks"]:
         return out
     snap, problems, warnings = P.snapshot_board(plan, exempt={t: ("needs_human",) for t in cleared})

@@ -19,8 +19,9 @@ export const meta = {
 // did not settle, a runner does - so a builder's account of its own work never
 // moves the board.
 //
-// args: the plan factory-preflight printed - { ok, tasks: [{id, deps, review}],
-// workers, attempts, risk_review, audit, start_head, change, effort, owed, ... }.
+// args: the plan factory-preflight printed - { ok, tasks: [{id, deps, review, area?}],
+// workers, attempts, risk_review, audit, start_head, change, effort, owed,
+// area_lease, monitor, ... }.
 // Without one (the workflow typed by itself), a runner runs the preflight.
 //
 // An agent that comes back with nothing is infrastructure, not the task: in
@@ -71,6 +72,19 @@ const REVIEWED = {
           fix: { type: 'string' },
         },
       },
+    },
+  },
+}
+
+const MONITORED = {
+  type: 'object',
+  required: ['line'],
+  properties: {
+    line: { type: 'string' },
+    verdict: { type: 'string', enum: ['cheat', 'clear'] },
+    evidence: {
+      type: 'array',
+      items: { type: 'object', properties: { file: { type: 'string' }, line: { type: 'number' }, quote: { type: 'string' }, why: { type: 'string' } } },
     },
   },
 }
@@ -130,6 +144,7 @@ const E = Object.assign({ build: 'medium', escalate: 'high', review: 'high', aud
 const ATTEMPTS = clamp(plan.attempts || 2, 1, 4)
 const WORKERS = clamp(opts.workers || plan.workers || 4, 1, 8)
 const tasks = plan.tasks || []
+const AREA_LEASE = plan.area_lease === true || opts.area_lease === true
 const owed = (plan.owed || []).filter(id => typeof id === 'string')
 if (!tasks.length && !owed.length) return { line: 'LOOP: nothing to build', held: (plan.held || []).map(h => h.id + ' ' + h.reason) }
 log(`${tasks.length} task(s), ${WORKERS} at a time, ${ATTEMPTS} attempt(s) each; ${(plan.held || []).length} held` +
@@ -171,6 +186,34 @@ function halt(why) {
 }
 
 const run1 = (prompt, label) => slot(() => agent(prompt, { agentType: RUNNER, label, phase: 'Build', schema: LINE }), false)
+
+// --- areas: with fast.area_lease, one task of an area builds at a time ------
+// Builders share one working tree, and a task's commit takes exactly its listed
+// files: two tasks working in the same part of the code at once overwrite each
+// other's fixes, and one lands the other's half-done edit. A task holds its
+// area from its first builder until it settles - landed, blocked or halted -
+// and the next task of that area starts then. A task with no area holds none.
+const leases = new Map()
+async function lease(t) {
+  const area = AREA_LEASE && t.area ? String(t.area) : null
+  if (!area) return null
+  let told = false
+  while (leases.has(area)) {
+    if (!told) {
+      log(`${t.id}: waits for area ${area}, which ${leases.get(area).holder} is working in`)
+      told = true
+    }
+    await new Promise(r => leases.get(area).waiting.push(r))
+  }
+  leases.set(area, { holder: t.id, waiting: [] })
+  return area
+}
+function unlease(area) {
+  if (!area) return
+  const l = leases.get(area)
+  leases.delete(area)
+  for (const r of (l && l.waiting) || []) r()
+}
 
 // --- progress: who is building, who has finished ----------------------------
 let building = 0
@@ -251,16 +294,39 @@ function reviewPrompt(t, landed) {
 const reviewer = (t, landed) =>
   slot(() => agent(reviewPrompt(t, landed), { agentType: 'factory:reviewer', effort: E.review, schema: REVIEWED, label: `${t.id} review`, phase: 'Build' }), true)
 
+// review.monitor: the check left a cheat-type reason (settle says REVIEW
+// MONITOR). One narrow question goes first, to a fresh agent: does this diff
+// make the checks pass without doing what the task asks? A cheat verdict blocks
+// the task and asks the developer (factory-monitor-submit) - it is never handed
+// back to a builder as a target to work around. Anything else goes on to the
+// reviewer as usual.
+function monitorPrompt(t) {
+  return [
+    'Monitor one factory task, following your instructions, and submit your verdict with factory-monitor-submit.',
+    'Put the last line factory-monitor-submit printed, verbatim, in `line`, and your verdict and evidence in `verdict` and `evidence`.',
+    'The task is green in tasks/in-progress and not committed: read the diff of its "## Files touched".',
+    `Task: ${t.id}`,
+  ].join('\n')
+}
+const monitor = t =>
+  slot(() => agent(monitorPrompt(t), { agentType: 'factory:monitor', effort: E.review, schema: MONITORED, label: `${t.id} monitor`, phase: 'Build' }), true)
+
 const postReviews = []
 const haltedTask = t => ({ id: t.id, status: 'halted', summary: halted || 'halted' })
 
 async function buildTask(t) {
   if (halted) return haltedTask(t)
+  const area = await lease(t)
+  if (halted) {
+    unlease(area)
+    return haltedTask(t)
+  }
   building++
   try {
     return await buildInner(t)
   } finally {
     building--
+    unlease(area)
     finished.add(t.id)
     finishes++
     progressed()
@@ -309,6 +375,13 @@ async function buildInner(t) {
         if (/REVIEW-AFTER/.test(v.rest)) postReviews.push(reviewer(t, true))
         return Object.assign(base, { status: 'landed', summary: v.line })
       case 'REVIEW': {
+        if (/^MONITOR\b/.test(v.rest)) {
+          const mv = await monitor(t)
+          if (mv && mv.halted === true) return haltedTask(t)
+          const ml = (mv && mv.line) || ''
+          if (/^MONITOR CHEAT/.test(ml)) return Object.assign(base, { status: 'blocked', summary: ml })
+          log(`${t.id}: ${/^MONITOR CLEAR/.test(ml) ? 'the monitor found no cheat' : 'the monitor gave no verdict'} - the review goes ahead`)
+        }
         const rv = await reviewer(t, false)
         if (rv && rv.halted === true) return haltedTask(t)
         const line = (rv && rv.line) || ''

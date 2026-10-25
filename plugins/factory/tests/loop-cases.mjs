@@ -292,5 +292,108 @@ const T = (id, deps = [], review = false) => ({ id, deps, review })
   check('the runner\'s RETRY line then retries it', r.labels.join(',') === 'A,A settle,A retry,finish' && r.result.tasks === 'A landed', r.labels.join(',') + ' | ' + r.result.tasks)
 }
 
+// 20. areas: with fast.area_lease, one task of an area builds at a time
+const A = (id, deps = [], area = '') => Object.assign({ id, deps, review: false }, area ? { area } : {})
+function timed(timeline, id, delay, value) {
+  return () => {
+    timeline.push(id + '+')
+    return { delay, value: () => { timeline.push(id + '-'); return typeof value === 'function' ? value() : value } }
+  }
+}
+const overlap = (tl, a, b) => {
+  // true when b started while a was still running (or the other way round)
+  const as = tl.indexOf(a + '+'), ae = tl.indexOf(a + '-'), bs = tl.indexOf(b + '+'), be = tl.indexOf(b + '-')
+  return (bs > as && bs < ae) || (as > bs && as < be)
+}
+{
+  const tl = []
+  const r = await runLoop(plan([A('P', [], 'db'), A('Q', [], 'db'), A('R', [], 'ui')], { area_lease: true }), {
+    P: timed(tl, 'P', 8, landed('P')),
+    Q: timed(tl, 'Q', 2, landed('Q')),
+    R: timed(tl, 'R', 2, landed('R')),
+    finish: FINISH,
+  })
+  check('two tasks of one area never build at the same time', !overlap(tl, 'P', 'Q') && r.result.tasks === 'P landed, Q landed, R landed', tl.join(' ') + ' | ' + r.result.tasks)
+  check('...a task of another area builds alongside', overlap(tl, 'P', 'R'), tl.join(' '))
+  check('...and the wait is said, with who holds the area', r.logs.some(l => /^Q: waits for area db, which P is working in$/.test(l)), r.logs.join(' / '))
+}
+{
+  const tl = []
+  await runLoop(plan([A('P', [], 'db'), A('Q', [], 'db')]), {
+    P: timed(tl, 'P', 8, landed('P')),
+    Q: timed(tl, 'Q', 2, landed('Q')),
+    finish: FINISH,
+  })
+  check('without area_lease an area changes nothing: they build together', overlap(tl, 'P', 'Q'), tl.join(' '))
+}
+{
+  const tl = []
+  const r = await runLoop(plan([A('P', [], 'db'), A('Q', [], 'db')], { area_lease: true }), {
+    P: timed(tl, 'P', 6, { id: 'P', status: 'red', summary: 'x', settle: 'SETTLED P BLOCKED: red after 2 attempt(s), the limit: x', concerns: [] }),
+    Q: timed(tl, 'Q', 2, landed('Q')),
+    finish: FINISH,
+  })
+  check('a task that blocks frees its area: the next one builds', r.result.tasks === 'P blocked, Q landed' && tl.indexOf('Q+') > tl.indexOf('P-'), tl.join(' ') + ' | ' + r.result.tasks)
+}
+{
+  const tl = []
+  const r = await runLoop(plan([A('P', [], 'db'), A('Q', [], 'db'), A('S')], { area_lease: true }), {
+    P: timed(tl, 'P', 6, landed('P')),
+    Q: timed(tl, 'Q', 2, landed('Q')),
+    S: timed(tl, 'S', 2, landed('S')),
+    finish: FINISH,
+  })
+  check('a task with no area holds no lease and waits for none', overlap(tl, 'P', 'S') && !overlap(tl, 'P', 'Q'), tl.join(' '))
+}
+{
+  const tl = []
+  const r = await runLoop(plan([A('P', [], 'db'), A('Q', [], 'db')], { area_lease: true }), {
+    P: timed(tl, 'P', 4, { id: 'P', status: 'red', summary: 'x', settle: 'SETTLED P RETRY 1/2: red - x', concerns: [] }),
+    'P retry': timed(tl, 'Pr', 4, landed('P')),
+    Q: timed(tl, 'Q', 2, landed('Q')),
+    finish: FINISH,
+  })
+  check('the area is held through a retry, until the task settles for good', tl.indexOf('Q+') > tl.indexOf('Pr-') && r.result.tasks === 'P landed, Q landed', tl.join(' '))
+}
+
+// 21. review.monitor: a cheat-type reason goes to one narrow monitor first
+const reviewD = { id: 'D', status: 'review', summary: 'green', settle: 'SETTLED D REVIEW MONITOR', concerns: [] }
+{
+  const r = await runLoop(plan([T('D')]), {
+    D: reviewD,
+    'D monitor': { line: 'MONITOR CLEAR D', verdict: 'clear', evidence: [] },
+    'D review': { line: 'REVIEW PASS D: LANDED D abc3', findings: [] },
+    finish: FINISH,
+  })
+  check('a monitor that finds no cheat lets the review go ahead', r.labels.join(',') === 'D,D monitor,D review,finish' && r.result.tasks === 'D landed', r.labels.join(','))
+  const mc = r.calls.find(c => c.label === 'D monitor')
+  check('the monitor is factory:monitor, told to submit with factory-monitor-submit', mc && mc.opts.agentType === 'factory:monitor' && /factory-monitor-submit/.test(mc.prompt) && /Task: D$/.test(mc.prompt), mc && mc.prompt)
+}
+{
+  const r = await runLoop(plan([T('D'), T('E', ['D'])]), {
+    D: reviewD,
+    'D monitor': { line: 'MONITOR CHEAT D: blocked and asked', verdict: 'cheat', evidence: [{ file: 'src/a.py', line: 2, quote: 'return True', why: 'always true' }] },
+    finish: FINISH,
+  })
+  check('a cheat verdict blocks the task: no reviewer, no fix builder', r.labels.join(',') === 'D,D monitor,finish' && r.result.tasks === 'D blocked, E skipped', r.labels.join(',') + ' | ' + r.result.tasks)
+}
+{
+  const r = await runLoop(plan([T('D')]), {
+    D: { id: 'D', status: 'review', summary: 'green', settle: 'SETTLED D REVIEW', concerns: [] },
+    'D review': { line: 'REVIEW PASS D: LANDED D abc3', findings: [] },
+    finish: FINISH,
+  })
+  check('without MONITOR in the settle line (review.monitor off) no monitor runs', !r.labels.includes('D monitor') && r.labels.join(',') === 'D,D review,finish', r.labels.join(','))
+}
+{
+  const r = await runLoop(plan([T('D')]), {
+    D: reviewD,
+    'D monitor': null,
+    'D review': { line: 'REVIEW PASS D: LANDED D abc3', findings: [] },
+    finish: FINISH,
+  })
+  check('a monitor that returns nothing does not hold the task: the reviewer still judges it', r.labels.join(',') === 'D,D monitor,D review,finish' && r.result.tasks === 'D landed', r.labels.join(','))
+}
+
 console.log(`loop: passed=${passed} failed=${failed}`)
 process.exit(failed ? 1 : 0)
