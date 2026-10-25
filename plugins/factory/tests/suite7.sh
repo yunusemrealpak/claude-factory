@@ -116,6 +116,8 @@ check "no-progress"                    'hit bash "rm .factory/no-progress/T-1" f
 check "failures"                       'hit path "$P/.factory/failures/T-1.txt" factory-failures'
 check "questions"                      'hit path "$P/.factory/questions/Q1.md" factory-questions'
 check "lessons"                        'hit bash "echo rule >> .factory/lessons/core.md" factory-lessons'
+check "rules"                          'hit path "$P/.factory/rules/pnpm-only.rule" factory-rules'
+check "removing a rule"                'hit bash "rm .factory/rules/pnpm-only.rule" factory-rules'
 check "the event log"                  'hit bash "echo {} >> .factory/events.jsonl" factory-events'
 check "publisher state"                'hit path "$P/.factory/publish/C1.json" factory-publish-state'
 check "the active switch"              'hit bash "rm .factory/active" factory-active'

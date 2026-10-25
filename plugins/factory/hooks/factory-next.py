@@ -179,10 +179,11 @@ def worktree(cid):
     tdir = os.path.join(ROOT, "tasks")
     if os.path.isdir(tdir):
         shutil.copytree(tdir, os.path.join(path, "tasks"), dirs_exist_ok=True)
-    # The lessons (gitignored, approved on this machine) and the criteria (in
-    # case they are not committed yet) go too: a builder in the worktree reads
-    # them at factory-start like one in the main tree.
-    for name in ("active", "config.json", "changes", "lessons", "criteria"):
+    # The lessons and rules (gitignored, approved on this machine) and the
+    # criteria (in case they are not committed yet) go too: a builder in the
+    # worktree reads them at factory-start, and is held to the rules, like one
+    # in the main tree.
+    for name in ("active", "config.json", "changes", "lessons", "rules", "criteria"):
         src = os.path.join(F, name)
         dst = os.path.join(path, ".factory", name)
         if os.path.isdir(src):

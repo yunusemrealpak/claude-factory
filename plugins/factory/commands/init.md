@@ -226,7 +226,12 @@ review), `audit` (default `true`: one auditor reads the run's seams at the end)
 and `effort_audit` (default `high`), and `budget` (default `{"turns": 150,
 "tokens": 3000000}`: past it a builder may only settle, block or ask - a builder
 that loops is stopped instead of spending the night; `0` turns one limit off,
-`false` both). The top-level `retry_limit` (default 2)
+`false` both), and `stuck` (default `false`: with `true`, a builder that
+makes the same call with the same result 4 times, the same failing call 3
+times, or takes turns between two calls 6 times is told to change its
+approach, and the second time may only settle the task as `no_progress`;
+waiting and looking around - `sleep`, `git status`, `git log`, `ls` - never
+count). The top-level `retry_limit` (default 2)
 is how many attempts a red task gets in total, the first included.
 
 `check` is optional too, and it is how the loop judges one task without
@@ -400,6 +405,7 @@ the repo while `.factory/active` and `config.json` remain committed:
 .factory/changes/
 .factory/retro/
 .factory/lessons/
+.factory/rules/
 .factory/events.jsonl
 .factory/dashboard.html
 .factory/statusline.txt
@@ -437,8 +443,9 @@ and is continued by the next `/factory:run`; `reviews/`, `attempts/` and
 `waiting/` are what `factory-settle` decides each task from, and `audit/` holds
 one audit per change.
 
-`changes/`, `retro/` and `lessons/` are the factory's own record of what it did,
-how it went and what it learned. They stay on this machine, like the
+`changes/`, `retro/`, `lessons/` and `rules/` are the factory's own record of
+what it did, how it went and what it learned (a rule is a lesson the hooks
+hold builders to; only `factory-retro-apply` writes one). They stay on this machine, like the
 `refs/factory/*` refs that point into `changes/`; what reaches the shared
 repository is the commits themselves.
 

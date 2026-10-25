@@ -41,7 +41,7 @@ const P = (p) => String(p).replace(/\\/g, '/').replace(/^[A-Za-z]:/, '')
 
 // Answers every call the module makes in Claude Code's place and records the
 // processes it starts. `active` is whether the factory is open in /proj.
-function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' }, readonly = '', step = STEP_USAGE } = {}) {
+function world(on, { active = true, runFails = false, files = {}, level = '', limits = [], rootPath = '/proj', rules = RULES, env = { HOME: '/home/u' }, readonly = '', step = STEP_USAGE, lists = {} } = {}) {
   const runs = []
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: rootPath }))
@@ -50,7 +50,7 @@ function world(on, { active = true, runFails = false, files = {}, level = '', li
   on('env.get', (_$, e) => ({ value: env[e.name] }))
   on('fs.exists', (_$, e) => ({ value: P(e.path).endsWith('/.factory/active') ? active : P(e.path) in files }))
   on('fs.read', (_$, e) => ({ value: P(e.path).endsWith('/hard-blocks.txt') ? rules : files[P(e.path)] }))
-  on('fs.list', () => ({ value: [{ name: 'T1.md', kind: 'file', size: 1, isLink: false }] }))
+  on('fs.list', (_$, e) => ({ value: lists[P(e.path)] || [{ name: 'T1.md', kind: 'file', size: 1, isLink: false }] }))
   on('agent.list', () => ({ value: [] }))
   on('session.id', () => ({ value: 's1' }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
@@ -632,5 +632,218 @@ describe('builder budget', () => {
     await spawn($)
     await steps($, 150)
     expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).toContain('150 of 150 turns')
+  })
+})
+
+describe('stuck builder (fast.stuck)', () => {
+  const call = ($, tool, input, agentId = 'a1') => $.tool.call({ tool, ...input, ...(agentId ? { agentId } : {}) })
+  const cfg = (fast) => ({ '/proj/.factory/config.json': JSON.stringify({ fast }) })
+  const spawn = ($, type = 'factory:builder', description = 'T1') => $.agent.spawn({ subagentType: type, description, prompt: 'go' })
+  const stuckLines = (runs) =>
+    runs.filter((r) => r.argv.at(-1) === '/proj/.factory/events.jsonl').map((r) => JSON.parse(r.init.stdin)).filter((l) => l.kind === 'stuck')
+  // A failing test run, its time different every run.
+  let n = 0
+  const red = () => ({ result: 'Exit code 1\nFAIL tests/a.test.ts\nTime: ' + (++n) + '.2 s, at 2026-10-08T00:00:0' + (n % 10) + 'Z' })
+
+  test('the same failure 3 times is told once, a second time sends the builder out', async ($, on) => {
+    const runs = world(on, { files: cfg({ stuck: true }) })
+    on('tool.call', (_$, e) => (/^\s*npm\s+test\s*$/.test(e.command || '') ? red() : { result: 'ran' }))
+    await start($)
+    await spawn($, 'factory:builder', 'C2-01 retry')
+    const a = await call($, 'Bash', { command: 'npm test' })
+    const b = await call($, 'Bash', { command: 'npm  test ' })
+    expect((a.context || []).length + (b.context || []).length).toBe(0)
+    const c = await call($, 'Bash', { command: 'npm test' })
+    expect(c.context).toHaveLength(1)
+    expect(c.context[0]).toContain('failed the same way 3 times')
+    expect(c.context[0]).toContain('factory-settle C2-01 "no_progress: npm test failed the same way 3 times in a row"')
+    // The reminder starts the count again: the next two runs go by.
+    await call($, 'Bash', { command: 'npm test' })
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('stuck')
+    const f = await call($, 'Bash', { command: 'npm test' })
+    expect(f.context[0]).toContain('second time')
+    const g = JSON.stringify(await call($, 'Bash', { command: 'ls src' }))
+    expect(g).toContain('C2-01 is stuck')
+    expect(g).not.toContain('"ran"')
+    expect(JSON.stringify(await call($, 'Edit', { file_path: '/proj/src/a.ts', old_string: 'a', new_string: 'b' }))).toContain('is stuck')
+    for (const command of ['factory-settle C2-01 "no_progress: npm test failed the same way 3 times in a row"', "factory-block C2-01 'stuck'"]) {
+      expect(JSON.stringify(await call($, 'Bash', { command }))).toContain('ran')
+    }
+    expect(JSON.stringify(await call($, 'Edit', { file_path: '/proj/tasks/in-progress/C2-01.md', old_string: 'a', new_string: 'b' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'StructuredOutput', { status: 'no_progress' }))).toContain('ran')
+    expect(stuckLines(runs).map((l) => [l.outcome, l.task, l.pattern])).toEqual([
+      ['warn', 'C2-01', 'error'],
+      ['exit', 'C2-01', 'error'],
+    ])
+  })
+
+  test('the same call with the same answer 4 times is told', async ($, on) => {
+    world(on, { files: cfg({ stuck: true }) })
+    on('tool.call', () => ({ result: 'same file' }))
+    await start($)
+    await spawn($)
+    for (let i = 0; i < 3; i++) expect(await call($, 'Read', { file_path: '/proj/src/a.ts' })).not.toHaveProperty('context')
+    const d = await call($, 'Read', { file_path: '/proj/src/a.ts' })
+    expect(d.context[0]).toContain('Read src/a.ts gave the same result 4 times in a row')
+  })
+
+  test('two calls taking turns 6 times are told', async ($, on) => {
+    world(on, { files: cfg({ stuck: true }) })
+    on('tool.call', (_$, e) => (e.tool === 'Bash' ? red() : { result: 'edited' }))
+    await start($)
+    await spawn($)
+    let last = null
+    for (let i = 0; i < 3; i++) {
+      await call($, 'Edit', { file_path: '/proj/src/a.ts', old_string: 'x', new_string: 'y' })
+      last = await call($, 'Bash', { command: 'npm test' })
+    }
+    expect(last.context[0]).toContain('Edit src/a.ts and npm test took turns 6 times')
+  })
+
+  test('an answer that changes is progress, not a loop', async ($, on) => {
+    world(on, { files: cfg({ stuck: true }) })
+    let k = 0
+    on('tool.call', () => ({ result: 'Exit code 1\n' + (10 - ++k) + ' tests failed' }))
+    await start($)
+    await spawn($)
+    for (let i = 0; i < 8; i++) expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('stuck')
+  })
+
+  test('polling is never counted', async ($, on) => {
+    world(on, { files: cfg({ stuck: true }) })
+    on('tool.call', () => ({ result: 'nothing yet' }))
+    await start($)
+    await spawn($)
+    for (const command of ['sleep 30', 'git status', 'git log --oneline -5', 'git status 2>&1', 'ls -la src', 'date']) {
+      for (let i = 0; i < 6; i++) expect(JSON.stringify(await call($, 'Bash', { command }))).not.toContain('stuck')
+    }
+    for (let i = 0; i < 6; i++) expect(JSON.stringify(await call($, 'TaskOutput', { task_id: 'b1' }))).not.toContain('stuck')
+  })
+
+  test('off by default', async ($, on) => {
+    world(on)
+    on('tool.call', () => red())
+    await start($)
+    await spawn($)
+    for (let i = 0; i < 10; i++) expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('stuck')
+  })
+
+  test('a reviewer and the main session are never limited', async ($, on) => {
+    world(on, { files: cfg({ stuck: true }) })
+    on('tool.call', () => red())
+    await start($)
+    await spawn($, 'factory:reviewer', 'T1 review')
+    for (let i = 0; i < 10; i++) expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('stuck')
+    for (let i = 0; i < 10; i++) expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }, null))).not.toContain('stuck')
+  })
+
+  test('where the factory is not open nothing is watched', async ($, on) => {
+    world(on, { active: false, files: cfg({ stuck: true }) })
+    on('tool.call', () => red())
+    await start($)
+    await spawn($)
+    for (let i = 0; i < 10; i++) expect(JSON.stringify(await call($, 'Bash', { command: 'npm test' }))).not.toContain('stuck')
+  })
+})
+
+describe('project rules (.factory/rules)', () => {
+  const call = ($, tool, input, agentId = 'a1') => $.tool.call({ tool, ...input, ...(agentId ? { agentId } : {}) })
+  const spawn = ($, type = 'factory:builder', description = 'T1') => $.agent.spawn({ subagentType: type, description, prompt: 'go' })
+  const D = '/proj/.factory/rules'
+  const rule = (name, match, pattern, action, message) =>
+    ['# Factory rule, applied by factory-retro-apply (2026-10-20/P2).', 'name: ' + name, 'match: ' + match, 'pattern: ' + pattern, 'action: ' + action,
+      'message: ' + message, 'evidence: C2-03, sig-abcdef123456', 'added: 2026-10-20T00:00:00Z'].join('\n') + '\n'
+  function withRules(rs) {
+    const files = { [D]: '' }
+    const lists = { [D]: [] }
+    for (const [name, ...r] of rs) {
+      files[D + '/' + name + '.rule'] = rule(name, ...r)
+      lists[D].push({ name: name + '.rule', kind: 'file', size: 100, isLink: false })
+    }
+    lists[D].push({ name: 'notes.md', kind: 'file', size: 1, isLink: false })
+    return { files, lists }
+  }
+  const ruleLines = (runs) =>
+    runs.filter((r) => r.argv.at(-1) === '/proj/.factory/events.jsonl').map((r) => JSON.parse(r.init.stdin)).filter((l) => l.kind === 'lesson_rule')
+
+  test('a warn rule lets the call run and reminds the builder', async ($, on) => {
+    const runs = world(on, withRules([['pnpm-only', 'bash', '(^|[\\s;&|])npm\\s+(install|i)(\\s|$)', 'warn', 'This repo uses pnpm; npm install rewrites the lockfile.']]))
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    const r = await call($, 'Bash', { command: 'cd web && NPM install left-pad' })
+    expect(JSON.stringify(r)).toContain('ran')
+    expect(r.context).toEqual(['Factory rule pnpm-only (a lesson from C2-03, sig-abcdef123456): This repo uses pnpm; npm install rewrites the lockfile.'])
+    expect(await call($, 'Bash', { command: 'pnpm install' })).not.toHaveProperty('context')
+    expect(ruleLines(runs).map((l) => [l.rule, l.outcome, l.task])).toEqual([['pnpm-only', 'warn', 'T1']])
+  })
+
+  test('a block rule refuses the call and does not halt the run', async ($, on) => {
+    const runs = world(on, withRules([
+      ['no-legacy', 'path', '^src/legacy/', 'block', 'src/legacy is frozen; add new code under src/core.'],
+      ['no-console', 'content', 'console\\.log\\(', 'warn', 'Use the logger, not console.log.'],
+    ]))
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    const r = JSON.stringify(await call($, 'Write', { file_path: '/proj/src/legacy/a.ts', content: 'x' }))
+    expect(r).toContain('Factory rule no-legacy')
+    expect(r).toContain('src/legacy is frozen')
+    expect(r).not.toContain('"ran"')
+    const e = await call($, 'Edit', { file_path: '/proj/src/core/a.ts', old_string: 'a', new_string: 'console.log(1)' })
+    expect(JSON.stringify(e)).toContain('ran')
+    expect(e.context[0]).toContain('Use the logger')
+    expect(runs.some((x) => JSON.stringify(x).includes('"trip"'))).toBe(false)
+    expect(ruleLines(runs).map((l) => [l.rule, l.outcome])).toEqual([['no-legacy', 'block'], ['no-console', 'warn']])
+  })
+
+  test('a rule never stops a factory command or a task file write', async ($, on) => {
+    world(on, withRules([
+      ['no-settle', 'bash', 'settle|check|block', 'block', 'never'],
+      ['no-tasks', 'path', '.*', 'block', 'never'],
+      ['no-words', 'content', 'red', 'block', 'never'],
+    ]))
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    for (const command of ['factory-settle T1 "red: check failed"', 'factory-check T1 2>&1 | tail -20', '/opt/p/hooks/factory-block.sh T1 x']) {
+      const r = await call($, 'Bash', { command })
+      expect(JSON.stringify(r)).toContain('ran')
+      expect(r).not.toHaveProperty('context')
+    }
+    for (const file_path of ['/proj/tasks/in-progress/T1.md', '/proj/decisions.md']) {
+      expect(JSON.stringify(await call($, 'Edit', { file_path, old_string: 'a', new_string: 'went red' }))).toContain('ran')
+    }
+  })
+
+  test('no rules, no change', async ($, on) => {
+    world(on)
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    const r = await call($, 'Bash', { command: 'npm install left-pad' })
+    expect(JSON.stringify(r)).toContain('ran')
+    expect(r).not.toHaveProperty('context')
+  })
+
+  test('rules are for builders only', async ($, on) => {
+    world(on, withRules([['pnpm-only', 'bash', 'npm install', 'block', 'pnpm']]))
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($, 'factory:reviewer', 'T1 review')
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm install' }))).toContain('ran')
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm install' }, null))).toContain('ran')
+  })
+
+  test('a rule JavaScript cannot read is left out, and the others still apply', async ($, on) => {
+    world(on, withRules([
+      ['broken', 'bash', '(unclosed', 'block', 'x'],
+      ['pnpm-only', 'bash', 'npm install', 'block', 'pnpm'],
+    ]))
+    on('tool.call', () => ({ result: 'ran' }))
+    await start($)
+    await spawn($)
+    expect(JSON.stringify(await call($, 'Bash', { command: 'npm install' }))).toContain('Factory rule pnpm-only')
+    expect(JSON.stringify(await call($, 'Bash', { command: 'make build' }))).toContain('ran')
   })
 })

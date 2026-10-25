@@ -15,9 +15,22 @@ is a JSON object with a kind and the metric it should move:
   {"id":"P2","kind":"config","patch":{"gate_isolation":true},"metric":"first_pass_green"}
   {"id":"P3","kind":"claude_md","text":"...","metric":"stage_red_rate","stage":"build"}
   {"id":"P4","kind":"plugin","surface":"agents/builder.md","change":"...","metric":"cost_per_task"}
+  {"id":"P5","kind":"rule","name":"pnpm-only","match":"bash","pattern":"(^|[\\\\s;&|])npm\\\\s+install",
+   "action":"warn","message":"...","evidence":"C2-03,sig-4f1a...","metric":"sig_recurrence","signature":"4f1a..."}
+  {"id":"P6","kind":"lesson_retire","module":"api","text":"<the lesson, as factory-lesson check printed it>"}
 
 What it will apply, and nothing else:
-  - a lesson, through factory-lesson (which checks the evidence on disk);
+  - a lesson, through factory-lesson (which checks the evidence on disk and
+    refuses one that overlaps a lesson already there); with "replaces": "<the
+    old lesson's text>" it rewords that lesson instead (factory-lesson update),
+    and "category" / "retire_when" go along;
+  - a rule, .factory/rules/<name>.rule: a lesson the hooks module enforces on
+    builders' calls (match bash|path|content, a regex, action warn|block, a
+    message, evidence on disk). At most RULES_PER_RETRO per retrospective and
+    MAX_RULES in all; a pattern that matches everything, or the way a builder
+    checks and settles, is refused. A rule is taken back by deleting its file;
+  - a lesson's retirement, only when `factory-lesson check` says what it names
+    is gone. No metric: it is a fact on disk, not a bet;
   - a config patch that does not loosen the gate: gate_isolation false->true,
     isolation_links added, risk_paths only widened, min_tests only raised,
     retry_limit only lowered, fast.risk_review after->before, fast.audit
@@ -34,6 +47,7 @@ Each applied change is one commit of its own file with the trailer
 what did not help.
 """
 import calendar
+import glob
 import json
 import os
 import re
@@ -67,6 +81,25 @@ BAD_RULE = re.compile(
     r"disable\s+(the\s+)?(gate|hook|review)|git\s+push|force[- ]push|gates/|verify\.sh|\.factory/(config|autonomy|STOP)",
     re.I)
 MAX_RULE = 240
+RULES = os.path.join(F, "rules")
+MAX_RULES = 10          # register.js reads no more than this either
+RULES_PER_RETRO = 2
+RULE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,40}")
+# How a builder checks, settles, blocks and asks, and the files it settles
+# with. register.js never applies a rule to them; a pattern that matches one
+# is refused here as well, so the mistake is caught where it is made.
+WAY_OUT = {
+    "bash": ['factory-settle T1 "no_progress: npm test failed"', "factory-block T1 'needs a decision'",
+             'factory-ask T1 "which one?"', "factory-check T1", "factory-start T1 builder"],
+    "path": ["tasks/in-progress/T1.md", "tasks/backlog/T1.md", "decisions.md"],
+    "content": [],
+}
+# What JavaScript reads otherwise than Python, or not at all: named groups the
+# Python way, comments, atomic groups, inline flags, \A \Z, possessive
+# quantifiers, POSIX classes ([[:space:]]: write \s). Letter case is ignored
+# by both readers anyway.
+NOT_PORTABLE = re.compile(r"\(\?(P|#|>|[aiLmsux-]+[:)])|\\[AZz]|[*+?}]\+|\[\[?:[a-z]+:\]")
+LESSON_CATEGORIES = ("build", "test", "tooling", "convention", "environment", "dependency")
 
 
 def now_iso():
@@ -295,6 +328,143 @@ def undo_for_config(cfg_keys):
     return {"kind": "config", "keys": cfg_keys}
 
 
+LESSON_SH = os.path.join(HOOK_DIR, "factory-lesson.sh")
+MODULE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
+def lesson_lines(module):
+    return [l for l in read(os.path.join(F, "lessons", module + ".md")).splitlines() if l.startswith("- ")]
+
+
+def lesson_text(line):
+    return " ".join(line[2:].split(" [evidence: ")[0].split())
+
+
+def lesson_number(module, text):
+    """(n, line) of the lesson of <module> that reads <text>, or (None, None)."""
+    want = " ".join(str(text).split())
+    for i, l in enumerate(lesson_lines(module), 1):
+        if lesson_text(l) == want:
+            return i, l
+    return None, None
+
+
+def evidence_on_disk(ev):
+    """(the evidence comma-joined, None), or (None, why not): every task id and
+    sig-<hash> must exist, as factory-lesson asks of a lesson."""
+    toks = [t for t in re.split(r"[,\s]+", str(ev or "")) if t]
+    if not toks:
+        return None, "a rule needs evidence: at least one task id or sig-<hash>"
+    for t in toks:
+        if t.startswith("sig-"):
+            if not re.fullmatch(r"sig-[0-9a-f]{6,64}", t) or not os.path.isfile(os.path.join(F, "failures", t + ".txt")):
+                return None, "evidence %s: no .factory/failures/%s.txt" % (t, t)
+        elif not MODULE.fullmatch(t) or not glob.glob(os.path.join(ROOT, "tasks", "*", t + ".md")):
+            return None, "evidence %s: no task file tasks/*/%s.md" % (t, t)
+    return ", ".join(toks), None
+
+
+def rule_files():
+    try:
+        return sorted(n for n in os.listdir(RULES) if re.fullmatch(r"[a-z0-9][a-z0-9-]*\.rule", n))
+    except OSError:
+        return []
+
+
+def check_rule(p):
+    """None when the rule may be written, else why not."""
+    if not RULE_NAME.fullmatch(str(p.get("name") or "")):
+        return "a rule's name is lower-case letters, digits and dashes, at most 41"
+    match, action = p.get("match"), p.get("action")
+    if match not in ("bash", "path", "content"):
+        return "match must be bash, path or content"
+    if action not in ("warn", "block"):
+        return "action must be warn or block"
+    pat = p.get("pattern")
+    if not isinstance(pat, str) or not pat or len(pat) > 200 or "\n" in pat or "\r" in pat:
+        return "the pattern is one line of at most 200 characters"
+    if NOT_PORTABLE.search(pat):
+        return ("the pattern uses a form JavaScript reads otherwise ((?P...), inline flags, \\A, \\Z, "
+                "possessive quantifiers, [[:class:]]); write it plainly, \\s for a space")
+    try:
+        rx = re.compile(pat, re.I)
+    except re.error as e:
+        return "the pattern is not a regex: %s" % e
+    if rx.search(""):
+        return "the pattern matches an empty %s, so it would match every call" % match
+    for s in WAY_OUT[match]:
+        if rx.search(s):
+            return "the pattern matches %r: a rule may never stand in the way of checking or settling" % s
+    msg = " ".join(str(p.get("message") or "").split())
+    if not msg or len(msg) > MAX_RULE:
+        return "the message is one line of at most %d characters" % MAX_RULE
+    if BAD_RULE.search(msg):
+        return "a rule's message may not tell an agent to bypass the gate"
+    return None
+
+
+def apply_rule(p, date, pid, applied_before, base):
+    why = check_rule(p)
+    if why:
+        return {"status": "rejected", "reason": why}
+    ev, why = evidence_on_disk(p.get("evidence"))
+    if why:
+        return {"status": "rejected", "reason": why}
+    name = p["name"]
+    path = os.path.join(RULES, name + ".rule")
+    if os.path.exists(path):
+        return {"status": "rejected", "reason": "a rule named %s is already in force" % name}
+    if sum(1 for r in applied_before if r.get("kind") == "rule") >= RULES_PER_RETRO:
+        return {"status": "rejected", "reason": "at most %d rules per retrospective" % RULES_PER_RETRO}
+    if len(rule_files()) >= MAX_RULES:
+        return {"status": "rejected", "reason": "the project holds %d rules, the most there may be; retire one first "
+                "(delete its .factory/rules/<name>.rule)" % MAX_RULES}
+    body = [
+        "# Factory rule, applied by factory-retro-apply (%s/%s). The hooks module applies it to every" % (date, pid),
+        "# factory builder's call; delete this file to take it back.",
+        "name: %s" % name,
+        "match: %s" % p["match"],
+        "pattern: %s" % p["pattern"],
+        "action: %s" % p["action"],
+        "message: %s" % " ".join(str(p["message"]).split()),
+        "evidence: %s" % ev,
+        "metric: %s" % p.get("metric"),
+        "added: %s" % now_iso(),
+    ]
+    os.makedirs(RULES, exist_ok=True)
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(body) + "\n")
+    os.replace(tmp, path)
+    base.update({"status": "applied", "undo": {"kind": "rule", "name": name}, "commit": None})
+    return base
+
+
+def retire_lesson(p):
+    """A lesson out, only once factory-lesson check says what it names is gone."""
+    module, text = str(p.get("module") or ""), " ".join(str(p.get("text") or "").split())
+    if not MODULE.fullmatch(module) or not text:
+        return {"status": "rejected", "reason": "a retirement names the module and the lesson's text"}
+    _, out = sh([bash(), LESSON_SH, "check", module])
+    hit = None
+    for l in out.splitlines():
+        m = re.match(r"RETIRE (\S+) (\d+) ((path|sha):.*?) is gone: (.*)$", l)
+        if m and m.group(1) == module and " ".join(m.group(5).split()) == text:
+            hit = (int(m.group(2)), m.group(3))
+            break
+    if not hit:
+        return {"status": "rejected", "reason": "factory-lesson check does not flag that lesson; a lesson is retired "
+                "here only once what its retire_when names is gone"}
+    n, gone = hit
+    lines = lesson_lines(module)
+    line = lines[n - 1] if n <= len(lines) else ""
+    rc, out = sh([bash(), LESSON_SH, "remove", module, str(n)])
+    if rc != 0:
+        return {"status": "rejected", "reason": out.strip().splitlines()[-1] if out.strip() else "factory-lesson refused"}
+    return {"status": "retired", "reason": "%s is gone" % gone,
+            "undo": {"kind": "lesson_retire", "module": module, "line": line}, "commit": None}
+
+
 def apply_one(p, date, applied_before):
     pid = str(p.get("id") or "")
     if not re.fullmatch(r"P[0-9]{1,3}", pid):
@@ -305,6 +475,8 @@ def apply_one(p, date, applied_before):
         with open(os.path.join(RETRO, "c-class.md"), "a", encoding="utf-8") as fh:
             fh.write("- %s/%s %s: %s\n" % (date, pid, p.get("surface", "?"), str(p.get("change", ""))[:400]))
         return {"status": "c_class", "reason": "touches the plugin surface; left for the developer"}
+    if kind == "lesson_retire":
+        return retire_lesson(p)
     why = check_metric(p)
     if why:
         return {"status": "rejected", "reason": why}
@@ -318,11 +490,30 @@ def apply_one(p, date, applied_before):
         module, text, ev = str(p.get("module") or ""), str(p.get("text") or ""), str(p.get("evidence") or "")
         if BAD_RULE.search(text):
             return {"status": "rejected", "reason": "a lesson may not tell an agent to bypass the gate"}
-        rc, out = sh([bash(), os.path.join(HOOK_DIR, "factory-lesson.sh"), "add", module, ev, text])
+        extra = []
+        if p.get("category"):
+            extra += ["--category", str(p["category"])]
+        if p.get("retire_when"):
+            extra += ["--retire-when", str(p["retire_when"])]
+        undo_rec = {"kind": "lesson", "module": module, "text": text}
+        if p.get("replaces"):
+            if not MODULE.fullmatch(module):
+                return {"status": "rejected", "reason": "module must be letters, digits, dot, dash or underscore"}
+            n, old_line = lesson_number(module, p["replaces"])
+            if not n:
+                return {"status": "rejected", "reason": "no lesson of %s.md reads %r" % (module, str(p["replaces"])[:80])}
+            cmd = [bash(), LESSON_SH, "update", module, str(n), ev, text] + extra
+            undo_rec["old_line"] = old_line
+        else:
+            cmd = [bash(), LESSON_SH, "add", module, ev, text] + extra
+        rc, out = sh(cmd)
         if rc != 0:
             return {"status": "rejected", "reason": out.strip().splitlines()[-1] if out.strip() else "factory-lesson refused"}
-        base.update({"status": "applied", "undo": {"kind": "lesson", "module": module, "text": text}, "commit": None})
+        base.update({"status": "applied", "undo": undo_rec, "commit": None})
         return base
+
+    if kind == "rule":
+        return apply_rule(p, date, pid, applied_before, base)
 
     if kind == "config":
         patch = p.get("patch")
@@ -394,7 +585,7 @@ def apply_one(p, date, applied_before):
         base.update({"status": "applied", "undo": {"kind": "claude_md", "text": text}, "commit": sha})
         return base
 
-    return {"status": "rejected", "reason": "kind must be lesson, config, claude_md or plugin"}
+    return {"status": "rejected", "reason": "kind must be lesson, lesson_retire, rule, config, claude_md or plugin"}
 
 
 def undo(rec):
@@ -406,12 +597,25 @@ def undo(rec):
     if kind == "lesson":
         path = os.path.join(F, "lessons", u["module"] + ".md")
         lines = read(path).splitlines()
-        keep = [l for l in lines if not l.startswith("- %s [" % u["text"])]
-        if len(keep) == len(lines):
-            return False
+        # A reworded lesson gets its old line back; an added one goes.
+        mine = "- %s [" % u["text"]
+        if u.get("old_line"):
+            keep = [u["old_line"] if l.startswith(mine) else l for l in lines]
+            if keep == lines:
+                return False
+        else:
+            keep = [l for l in lines if not l.startswith(mine)]
+            if len(keep) == len(lines):
+                return False
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("\n".join(keep) + "\n")
         return True
+    if kind == "rule":
+        try:
+            os.remove(os.path.join(RULES, u["name"] + ".rule"))
+            return True
+        except OSError:
+            return False
     if kind == "config":
         cfg = config()
         for k, v in (u.get("keys") or {}).items():
@@ -470,6 +674,9 @@ def cmd_apply(argv):
             applied.append(rec)
             print("RETRO APPLIED %s %s (%s%s)" % (pid, p.get("kind"), p.get("metric"),
                   ", commit %s" % r["commit"] if r.get("commit") else ""))
+        elif r["status"] == "retired":
+            applied.append(rec)
+            print("RETRO RETIRED %s lesson of %s: %s" % (pid, p.get("module"), r.get("reason", "")))
         else:
             print("RETRO %s %s: %s" % (r["status"].upper(), pid, r.get("reason", "")))
     os.makedirs(RETRO, exist_ok=True)

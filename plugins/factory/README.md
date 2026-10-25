@@ -385,6 +385,36 @@ A closed change can leave your machine, but only through one script and only as 
   `factory-next launchd`. A night run's worktree now gets the lessons and the
   criteria files too.
 
+## Stuck builders and lessons with teeth (3.6, opt-in)
+
+- **A stuck check.** With `"fast": {"stuck": true}` (off by default) the hooks
+  module watches each builder's calls. The same call with the same result 4
+  times in a row, the same failing call 3 times, or two calls taking turns 6
+  times (A B A B A B) is a builder going round in circles: the first time the
+  call's result comes with a reminder to change the approach; the second time
+  every call is refused except settling, blocking or asking, as at a full
+  budget, and the builder settles the task as `no_progress`. Waiting and looking
+  around never count: `sleep`, `wait`, `date`, `pwd`, `ls`, `git status`,
+  `git log`, `git fetch` run on their own, and polling a background task. Each
+  trip is a `stuck` line in `.factory/events.jsonl`.
+- **Rules.** A lesson builders kept ignoring can become a rule:
+  `.factory/rules/<name>.rule` (`match: bash|path|content`, a regex,
+  `action: warn|block`, a message, the evidence). The hooks module holds every
+  builder's call to it: `warn` lets the call run with the message attached,
+  `block` refuses it and the run goes on. A rule never applies to the factory's
+  own commands or the task files, so it can never stop a builder from checking
+  or settling. Only `factory-retro-apply` writes one - two per retrospective,
+  ten in all - and agents may not touch the folder (hard block
+  `factory-rules`). Each hit is a `lesson_rule` line in the event log, and the
+  retro digest shows how often each rule fired.
+- **Lessons keep their shape.** A lesson may carry a `category` (`build`,
+  `test`, `tooling`, `convention`, `environment`, `dependency`) and a
+  `retire_when` (a path that must exist, or a commit HEAD must reach).
+  `factory-lesson add` refuses a lesson that overlaps one already in the file
+  and names the one to reword with `factory-lesson update <module> <n>`;
+  `factory-lesson check` lists the lessons whose `retire_when` is gone, and the
+  retro proposes retiring them. Lesson files written before keep working.
+
 ## Commands
 
 | command | what it is for |

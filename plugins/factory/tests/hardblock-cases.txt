@@ -36,6 +36,9 @@ hard:factory-full-check	bash	-	echo verdict=green > .factory/full-check
 hard:factory-full-check	path	-	{R}/.factory/full-check
 hard:factory-run-lock	bash	-	touch .factory/run.lock
 hard:factory-run-lock	path	-	{R}/.factory/run.lock
+hard:factory-rules	path	-	{R}/.factory/rules/pnpm-only.rule
+hard:factory-rules	bash	-	rm -f .factory/rules/pnpm-only.rule
+clean	bash	-	cat .factory/rules/pnpm-only.rule
 clean	bash	-	cat .factory/reviews/T-1.json
 clean	bash	-	factory-review-submit T-1 --landed
 clean	bash	-	factory-settle T-1 'CHECK RESULT: GREEN'
