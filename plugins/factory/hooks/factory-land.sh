@@ -36,6 +36,13 @@ ROOT="$PWD"
 T="${ROOT}/tasks"
 F="${ROOT}/.factory"
 [ -f "${F}/active" ] || { echo "LAND REFUSED for ${TASK_ID}: ${ROOT} has no .factory/active."; exit 1; }
+# fast.isolation "worktree": a task's own checkout lands nothing itself. Its
+# work reaches the project tree through factory-settle, run from there, which
+# checks it again on that tree first.
+if [ -f "${F}/worktree" ]; then
+  echo "LAND REFUSED for ${TASK_ID}: ${ROOT} is a task's own checkout (fast.isolation: worktree) - run factory-settle ${TASK_ID} from the project root."
+  exit 1
+fi
 
 if [ -f "${T}/done/${TASK_ID}.md" ]; then
   if git -C "${ROOT}" rev-parse -q --verify HEAD >/dev/null 2>&1      && ! git -C "${ROOT}" check-ignore -q "tasks/done/${TASK_ID}.md" 2>/dev/null      && ! git -C "${ROOT}" cat-file -e "HEAD:./tasks/done/${TASK_ID}.md" 2>/dev/null; then
