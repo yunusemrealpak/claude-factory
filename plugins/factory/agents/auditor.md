@@ -28,7 +28,12 @@ ids and the changes they belong to. Read, in this order:
    behaviour no script can check, which you check by reading the code. An
    artifact that exists can still be a stub: open it.
 2. The map: `git log --format='%h %s' <base>..HEAD` - one commit per task.
-3. `git diff --stat <base>..HEAD`, then the diffs where tasks meet: a file one
+3. When they exist, `.factory/mutation/last.txt` and `.factory/scans/*.txt`:
+   the run's mutation testing and whole-tree scans (`check.mutation`,
+   `check.security.full`). A mutant that survived in changed code is a test
+   that does not assert the behaviour it covers - name the behaviour (class
+   partial); a scan finding in code this run landed is a finding.
+4. `git diff --stat <base>..HEAD`, then the diffs where tasks meet: a file one
    task created and another uses, a type or schema one task changed and another
    reads, a flow that crosses several tasks' files.
 
