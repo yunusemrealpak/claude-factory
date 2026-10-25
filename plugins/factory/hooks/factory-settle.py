@@ -278,6 +278,13 @@ def main(argv):
     if not os.path.isfile(os.path.join(F, "active")):
         print("SETTLE REFUSED %s: %s has no .factory/active." % (tid, ROOT))
         return 1
+    # fast.isolation "worktree": a task with a checkout of its own, or a settle
+    # run from inside one, goes through factory-worktree. It brings the work
+    # into this tree and comes back here, with the handoff set, for the verdict.
+    if not os.environ.get("FACTORY_WORKTREE_HANDOFF") and (
+            os.path.isfile(os.path.join(F, "worktree")) or
+            os.path.isdir(os.path.join(ROOT, ".factory-worktrees", "task-" + tid))):
+        return subprocess.call([sys.executable, os.path.join(HOOK_DIR, "factory-worktree.py"), "settle", tid] + rest)
     heartbeat()
     if rest and rest[0] == "--conflict":
         return conflict(tid, " ".join(rest[1:]))
