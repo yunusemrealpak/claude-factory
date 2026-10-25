@@ -8,6 +8,8 @@
 #   factory-change sync [<change-id>]
 #   factory-change list
 #   factory-change sig <change-id>
+#   factory-change validate <change-id>   the change's spec delta (specs.ledger)
+#   factory-change drift                  ledger requirements no test names
 #
 # A change is one piece of work the developer handed to the factory - a feature,
 # a bugfix, a migration - together with the tasks it was split into. Task ids
@@ -34,6 +36,11 @@
 # Commits are found by their trailers (Factory-Task / Factory-Change, written by
 # factory-commit.sh), not by a commit range, so a change whose commits
 # interleave with other work is still listed exactly.
+#
+# With "specs": {"ledger": true} a change also carries delta.md - what it adds
+# to, changes in and takes out of the project's requirements - seeded at open
+# and merged into specs/requirements.md when the change closes
+# (factory-specs.py; validate and drift are its read-only half).
 set -uo pipefail
 
 ROOT="$PWD"
@@ -45,6 +52,11 @@ TYPES="feature bugfix refactor migration chore"
 
 now() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 die() { echo "factory-change: $*" >&2; exit 1; }
+SPECS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/factory-specs.py"
+# A cheap look before starting python: the ledger is off unless config.json
+# says "ledger": true. factory-specs.py reads the file properly.
+ledger_maybe() { grep -q '"ledger"[[:space:]]*:[[:space:]]*true' "${F}/config.json" 2>/dev/null; }
+specs() { FACTORY_ROOT="${ROOT}" python3 "${SPECS}" "$@"; }
 in_git() { git -C "${ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; }
 
 change_of() {  # task id -> change id
@@ -178,6 +190,9 @@ cmd_open() {
     printf '%s\n' "${goal}"
   } > "${dir}/goal.md"
 
+  # The delta first: a change opened with every task already done closes on
+  # the sync below, and its merge reads the delta.
+  ledger_maybe && specs seed "${id}"
   sync_one "${dir}" >/dev/null
   echo "OPENED ${id}-${slug}: $(printf '%s\n' "${tasks}" | grep -c .) task(s), base ${base:0:12}, summary at .factory/changes/${id}-${slug}/summary.md"
   [ -n "${accept}" ] && echo "It closes only after \"${accept}\" runs green: factory-accept ${id}"
@@ -354,6 +369,13 @@ sync_one() {
   local shown="${status}"
   [ -n "${note}" ] && shown="${note}"
   echo "${shown} ${id}-${slug} done=${done_n}/${total} ref=${ref_sha:+${ref}}"
+  # The spec ledger takes the change's delta once it has closed: on the sync
+  # that closed it, and on every later one while a merge failed.
+  if [ "${status}" = "closed" ] && ledger_maybe \
+     && { [ -n "${note}" ] || [ -f "${dir}/specs-pending" ]; } && [ ! -f "${dir}/specs-merged" ]; then
+    specs merge "${id}"
+  fi
+  return 0
 }
 
 cmd_sync() {
@@ -407,8 +429,10 @@ case "${1:-}" in
   sync) shift; cmd_sync "$@" ;;
   list) cmd_list ;;
   sig)  shift; [ -n "${1:-}" ] || die "usage: sig <change-id>"; tasks_sig "$1" ;;
+  validate) shift; [ -n "${1:-}" ] || die "usage: validate <change-id>"; specs validate "$1" ;;
+  drift) specs drift ;;
   *)
-    echo "usage: factory-change.sh open <change-id> <slug> <type> <goal-file | -> [<acceptance command>] | sync [<change-id>] | list | sig <change-id>" >&2
+    echo "usage: factory-change.sh open <change-id> <slug> <type> <goal-file | -> [<acceptance command>] | sync [<change-id>] | list | sig <change-id> | validate <change-id> | drift" >&2
     exit 2
     ;;
 esac
