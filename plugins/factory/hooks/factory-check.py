@@ -10,6 +10,15 @@ Usage (from the project root):
   factory-check count <file>       the number of tests a runner's output reports
   factory-check selfcert <command> exit 0 when an acceptance command is
                                    self-certifying (for factory-lint)
+
+check.security (opt-in, off when absent) adds a stage to every task check, on
+what the task adds - not on the whole file, so a secret already in HEAD is not
+this task's: gitleaks, when it is installed (a secret found is red: a secret in
+a commit is never fine), and semgrep against HEAD, when it is installed and
+check.security.semgrep_config names the rules (a finding is a reason for a
+reviewer, or red with semgrep_red: true). A tool that is not installed is a
+note, never a failure. Each outcome is a `scan` event in events.jsonl, so how
+often a scan catches something is counted, not guessed.
   factory-check readonly <path>... the tests among these paths that HEAD has
                                    and no task in progress may change
   factory-check fingerprint <id>   the digest of the task's listed files now
@@ -1416,6 +1425,134 @@ def extra_stage(run, arg):
     return rc == 0
 
 
+# ---------------------------------------------------------------------------
+# security: secrets and semgrep on what a task adds (check.security, opt-in)
+# ---------------------------------------------------------------------------
+
+GITLEAKS = "gitleaks detect --no-git --redact --no-banner --exit-code 1 --source {dir}"
+SEMGREP = "semgrep scan --config {config} --baseline-commit HEAD --error --quiet --metrics off {files}"
+
+
+def append_event(kind, **kw):
+    """One line in .factory/events.jsonl, the shape every hook writes."""
+    try:
+        row = {"ts": now_iso(), "epoch": int(time.time()), "kind": kind}
+        row.update(kw)
+        with open(os.path.join(F, "events.jsonl"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
+
+
+def have_tool(cmd):
+    """Is the program a command starts with on PATH, as the shell the stages
+    run in sees it? (shutil.which on Windows misses a script without an
+    extension; the stage runs through bash, so bash is asked.)"""
+    try:
+        first = shlex.split(cmd)[0]
+    except (ValueError, IndexError):
+        return False
+    try:
+        r = subprocess.run([bash(), "-c", "command -v %s >/dev/null 2>&1" % shlex.quote(first)],
+                           capture_output=True, cwd=ROOT)
+    except OSError:
+        return False
+    return r.returncode == 0
+
+
+def added_copy(files, into):
+    """What the task added to each file, written under `into` at the same path
+    and on the same line numbers (the rest blank). Returns how many files."""
+    n = 0
+    for p in files:
+        added, _ = added_lines(p)
+        if not added:
+            continue
+        lines = [""] * max(added)
+        for no, text_ in added.items():
+            lines[no - 1] = text_
+        dst = os.path.join(into, p)
+        os.makedirs(os.path.dirname(dst) or into, exist_ok=True)
+        with open(dst, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("\n".join(lines) + "\n")
+        n += 1
+    return n
+
+
+def security_stage(run, ctx):
+    """check.security: gitleaks and semgrep on what the task adds."""
+    sec = ctx["check"].get("security")
+    if not isinstance(sec, dict) or sec.get("enabled") is False:
+        return
+    task_id = ctx["task_id"]
+    files = [p for p in ctx["existing"] if os.path.isfile(os.path.join(ROOT, p))]
+    if not files:
+        run.note("secrets", "skipped (no touched file left to scan)")
+        return
+    cmd = sec.get("gitleaks", GITLEAKS)
+    if cmd is False:
+        pass
+    elif not have_tool(cmd):
+        run.note("secrets", "skipped (gitleaks is not installed)")
+    else:
+        tmp = tempfile.mkdtemp(prefix="factory-secrets-")
+        try:
+            n = added_copy(files, tmp)
+            if not n:
+                run.note("secrets", "skipped (the task adds no text line)")
+            else:
+                rc, out = run.step("secrets", cmd.replace("{dir}", shlex.quote(tmp.replace("\\", "/"))))
+                leak = int(sec.get("gitleaks_exit", 1))
+                if rc == 0:
+                    run.ok("secrets", "gitleaks: nothing in what %d file(s) add" % n)
+                    append_event("scan", task=task_id, tool="gitleaks", outcome="clean")
+                elif rc == leak:
+                    run.fail("secrets", "gitleaks found a secret in what this task adds", excerpt(out) +
+                             "\nA secret in a commit is never fine. Take it out and read it from the environment "
+                             "or the project's secret store. If it is not a secret (a test fixture), block the task "
+                             "and say so - the developer allows it in the project's .gitleaks.toml.")
+                    append_event("scan", task=task_id, tool="gitleaks", outcome="found")
+                else:
+                    run.note("secrets", "gitleaks exited %d without a verdict - see %s" % (rc, run.log_rel))
+                    append_event("scan", task=task_id, tool="gitleaks", outcome="error")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    scmd = sec.get("semgrep", SEMGREP)
+    rules = sec.get("semgrep_config")
+    if isinstance(rules, str):
+        rules = [rules] if rules.strip() else []
+    if scmd is False:
+        return
+    if not have_tool(scmd):
+        run.note("semgrep", "skipped (semgrep is not installed)")
+        return
+    if "{config}" in scmd and not rules:
+        run.note("semgrep", "skipped (check.security.semgrep_config does not say which rules - a rules file of "
+                            "the project's, or a registry pack such as p/default)")
+        return
+    rc, out = run.step("semgrep", fill(scmd.replace("{config}", " --config ".join(shlex.quote(r) for r in rules)),
+                                       files=files))
+    if rc == 0:
+        run.ok("semgrep", "nothing new against HEAD")
+        append_event("scan", task=task_id, tool="semgrep", outcome="clean")
+        return
+    if rc != 1:
+        run.note("semgrep", "semgrep exited %d without a verdict - see %s" % (rc, run.log_rel))
+        append_event("scan", task=task_id, tool="semgrep", outcome="error")
+        return
+    m = re.search(r"(\d+)\s+(?:blocking\s+|code\s+)?findings?", out, re.I)
+    what = "%s finding(s)" % m.group(1) if m else "finding(s)"
+    append_event("scan", task=task_id, tool="semgrep", outcome="found")
+    if sec.get("semgrep_red"):
+        run.fail("semgrep", "%s in what this task adds" % what, excerpt(out) +
+                 "\nFix what the rules name. If a finding is wrong here, block the task and say why - the developer "
+                 "decides about the rule.")
+    else:
+        ctx["review"].append("semgrep: %s in what this task adds (log %s)" % (what, run.log_rel))
+        run.note("semgrep", "%s for a reviewer" % what)
+
+
 def gate_mode(cfg):
     """full (the default): commands.test is required. staged (a greenfield board
     before its toolchain exists): a stage without a command is skipped, at least
@@ -1715,6 +1852,8 @@ def check_task(task_id):
             if review:
                 run.note("cheat", "%d for a reviewer: %s" % (len(review), ", ".join(
                     "%s:%d %s" % (p, no, name) for p, no, name, _, _ in review[:5])))
+        if listed:
+            security_stage(run, ctx)
         limit = int(check.get("claude_md_max_lines", 200) or 0)
         for p, n in claude_md_over(listed, limit) if limit and listed else []:
             run.fail("claude_md", "%s is %d lines, the limit is %d" % (p, n, limit),
