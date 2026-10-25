@@ -1,0 +1,83 @@
+name: tests
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  checks:
+    # What does not depend on the platform: the manifest, syntax, JSON, the
+    # README copy and the hooks module.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version stamp matches the manifest
+        run: |
+          manifest="$(jq -r .version plugins/factory/.claude-plugin/plugin.json)"
+          stamp="$(awk '{print $1}' plugins/factory/hooks/factory-version.txt)"
+          echo "manifest=$manifest stamp=$stamp"
+          # The stamp is major.minor: a patch release must not tell every
+          # project it is out of date (factory-upgrade compares the stamp).
+          [ "${manifest%.*}" = "$stamp" ] || { echo "plugin.json version and factory-version.txt disagree"; exit 1; }
+      - name: Shell and Python syntax
+        run: |
+          for f in plugins/factory/hooks/*.sh plugins/factory/bin/* plugins/factory/tests/*.sh plugins/factory/statusline/*.sh; do
+            bash -n "$f" || exit 1
+          done
+          for f in plugins/factory/hooks/*.py; do python3 -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" "$f" || exit 1; done
+      - name: JSON is valid
+        run: |
+          jq -e . .claude-plugin/marketplace.json > /dev/null
+          jq -e . plugins/factory/.claude-plugin/plugin.json > /dev/null
+          jq -e . plugins/factory/hooks/hooks.json > /dev/null
+      - name: The plugin README is the root README
+        # The marketplace shows plugins/factory/README.md; it is a copy, never
+        # edited by hand.
+        run: |
+          cmp README.md plugins/factory/README.md || { echo "run: cp README.md plugins/factory/README.md"; exit 1; }
+      - name: Hooks module validates and its tests pass
+        # Static analysis of hooks/register.js plus its tests (tests/*.test.ts):
+        # no session, sign-in or model call. Pinned to the version it was built on.
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash -s 2.1.310
+          export PATH="$HOME/.local/bin:$PATH"
+          claude plugin validate --strict plugins/factory
+          (cd plugins/factory && claude plugin test)
+
+  selftest:
+    # The suites build throwaway git repositories, boards and gates, and run the
+    # real hooks against them. macOS is the strictest case (bash 3.2, BSD
+    # userland); Windows runs them in Git Bash, the shell Claude Code uses there.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        # The workflow scheduling tests run fast.js under node where there is
+        # no JavaScriptCore.
+        with:
+          node-version: 22
+      - name: python3 on Windows
+        if: runner.os == 'Windows'
+        run: |
+          if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 1 >/dev/null 2>&1; then
+            mkdir -p "$HOME/shim"
+            printf '#!/bin/sh\nexec python "$@"\n' > "$HOME/shim/python3"
+            chmod +x "$HOME/shim/python3"
+            echo "$HOME/shim" >> "$GITHUB_PATH"
+          fi
+      - name: Tools
+        run: |
+          bash --version | head -1; jq --version; python3 --version; node --version; git --version
+      - name: Factory self-test
+        run: |
+          git config --global user.email ci@example.invalid
+          git config --global user.name ci
+          bash plugins/factory/tests/run-all.sh
