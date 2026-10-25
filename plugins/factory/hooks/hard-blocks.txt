@@ -48,7 +48,7 @@
 # writes and names a protected path is refused without halting the run: that
 # match is a guess.
 
-hard_blocks_version: 3
+hard_blocks_version: 4
 
 # --- git: an agent never publishes ------------------------------------------
 bash ## git-push ## (^|[^[:alnum:]_.-])git(([[:space:]]+(-C|-c|--git-dir|--work-tree|--namespace)[[:space:]]+[^[:space:]]+)|([[:space:]]+--?[A-Za-z][A-Za-z-]*(=[^[:space:]]*)?))*[[:space:]]+push([[:space:];&|)"'`]|$)
@@ -101,6 +101,7 @@ path ## factory-no-progress ## root ## \.factory/no-progress/.*
 path ## factory-failures ## root ## \.factory/failures/.*
 path ## factory-questions ## root ## \.factory/questions/.*
 path ## factory-lessons ## root ## \.factory/lessons/.*
+path ## factory-rules ## root ## \.factory/rules/.*
 path ## factory-events ## root ## \.factory/events\.jsonl
 path ## factory-publish-state ## root ## \.factory/publish/.*
 path ## factory-reviews ## root ## \.factory/reviews/.*

@@ -21,6 +21,10 @@
 //     its model requests and tokens are counted, at 80% it is told once, and
 //     at the ceiling every call but its way out (factory-settle, the task
 //     file) is refused. Judged after the hard blocks, and it FAILS OPEN.
+//   - tool.call: a builder going round in circles (config.json fast.stuck,
+//     off by default) is told once, and the second time sent out the same
+//     way; and the project's rules (.factory/rules/*.rule, written only by
+//     factory-retro-apply) warn or refuse a builder's call. Both FAIL OPEN.
 //   - prompt.submit: "auto devam et" / "auto dur" typed by the developer is
 //     handed to factory-consent.sh, which writes the autonomy record.
 //   - an AbovePrompt band showing the autonomy level, with an "auto dur" button.
@@ -43,11 +47,18 @@ const BUDGET = { turns: 150, tokens: 3000000 }
 // kept below that, so the builder always has turns left to settle.
 const TURN_CAP = 230
 const BUDGET_WARN = 0.8
+// fast.stuck: how often one call may give one answer before a builder is
+// stuck. The same call and the same result 4 times in a row, the same call
+// failing the same way 3 times, or two calls taking turns 6 times (A B A B A B).
+const STUCK = { same: 4, error: 3, pingpong: 6 }
+// The most rules a project holds (factory-retro-apply holds the same line).
+const RULES_MAX = 10
 
 // Per load: a reload runs register again and starts these over.
 let root = null
 let agents = {}
 let spent = {}
+let watched = {}
 let quotaWrittenAt = 0
 let rules = null
 let band = { level: 'local', stopped: false, publish: '' }
@@ -58,6 +69,7 @@ export function register(on) {
   bashExe = null
   agents = {}
   spent = {}
+  watched = {}
   quotaWrittenAt = 0
   rules = null
   band = { level: 'local', stopped: false, publish: '' }
@@ -143,7 +155,7 @@ export function register(on) {
       rule: 'hook-error',
       why: 'the hard-block check failed (' + String(err && err.message ? err.message : err) + ')',
     }))
-    if (!hit) return withinBudget($, e, next)
+    if (!hit) return withinBudget($, e, (x) => watch($, x, next))
     // A tool the factory cannot judge is refused, but it is not a ban the
     // agent broke: the run goes on.
     if (hit.rule === 'unjudged-tool') {
@@ -426,10 +438,7 @@ async function withinBudget($, e, next) {
 }
 
 async function budgetEvent($, b, level) {
-  const now = await $.clock.now()
-  const line = JSON.stringify({
-    ts: new Date(now).toISOString().replace(/\.\d+Z$/, 'Z'),
-    epoch: Math.floor(now / 1000),
+  await appendEvent($, {
     kind: 'budget',
     level,
     task: b.task,
@@ -438,10 +447,272 @@ async function budgetEvent($, b, level) {
     limit_turns: b.lim.turns === Infinity ? null : b.lim.turns,
     limit_tokens: b.lim.tokens === Infinity ? null : b.lim.tokens,
   })
+}
+
+// One line in .factory/events.jsonl, stamped with the time.
+async function appendEvent($, fields) {
+  const now = await $.clock.now()
+  const line = JSON.stringify({ ts: new Date(now).toISOString().replace(/\.\d+Z$/, 'Z'), epoch: Math.floor(now / 1000), ...fields })
   await $.process.run([await bashPath($), '-c', 'cat >> "$1"', 'sh', root + '/.factory/events.jsonl'], {
     stdin: line + '\n',
     timeoutMs: 5000,
   })
+}
+
+// --- a builder going round in circles, and the project's rules --------------
+
+// Both look at a factory builder's calls only, once the hard blocks and the
+// budget let them through, and both FAIL OPEN: whatever goes wrong in here,
+// the call runs.
+//
+// fast.stuck (true to turn it on): each call and its result are reduced to a
+// hash of the tool, its input (spaces squashed) and its output or error (times
+// and durations blanked). The first time a pattern of STUCK repeats, the
+// call's result comes with a reminder to change the approach; the second time,
+// every call but the way out is refused, as at a full budget, and the builder
+// settles the task as no_progress. A call that only waits or looks around is
+// polling and never counted (POLL_CMD, POLL_TOOLS), and neither is the way out.
+//
+// Rules (.factory/rules/<name>.rule, written only by factory-retro-apply):
+// lessons with teeth. `match: bash` is tested against a shell command,
+// `path` against the file a write tool writes (root-relative), `content`
+// against what it writes; letter case is ignored. `action: warn` lets the call
+// run and adds the rule's message to its result; `block` refuses the call
+// (the run goes on, nothing is halted). A rule never applies to a factory-*
+// command or to a write under tasks/ or to decisions.md, so it can never stop
+// a builder from checking or settling.
+
+// Polling: the same answer twice is no loop. A whole command only (operators
+// make it something else), quoted spans emptied, 2>&1 and 2>/dev/null allowed.
+const POLL_CMD = /^\s*(sleep(\s+[0-9.]+[smhd]?)+|wait(\s+%?[0-9]+)*|date(\s+\S+)*|pwd|ls(\s+\S+)*|git\s+(status|log|fetch)(\s+\S+)*)\s*$/
+const POLL_TOOLS = new Set(['TaskOutput', 'BashOutput', 'TaskList', 'TaskGet', 'TodoWrite'])
+// What the input hash leaves out: the call's id, its loop, and what only says
+// how it runs.
+const NOT_INPUT = new Set(['tool', 'tool_use_id', 'agentId', 'requestMeta', 'description', 'timeout', 'run_in_background'])
+const VOLATILE = [
+  [/\d{4}-\d\d-\d\d[T ]\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:?\d\d)?/g, '<time>'],
+  [/\b\d+(\.\d+)?\s?(ms|s|sec|secs|seconds)\b/g, '<dur>'],
+  [/\b0x[0-9a-f]+\b/gi, '<addr>'],
+]
+const FACTORY_CMD = /^\s*([^\s;&|]*\/)?factory-[A-Za-z0-9_-]+(\.sh|\.py)?(\s|$)/
+const RULE_FREE_FILE = /^(\.\/)?(tasks\/.*|decisions\.md)$/i
+const RULE_FILE = /^[a-z0-9][a-z0-9-]*\.rule$/
+
+const squash = (s) => String(s == null ? '' : s).replace(/\s+/g, ' ').trim()
+
+// 53 bits of a string, the same on every run (cyrb53).
+function hash(s) {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    h1 = Math.imul(h1 ^ c, 2654435761)
+    h2 = Math.imul(h2 ^ c, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0)
+}
+
+// The builder's state, made at its first call: off for anything but a
+// factory builder of an open factory, and off when neither fast.stuck nor a
+// rule is there. A change to either applies to the next builder.
+function watchOf($, id) {
+  if (!watched[id]) watched[id] = startWatch($, id).catch(() => ({ off: true }))
+  return watched[id]
+}
+
+async function startWatch($, id) {
+  const who = await whoIs($, id)
+  if (!who || who.type !== 'factory:builder') return { off: true }
+  if (!root) root = await $.session.root()
+  if (!(await $.fs.exists(root + '/.factory/active'))) return { off: true }
+  let stuck = false
+  try {
+    const cfg = JSON.parse(await $.fs.read(root + '/.factory/config.json'))
+    stuck = !!(cfg && cfg.fast && cfg.fast.stuck === true)
+  } catch {}
+  const list = await projectRules($).catch(() => [])
+  if (!stuck && !list.length) return { off: true }
+  const task = String(who.label || '').trim().split(/\s+/)[0] || '<task-id>'
+  return { off: false, task, stuck, hist: [], trips: 0, out: null, rules: list }
+}
+
+async function projectRules($) {
+  const dir = root + '/.factory/rules'
+  if (!(await $.fs.exists(dir))) return []
+  const out = []
+  const names = (await $.fs.list(dir)).filter((x) => x.kind === 'file' && RULE_FILE.test(x.name)).map((x) => x.name).sort()
+  for (const name of names.slice(0, RULES_MAX)) {
+    try {
+      const r = parseRule(await $.fs.read(dir + '/' + name), name)
+      if (r) out.push(r)
+    } catch {}
+  }
+  return out
+}
+
+// `key: value` lines; `#` lines are comments. A rule missing a field, or
+// whose pattern JavaScript cannot read, is left out.
+function parseRule(text, file) {
+  const f = {}
+  for (const line of String(text).split(/\r?\n/)) {
+    const m = line.match(/^([a-z_]+):[ \t]*(.*)$/)
+    if (m && !(m[1] in f)) f[m[1]] = m[2].trim()
+  }
+  if (!['bash', 'path', 'content'].includes(f.match) || !['warn', 'block'].includes(f.action) || !f.pattern || !f.message) return null
+  return {
+    name: f.name || file.replace(/\.rule$/, ''),
+    match: f.match,
+    action: f.action,
+    re: new RegExp(f.pattern, 'i'),
+    message: f.message,
+    evidence: f.evidence || '',
+  }
+}
+
+// What a rule may be tested against in this call, or null when no rule
+// applies to it.
+function ruleSubjects(e) {
+  if (SHELL_TOOLS.has(e.tool)) {
+    const c = String(e.command || '')
+    return FACTORY_CMD.test(c) ? null : { bash: c.slice(0, 20000) }
+  }
+  if (FILE_TOOLS.has(e.tool)) {
+    const path = normalise(String(e.file_path || e.notebook_path || ''), root)
+    if (!path || RULE_FREE_FILE.test(path)) return null
+    const edits = Array.isArray(e.edits) ? e.edits.map((x) => x && x.new_string) : []
+    const content = [e.content, e.new_string, e.new_source, ...edits].filter((x) => typeof x === 'string').join('\n')
+    return { path, content: content.slice(0, 200000) }
+  }
+  return null
+}
+
+function ruleHits(w, e) {
+  if (!w.rules.length) return []
+  const s = ruleSubjects(e)
+  if (!s) return []
+  return w.rules.filter((r) => typeof s[r.match] === 'string' && r.re.test(s[r.match]))
+}
+
+const ruleText = (r) => 'Factory rule ' + r.name + (r.evidence ? ' (a lesson from ' + r.evidence + ')' : '') + ': ' + r.message
+
+function polling(e) {
+  if (POLL_TOOLS.has(e.tool)) return true
+  if (!SHELL_TOOLS.has(e.tool)) return false
+  const bare = unquoted(String(e.command || ''))
+  if (bare === null) return false
+  const c = bare.replace(/\s+2>\s*(&1|\/dev\/null)/g, '')
+  return !/[;&|`<>\n]|\$\(/.test(c) && POLL_CMD.test(c)
+}
+
+// The call as a builder would name it, safe inside double quotes.
+function describe(e) {
+  const clean = (s, n) => {
+    const t = squash(s).replace(/["'`$\\]/g, '')
+    return t.length > n ? t.slice(0, n - 3) + '...' : t
+  }
+  if (SHELL_TOOLS.has(e.tool)) return clean(e.command, 60)
+  if (FILE_TOOLS.has(e.tool) || e.tool === 'Read') return e.tool + ' ' + clean(normalise(String(e.file_path || e.notebook_path || ''), root), 60)
+  if (e.tool === 'Grep' || e.tool === 'Glob') return e.tool + ' ' + clean(e.pattern, 40)
+  return clean(e.tool, 30)
+}
+
+function outputOf(r) {
+  let t = r.text != null ? String(r.text) : JSON.stringify(r.result === undefined ? null : r.result) || ''
+  if (t.length > 200000) t = t.slice(0, 100000) + t.slice(-100000)
+  for (const [re, to] of VOLATILE) t = t.replace(re, to)
+  return t
+}
+
+// One call and its result into the builder's history; the pattern it
+// completes, or null.
+function observe(w, e, r) {
+  const input = Object.keys(e)
+    .filter((k) => !NOT_INPUT.has(k))
+    .sort()
+    .map((k) => k + '=' + squash(typeof e[k] === 'string' ? e[k] : JSON.stringify(e[k])))
+    .join('\n')
+  const out = outputOf(r)
+  const err = r.isError === true || (SHELL_TOOLS.has(e.tool) && /^\s*"?Exit code [1-9]/.test(out))
+  const act = hash(String(e.tool) + '\n' + input)
+  const key = act + ':' + hash((err ? 'E' : 'O') + '\n' + out)
+  w.hist.push({ act, key, err, what: describe(e) })
+  if (w.hist.length > STUCK.pingpong) w.hist.shift()
+  const h = w.hist
+  const tail = (n) => (h.length >= n ? h.slice(-n) : null)
+  const alike = (xs) => xs && xs.every((x) => x.key === xs[0].key)
+  const errs = tail(STUCK.error)
+  if (alike(errs) && errs[0].err) return { pattern: 'error', what: errs[0].what + ' failed the same way ' + STUCK.error + ' times in a row' }
+  const same = tail(STUCK.same)
+  if (alike(same)) return { pattern: 'repeat', what: same[0].what + ' gave the same result ' + STUCK.same + ' times in a row' }
+  const pp = tail(STUCK.pingpong)
+  if (pp && pp[0].key !== pp[1].key && pp.every((x, i) => x.key === pp[i % 2].key)) {
+    return { pattern: 'pingpong', what: pp[0].what + ' and ' + pp[1].what + ' took turns ' + STUCK.pingpong + ' times with the same results' }
+  }
+  return null
+}
+
+function stuckOut(w) {
+  return (
+    'Factory: ' + w.task + ' is stuck - ' + w.out + ', and it is the second time. Stop working on the code. The way out: ' +
+    '(1) add an entry to ## Attempts in the task file (### Attempt <n> - <UTC time> - no_progress: what you tried, what keeps happening, what to rule out); ' +
+    '(2) run, on its own: factory-settle ' + w.task + ' "no_progress: ' + w.out + '"; ' +
+    '(3) return status no_progress with the line it printed as settle. ' +
+    'Only that is allowed now: factory-settle, factory-block or factory-ask run alone, and reading or editing the task file and decisions.md.'
+  )
+}
+
+// A tripped pattern: the reminder the first time, the way out the second.
+async function stuckTrip($, w, t) {
+  w.trips++
+  w.hist = []
+  const exit = w.trips >= 2
+  if (exit) w.out = t.what
+  await appendEvent($, { kind: 'stuck', task: w.task, outcome: exit ? 'exit' : 'warn', pattern: t.pattern, what: t.what }).catch(() => {})
+  if (exit) return stuckOut(w)
+  return (
+    'Factory stuck check: ' + t.what + '. Doing it again will not change the answer. Change the approach: read the whole error, ' +
+    'look at the code it names, or try a different fix. If the task cannot be done as it stands, settle it: ' +
+    'factory-settle ' + w.task + ' "no_progress: ' + t.what + '". If this happens again, every call but that way out is refused.'
+  )
+}
+
+// Runs after the hard blocks and the budget; it calls `next` at most once.
+async function watch($, e, next) {
+  let w = null
+  try {
+    w = await watchOf($, e.agentId)
+  } catch {}
+  if (!w || w.off) return next(e)
+  const notes = []
+  try {
+    if (w.out && !budgetExit(e)) return { deny: stuckOut(w) }
+    const hits = ruleHits(w, e)
+    const block = hits.find((r) => r.action === 'block')
+    if (block) {
+      await appendEvent($, { kind: 'lesson_rule', task: w.task, rule: block.name, outcome: 'block', tool: String(e.tool) }).catch(() => {})
+      return { deny: ruleText(block) + ' This call is refused; the run goes on. Do it the way the rule says, or, if the task truly needs it, say so in your result.' }
+    }
+    for (const r of hits) {
+      notes.push(ruleText(r))
+      await appendEvent($, { kind: 'lesson_rule', task: w.task, rule: r.name, outcome: 'warn', tool: String(e.tool) }).catch(() => {})
+    }
+  } catch {}
+  const r = await next(e)
+  if (!r || r.deny) return r
+  try {
+    if (w.stuck && !budgetExit(e) && !polling(e)) {
+      const t = observe(w, e, r)
+      if (t) notes.push(await stuckTrip($, w, t))
+    }
+  } catch {}
+  if (!notes.length) return r
+  try {
+    return { ...r, context: [...(r.context || []), ...notes] }
+  } catch {
+    return r
+  }
 }
 
 async function board($) {

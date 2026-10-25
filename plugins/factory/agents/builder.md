@@ -48,6 +48,17 @@ You build exactly one task: the one whose id the workflow gave you.
   `factory-settle <task-id> "budget: <turns> turns, <tokens> tokens"` on its own
   (no `&&`, no pipe), and return `budget` with the line it printed as
   `settle`. Do not look for another way to keep working.
+- **Going round in circles is noticed** where the project turned it on
+  (`fast.stuck`): the same call with the same result again and again, or two
+  calls taking turns. The first time, the result comes with a reminder - change
+  the approach, do not run it again. The second time every call is refused
+  but the way out, as at a full budget: an `### Attempt <n> - <UTC time> -
+  no_progress` entry, `factory-settle <task-id> "no_progress: <what repeats>"`
+  on its own, and return `no_progress`.
+- **Project rules** (`Factory rule <name>: ...`) are lessons the project
+  enforces: a reminder comes with the call's result, or the call is refused and
+  the run goes on. Do what the rule says; if the task truly needs what it
+  refuses, say so in your result. Never work around one.
 
 ## Procedure
 

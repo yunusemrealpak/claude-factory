@@ -26,6 +26,8 @@
 #      triggers, criteria files, must-haves, the preflight's start check
 #  15  unattended permissions and scheduling: factory-allow, factory-next schtasks
 #  16  escalation: factory-notify, question deadlines, defaults and expiry
+#  19  3.6: lessons (category, retire_when, the overlap check, update, check),
+#      rules through factory-retro-apply, the retro digest's view of both
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$HERE/../bin:$PATH"
@@ -44,7 +46,7 @@ echo "sandbox ${WORK}"
 echo
 
 total_pass=0; total_fail=0; failed_suites=""
-for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+for n in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 19; do
   case "$want" in all|"$n") ;; *) continue ;; esac
   [ -f "$HERE/suite${n}.sh" ] || continue
   echo "--- suite ${n} ---"
