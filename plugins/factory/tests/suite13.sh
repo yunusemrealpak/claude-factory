@@ -306,6 +306,25 @@ out="$(factory-finish --tasks C1-01,C1-02 --no-full --halted "infra: two agents 
 check "--json prints the object" 'printf "%s" "$out" | jq -e ".halted" >/dev/null' "$out"
 check "a halted run keeps its lock, marked halted" '[ "$(jq -r .state .factory/run.lock)" = halted ]'
 
+echo "=== letters that are not ASCII"
+# Windows decodes text in its ANSI code page unless told otherwise: cp1254 on a
+# Turkish system cannot decode Ş or Ğ written as UTF-8, and preflight died
+# reading the task file back from git. Á and ō fail cp1252 the same way.
+newproj tr
+TR='Şirket ödemesi: Ğğ Şş İı çöü — Á ō → ✓'
+sed -i.bak "s/^title: task C1-01\$/title: ${TR}/" tasks/backlog/C1-01.md && rm -f tasks/backlog/C1-01.md.bak
+printf '\n## Notes\n%s\n' "$TR" >> tasks/backlog/C1-01.md
+git add -A; git commit -qm "$TR"
+out="$(factory-preflight --json 2>&1)"; rc=$?
+check "preflight reads a committed task written in Turkish" '[ $rc -eq 0 ] && printf "%s" "$out" | jq -e ".ok" >/dev/null' "$out"
+build C1-01 core/src/a.src core/tests/a.t
+factory-check C1-01 >/dev/null 2>&1
+out="$(settle C1-01 "CHECK RESULT: GREEN - ${TR}")"
+check "...it checks and lands" 'printf "%s" "$out" | grep -qE "^SETTLED C1-01 LANDED [0-9a-f]{7,}$"' "$out"
+check "...with its title intact in the commit" '[ "$(git log -1 --format=%s)" = "C1-01: ${TR}" ]' "$(git log -1 --format=%s)"
+out="$(factory-finish --tasks C1-01 --json 2>&1)"
+check "...and the run finishes, its JSON intact" 'printf "%s" "$out" | jq -e ".done | index(\"C1-01\")" >/dev/null 2>&1 || printf "%s" "$out" | jq -e . >/dev/null' "$(printf "%s" "$out" | tail -5)"
+
 echo
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]

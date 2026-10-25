@@ -75,7 +75,7 @@ def line():
     cap = os.path.join(F, "autonomy-cap")
     if os.path.exists(cap):
         try:
-            parts.append("BREAKER: " + open(cap).read().splitlines()[1])
+            parts.append("BREAKER: " + open(cap, encoding="utf-8").read().splitlines()[1])
         except (OSError, IndexError):
             parts.append("BREAKER: level capped")
     return "; ".join(parts)
@@ -109,6 +109,13 @@ def write():
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     if not os.path.isfile(os.path.join(F, "active")):
         sys.exit(0)
     if "--line" in sys.argv:

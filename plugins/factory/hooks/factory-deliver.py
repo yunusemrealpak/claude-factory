@@ -53,7 +53,7 @@ def read(path):
 
 
 def git(*args):
-    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, errors="replace")
+    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, r.stdout.strip()
 
 
@@ -185,7 +185,7 @@ def deliver(cid, expected, skip, started):
         with open(wait, "w", encoding="utf-8") as fh:
             fh.write("at=%d\naudit=%d\n" % (int(time.time()), 1 if expected else 0))
         return "DELIVER WAIT %s: %s" % (cid, "; ".join(w for _, w in waiting))
-    open(os.path.join(P, cid + ".pending"), "w").close()
+    open(os.path.join(P, cid + ".pending"), "w", encoding="utf-8").close()
     if os.path.exists(wait):
         os.remove(wait)
     start_publisher(cid)
@@ -231,4 +231,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

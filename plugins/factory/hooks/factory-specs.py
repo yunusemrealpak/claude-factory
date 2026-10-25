@@ -398,7 +398,7 @@ def test_files(ledger_rel):
         pat = re.compile(rx)
     except re.error:
         pat = re.compile(DEFAULT_TESTS)
-    r = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=ROOT, capture_output=True, text=True,
+    r = subprocess.run(["git", "ls-files", "-co", "--exclude-standard"], cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
                        errors="replace")
     if r.returncode == 0:
         names = [l.strip() for l in r.stdout.splitlines() if l.strip()]
@@ -445,4 +445,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

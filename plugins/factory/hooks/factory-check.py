@@ -214,7 +214,7 @@ def task_file(task_id):
 
 def git(*args):
     try:
-        r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, errors="replace")
+        r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
         return r.returncode, r.stdout
     except OSError:
         return 1, ""
@@ -277,7 +277,7 @@ def load_units(check):
         return None, None
     if isinstance(spec, str):
         try:
-            r = subprocess.run([bash(), "-c", spec], cwd=ROOT, capture_output=True, text=True)
+            r = subprocess.run([bash(), "-c", spec], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace")
             spec = json.loads(r.stdout)
         except (OSError, ValueError) as err:
             return None, "check.units did not print a JSON list (%s)" % err
@@ -973,7 +973,7 @@ class Run:
         self.log.flush()
         started = time.time()
         try:
-            r = subprocess.run([bash(), "-c", cmd], cwd=self.cwd, capture_output=True, text=True, errors="replace")
+            r = subprocess.run([bash(), "-c", cmd], cwd=self.cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
             out, rc = (r.stdout or "") + (r.stderr or ""), r.returncode
         except OSError as err:
             out, rc = str(err), 127
@@ -2128,4 +2128,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

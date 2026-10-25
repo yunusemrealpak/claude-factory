@@ -116,7 +116,7 @@ def build(proposed=False, change=None):
                      "audit": fast.get("effort_audit") or "high"}
 
     ids = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-ids.sh"), "check", ROOT],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
     if ids.returncode != 0:
         out["problems"] += [l for l in ids.stdout.splitlines() if l.strip()] or ["factory-ids check failed"]
 
@@ -247,7 +247,7 @@ def build(proposed=False, change=None):
                 % (len(chain), len(active), " -> ".join(chain[:12]) + (" ..." if len(chain) > 12 else ""), why))
 
     try:
-        st = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--", "."], capture_output=True, text=True)
+        st = subprocess.run(["git", "-C", ROOT, "status", "--porcelain", "--", "."], capture_output=True, text=True, encoding="utf-8", errors="replace")
         mine = [l[3:] for l in st.stdout.splitlines() if l[3:] and not l[3:].startswith(FACTORY_PATHS)]
         if mine:
             out["warnings"].append("uncommitted work that is not the factory's (never swept into a task commit, "
@@ -268,7 +268,7 @@ APPROVED_KEYS = ("acceptance", "needs_human", "untested_ok", "allow_test_removal
 
 
 def git(*args):
-    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True)
+    r = subprocess.run(["git", "-C", ROOT] + list(args), capture_output=True, text=True, encoding="utf-8", errors="replace")
     return r.returncode, r.stdout, r.stderr
 
 
@@ -395,7 +395,7 @@ def record_start(plan, change=None):
             json.dump(lock, fh)
         return "kept"
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "census", "--json"],
-                       capture_output=True, text=True, cwd=ROOT)
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT)
     try:
         census = json.loads(r.stdout)
     except ValueError:
@@ -417,18 +417,18 @@ def delivery_gate(change):
     level = "local"
     try:
         r = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-autonomy.sh")],
-                           capture_output=True, text=True, cwd=ROOT, timeout=20)
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, timeout=20)
         level = (r.stdout.strip() or "local").split()[0]
     except (OSError, subprocess.SubprocessError, IndexError):
         pass
     if change:
         b = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-branch.sh"), change],
-                           capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if b.returncode != 0:
             problems.append((b.stdout.strip() or b.stderr.strip() or "factory-branch refused").splitlines()[0])
     if level == "merge":
         q = subprocess.run([bash(), os.path.join(HOOK_DIR, "factory-quota.sh"), "check"],
-                           capture_output=True, text=True, cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT, env=dict(os.environ, FACTORY_ROOT=ROOT))
         if q.returncode != 0:
             problems.append((q.stdout.strip() or "quota check failed").splitlines()[0]
                             + " - at level merge a new change does not start on a guess")
@@ -459,7 +459,7 @@ def main(argv):
     if "--start" in argv and plan["ok"] and "--proposed" not in argv:
         plan["base"] = record_start(plan, change)
         try:
-            plan["start_head"] = json.load(open(os.path.join(F, "run-start.json"))).get("head")
+            plan["start_head"] = json.load(open(os.path.join(F, "run-start.json"), encoding="utf-8")).get("head")
         except (OSError, ValueError):
             pass
         for t in plan["tasks"]:
@@ -512,4 +512,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))

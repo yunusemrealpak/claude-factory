@@ -73,7 +73,7 @@ def load_plan():
 
 
 def sh(script, *args):
-    r = subprocess.run([bash(), os.path.join(HOOK_DIR, script)] + list(args), capture_output=True, text=True,
+    r = subprocess.run([bash(), os.path.join(HOOK_DIR, script)] + list(args), capture_output=True, text=True, encoding="utf-8",
                        cwd=ROOT, errors="replace", env=dict(os.environ, FACTORY_ROOT=ROOT))
     return r.returncode, ((r.stdout or "") + (r.stderr or "")).strip()
 
@@ -291,7 +291,7 @@ def plan_check(changes, out):
     if not changes:
         return
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-plancheck.py")] + changes + ["--json"],
-                       capture_output=True, text=True, cwd=ROOT, errors="replace")
+                       capture_output=True, text=True, encoding="utf-8", cwd=ROOT, errors="replace")
     try:
         res = json.loads(r.stdout or "{}")
     except ValueError:
@@ -351,14 +351,14 @@ def start_check(cfg, base, out):
     mode = str((cfg.get("check") or {}).get("start_full") or "off").lower()
     if mode not in ("auto", "always"):
         return
-    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=ROOT).stdout.strip()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=ROOT).stdout.strip()
     if mode == "auto":
         last = full_record()
         if last.get("verdict") == "green" and last.get("clean") == "yes" and head and last.get("head") == head:
             out["notes"].append("start check skipped: the last full check was green at this commit (%s)" % head[:12])
             return
     r = subprocess.run([sys.executable, os.path.join(HOOK_DIR, "factory-check.py"), "--full"], capture_output=True,
-                       text=True, cwd=ROOT, errors="replace")
+                       text=True, encoding="utf-8", cwd=ROOT, errors="replace")
     lines = [l for l in (r.stdout or "").splitlines() if l.strip()]
     green = r.returncode == 0
     with open(os.path.join(F, "start-check"), "w", encoding="utf-8") as fh:
@@ -494,4 +494,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Text in and out is UTF-8 whatever the system's code page (cp1254 on a
+    # Turkish Windows cannot decode every letter a task file holds).
+    for _stream in (sys.stdin, sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     sys.exit(main(sys.argv[1:]))
